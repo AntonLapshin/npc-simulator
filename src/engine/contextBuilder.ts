@@ -135,6 +135,8 @@ export function buildConsequenceContext(
     "Movement is immediate but must be physically reachable.",
     "Do not move actors outside the scene.",
     "Do not move actors into non-passable objects.",
+    "MOVEMENT RULE: if the action text describes movement (walk/go/move/run/step/come/approach/head/enter/leave/follow/closer/toward/next to),",
+    "the acting actor's patch MUST include x and y with a NEW position reflecting that movement; if it names another actor, the new position MUST be strictly closer to that actor.",
   ];
   if (feedback) {
     lines.push("", "Validation Feedback (previous output was invalid)", "", feedback);

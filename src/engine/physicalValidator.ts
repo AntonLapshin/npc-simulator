@@ -145,9 +145,70 @@ export function validateConsequence(
   // yourself", where a short greeting quote is a reasonable rendering).
   if (action) {
     errors.push(...validateSpeechPreservation(action.text, normalized.narrative));
+    errors.push(...validateMovementIntent(world, normalized, action));
   }
 
   return { valid: errors.length === 0, errors };
+}
+
+/** True when the action text explicitly describes movement. */
+export function looksLikeMovementIntent(text: string): boolean {
+  if (
+    /\b(walk|walks|walking|go|goes|going|move|moves|moving|moved|run|runs|running|step|steps|stepping|come|comes|coming|came|approach|approaches|approaching|head|heads|heading|enter|enters|entering|leave|leaves|leaving|follow|follows|following|join|joins|joining|return|returns|returning|advance|advances|proceed|shift|slide|stroll|hurry|rush|rushing)\b/i.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  return /\b(closer|close to|nearer|toward|towards|up to|next to|beside|over to)\b/i.test(text);
+}
+
+/** Find an actor referenced by name or id inside free-form action text. */
+function findMentionedActor(world: World, actingActorId: string, actionText: string): { id: string; x: number; y: number } | undefined {
+  const lowered = actionText.toLowerCase();
+  for (const a of world.actors) {
+    if (a.id === actingActorId) continue;
+    if (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) return a;
+    if (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase())) return a;
+  }
+  return undefined;
+}
+
+function validateMovementIntent(
+  world: World,
+  normalized: { actorPatches: { actorId: string; x?: number; y?: number }[] },
+  action: Action,
+): string[] {
+  const errors: string[] = [];
+  if (!looksLikeMovementIntent(action.text)) return errors;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor) return errors;
+  const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+  if (!patch || patch.x === undefined || patch.y === undefined) {
+    errors.push(
+      `action implies movement ("${action.text.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement`,
+    );
+    return errors;
+  }
+  if (patch.x === actor.x && patch.y === actor.y) {
+    errors.push(
+      `action implies movement ("${action.text.slice(0, 80)}") but acting actor (${action.actorId}) position is unchanged (${patch.x}, ${patch.y}): move to a different reachable position`,
+    );
+    return errors;
+  }
+  // When the action names another actor ("toward Tanya"), the new
+  // position must actually get closer to that actor.
+  const target = findMentionedActor(world, action.actorId, action.text);
+  if (target) {
+    const oldDist = Math.hypot(actor.x - target.x, actor.y - target.y);
+    const newDist = Math.hypot(patch.x - target.x, patch.y - target.y);
+    if (!(newDist < oldDist)) {
+      errors.push(
+        `action says to move toward ${target.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${target.id} at (${target.x}, ${target.y})`,
+      );
+    }
+  }
+  return errors;
 }
 
 /** Double- and single-quoted segments (content length >= 2). */

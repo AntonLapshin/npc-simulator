@@ -120,10 +120,18 @@ export function renderTurnStory(
     actionChosen?.actorId ?? userSubmitted?.actorId ?? turnStarted?.actorId ?? tickEntries[0]?.actorId ?? "?";
   const actorIdForColor = actorId;
   const isUser = userSubmitted !== undefined || (opts.userActorId !== undefined && actorId === opts.userActorId);
-  // Every non-error line carries this turn's actor color so consecutive
-  // turns are visually distinct; errors/fallbacks are always red.
-  const ok = (s: string): string => (useColor ? paintActor(s, actorIdForColor) : s);
+  // Roster-aware colors guarantee every character gets its own color (up
+  // to the palette size): the color is assigned by sorted roster position
+  // instead of a bare hash, so anton/dana-style hash collisions can't
+  // happen. Every non-error line carries this turn's actor color so
+  // consecutive turns are visually distinct; errors/fallbacks are always
+  // red.
+  const rosterIds = actors.map((a) => a.id);
+  const ok = (s: string): string => (useColor ? paintActor(s, actorIdForColor, rosterIds) : s);
   const errPaint = (s: string): string => (useColor ? paintError(s) : s);
+  // Paint a line in a *specific* actor's own color (for per-character
+  // mentions inside another actor's turn: changes + affected lists).
+  const asActor = (s: string, id: string): string => (useColor ? paintActor(s, id, rosterIds) : s);
 
   lines.push(ok(`-- tick ${tick} | ${actorLabel(actorId, actors, opts.userActorId)} --`));
 
@@ -215,7 +223,9 @@ export function renderTurnStory(
     if (actorPatches.length > 0) {
       lines.push(ok(`  changes:`));
       for (const p of actorPatches as ActorPatch[]) {
-        lines.push(ok(`    - ${shortName(p.actorId, actors)}: ${summarizeActorPatch(p, max)}`));
+        // Each change line carries the *patched* actor's own color so
+        // every character is visually distinct even inside one turn.
+        lines.push(asActor(`    - ${shortName(p.actorId, actors)}: ${summarizeActorPatch(p, max)}`, p.actorId));
       }
     } else {
       lines.push(ok(`  changes: (none — no actor patches)`));
@@ -237,9 +247,17 @@ export function renderTurnStory(
       const affected = actors.filter((a) => patchedIds.has(a.id));
       const unaffected = actors.filter((a) => !patchedIds.has(a.id));
       lines.push(ok(`  affected by event (patched):`));
-      lines.push(ok(affected.length > 0 ? affected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`));
+      if (affected.length > 0) {
+        for (const a of affected) lines.push(asActor(`    - ${a.name}`, a.id));
+      } else {
+        lines.push(ok(`    (none)`));
+      }
       lines.push(ok(`  not affected (no patch — no recorded reaction):`));
-      lines.push(ok(unaffected.length > 0 ? unaffected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`));
+      if (unaffected.length > 0) {
+        for (const a of unaffected) lines.push(asActor(`    - ${a.name}`, a.id));
+      } else {
+        lines.push(ok(`    (none)`));
+      }
     } else if (patchedIds.size > 0) {
       lines.push(ok(`  affected by event (patched):`));
       for (const id of patchedIds) lines.push(ok(`    - ${id}`));
