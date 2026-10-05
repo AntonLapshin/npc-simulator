@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "id": "office",
+  "title": "Office: Jeff is a new coworker",
+  "narrative": "Jeff enters the door to the office.",
+  "userActorId": "jeff",
+  "order": ["jeff", "ana", "dan"],
+  "scene": {
+    "width": 20,
+    "height": 20,
+    "objects": [
+      {
+        "id": "wall_north",
+        "name": "North wall",
+        "description": "A solid office wall.",
+        "x": 0,
+        "y": 0,
+        "w": 20,
+        "h": 1,
+        "passable": false,
+        "blocksVision": true,
+        "blocksSound": true
+      },
+      {
+        "id": "wall_south",
+        "name": "South wall",
+        "description": "A solid office wall.",
+        "x": 0,
+        "y": 19,
+        "w": 20,
+        "h": 1,
+        "passable": false,
+        "blocksVision": true,
+        "blocksSound": true
+      },
+      {
+        "id": "wall_east",
+        "name": "East wall",
+        "description": "A solid office wall.",
+        "x": 19,
+        "y": 0,
+        "w": 1,
+        "h": 20,
+        "passable": false,
+        "blocksVision": true,
+        "blocksSound": true
+      },
+      {
+        "id": "wall_west_upper",
+        "name": "West wall upper section",
+        "description": "A solid office wall.",
+        "x": 0,
+        "y": 1,
+        "w": 1,
+        "h": 8,
+        "passable": false,
+        "blocksVision": true,
+        "blocksSound": true
+      },
+      {
+        "id": "wall_west_lower",
+        "name": "West wall lower section",
+        "description": "A solid office wall.",
+        "x": 0,
+        "y": 11,
+        "w": 1,
+        "h": 8,
+        "passable": false,
+        "blocksVision": true,
+        "blocksSound": true
+      },
+      {
+        "id": "door",
+        "name": "Door",
+        "description": "The office entrance door. It is open.",
+        "x": 0,
+        "y": 9,
+        "w": 1,
+        "h": 2,
+        "passable": true,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
+        "id": "ana_desk",
+        "name": "Ana's desk",
+        "description": "A desk with a laptop and some papers.",
+        "x": 7,
+        "y": 5,
+        "w": 3,
+        "h": 2,
+        "passable": false,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
+        "id": "dan_desk",
+        "name": "Dan's desk",
+        "description": "A desk with design documents and a monitor.",
+        "x": 14,
+        "y": 5,
+        "w": 3,
+        "h": 2,
+        "passable": false,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
+        "id": "coffee_machine",
+        "name": "Coffee machine",
+        "description": "An office coffee machine near the east wall.",
+        "x": 18,
+        "y": 12,
+        "w": 1,
+        "h": 1,
+        "passable": false,
+        "blocksVision": false,
+        "blocksSound": false
+      }
+    ]
+  },
+  "actors": [
+    {
+      "id": "jeff",
+      "name": "Jeff",
+      "persona": "Jeff is a new coworker. He wants to make a good first impression and find his place in the office.",
+      "x": 1,
+      "y": 10,
+      "state": "standing near the entrance",
+      "emotion": "nervous",
+      "goal": "Introduce himself to the team.",
+      "memories": ["Jeff just entered the office."],
+      "beliefs": ["This is the office where Jeff will work."],
+      "relationships": []
+    },
+    {
+      "id": "ana",
+      "name": "Ana",
+      "persona": "Ana is an engineer. She is practical, friendly, and usually helpful toward new people.",
+      "x": 8,
+      "y": 8,
+      "state": "sitting at her desk and working on a laptop",
+      "emotion": "focused",
+      "goal": "Finish a small engineering task before lunch.",
+      "memories": [
+        "Ana arrived at the office this morning.",
+        "Ana started working on her current task."
+      ],
+      "beliefs": [
+        "Dan is a designer.",
+        "The office coffee machine is usually working."
+      ],
+      "relationships": ["Ana knows Dan as a coworker."]
+    },
+    {
+      "id": "dan",
+      "name": "Dan",
+      "persona": "Dan is a designer. He becomes irritable when interrupted during urgent work.",
+      "x": 15,
+      "y": 8,
+      "state": "sitting at his desk and staring at a monitor",
+      "emotion": "stressed",
+      "goal": "Finish an urgent design draft.",
+      "memories": ["Dan has been working on the same design for several hours."],
+      "beliefs": ["The design deadline is close."],
+      "relationships": ["Dan knows Ana as a coworker."]
+    }
+  ]
+}

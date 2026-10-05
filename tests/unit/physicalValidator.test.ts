@@ -1,0 +1,101 @@
+import { describe, expect, it } from "vitest";
+import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { makeTinyWorld } from "../helpers.js";
+import type { ConsequenceResult } from "../../src/types.js";
+
+function baseResult(): ConsequenceResult {
+  return { narrative: "Something happens.", actorPatches: [], objectPatches: [], reasoning: "r" };
+}
+
+describe("physicalValidator", () => {
+  it("accepts valid movement", () => {
+    const world = makeTinyWorld();
+    const result = baseResult();
+    result.actorPatches = [{ actorId: "u", x: 2, y: 1 }];
+    expect(validateConsequence(world, result)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("rejects out-of-bounds movement", () => {
+    const world = makeTinyWorld();
+    const result = baseResult();
+    result.actorPatches = [{ actorId: "u", x: 99, y: 99 }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/outside scene/);
+  });
+
+  it("rejects movement into non-passable object", () => {
+    const world = makeTinyWorld();
+    world.scene.objects.push({
+      id: "rock", name: "Rock", description: "A rock.",
+      x: 2, y: 1, w: 1, h: 1, passable: false, blocksVision: false, blocksSound: false,
+    });
+    const result = baseResult();
+    result.actorPatches = [{ actorId: "u", x: 2, y: 1 }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/non-passable/);
+  });
+
+  it("rejects unreachable movement (walled off)", () => {
+    const world = makeTinyWorld();
+    // Vertical wall splitting the 6x6 scene at x=3.
+    world.scene.objects.push({
+      id: "wall", name: "Wall", description: "A wall.",
+      x: 3, y: 0, w: 1, h: 6, passable: false, blocksVision: true, blocksSound: true,
+    });
+    const result = baseResult();
+    result.actorPatches = [{ actorId: "u", x: 4, y: 4 }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/no valid path/);
+  });
+
+  it("rejects unknown actor id", () => {
+    const world = makeTinyWorld();
+    const result = baseResult();
+    result.actorPatches = [{ actorId: "ghost", emotion: "happy" }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/unknown actor id/);
+  });
+
+  it("rejects unknown object id", () => {
+    const world = makeTinyWorld();
+    const result = baseResult();
+    result.objectPatches = [{ objectId: "ghost", description: "x" }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/unknown object id/);
+  });
+
+  it("rejects invalid boolean flags", () => {
+    const world = makeTinyWorld();
+    world.scene.objects.push({
+      id: "door", name: "Door", description: "A door.",
+      x: 0, y: 0, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
+    const result = baseResult();
+    result.objectPatches = [{ objectId: "door", passable: "yes" as unknown as boolean }];
+    const v = validateConsequence(world, result);
+    expect(v.valid).toBe(false);
+    expect(v.errors.length).toBeGreaterThan(0);
+  });
+
+  it("rejects invalid coordinates (x without y, non-finite)", () => {
+    const world = makeTinyWorld();
+    const partial = baseResult();
+    partial.actorPatches = [{ actorId: "u", x: 2 }];
+    expect(validateConsequence(world, partial).valid).toBe(false);
+
+    const nan = baseResult();
+    nan.actorPatches = [{ actorId: "u", x: NaN, y: 1 }];
+    expect(validateConsequence(world, nan).valid).toBe(false);
+  });
+
+  it("rejects schema-invalid payloads", () => {
+    const world = makeTinyWorld();
+    const v = validateConsequence(world, { narrative: "", actorPatches: [], objectPatches: [], reasoning: "r" });
+    expect(v.valid).toBe(false);
+  });
+});

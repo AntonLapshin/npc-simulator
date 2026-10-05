@@ -1,0 +1,9 @@
+node_modules/
+dist/
+logs/*.jsonl
+!logs/.gitkeep
+saves/*.json
+!saves/.gitkeep
+coverage/
+*.log
+.DS_Store
