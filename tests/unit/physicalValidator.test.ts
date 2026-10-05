@@ -98,4 +98,31 @@ describe("physicalValidator", () => {
     const v = validateConsequence(world, { narrative: "", actorPatches: [], objectPatches: [], reasoning: "r" });
     expect(v.valid).toBe(false);
   });
+
+  it("rejects invented dialogue not present in the action", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: '"Greeting all!"' };
+    const invented: ConsequenceResult = {
+      narrative:
+        "Anton stands up straight and greets all, his nervous expression softening slightly as he says, 'Hello, everyone! I'm Anton, and I'll be working here from now on.'",
+      actorPatches: [],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const v = validateConsequence(world, invented, action);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/invent/);
+  });
+
+  it("accepts narratives that preserve the action's exact words", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: '"Greeting all!"' };
+    const faithful: ConsequenceResult = {
+      narrative: 'U straightens up and says "Greeting all!" to the room.',
+      actorPatches: [],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, faithful, action)).toEqual({ valid: true, errors: [] });
+  });
 });

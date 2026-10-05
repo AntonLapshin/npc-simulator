@@ -59,14 +59,11 @@ describe("text UI command parsing (§17.2)", () => {
 });
 
 describe("text UI panels (§17.1)", () => {
-  it("scene panel defaults to subjective view, debug shows objective world", () => {
+  it("scene panel is trimmed: no nearby/latest, narrative only on request", () => {
     const world = makeTinyWorld();
-    const subjective = renderScenePanel(world, { viewerId: "u", debug: false });
-    expect(subjective).toContain("Tiny");
-    expect(subjective).toContain("subjective view");
-    const objective = renderScenePanel(world, { debug: true });
-    expect(objective).toContain("objective world");
-    expect(objective).toContain("U (u)");
+    expect(renderScenePanel(world, { viewerId: "u", debug: false })).toBe("");
+    expect(renderScenePanel(world, { debug: true })).toBe("");
+    expect(renderScenePanel(world, { viewerId: "u", includeNarrative: true })).toContain("Narrative: A small room.");
   });
 
   it("actor panel shows state/emotion/goal/lists", () => {
@@ -101,7 +98,7 @@ describe("text UI session flow", () => {
 
   it("look/history/memories work on a loaded world", async () => {
     const { session } = makeSession();
-    expect((await handleLine("look", session, ask)).output).toContain("Tiny");
+    expect((await handleLine("look", session, ask)).output).toContain("trimmed");
     expect((await handleLine("history", session, ask)).output).toContain("no history");
     expect((await handleLine("memories u", session, ask)).output).toContain("memories");
     expect((await handleLine("help", session, ask)).output).toContain("action:");
@@ -111,7 +108,11 @@ describe("text UI session flow", () => {
     const { session, logger } = makeSession();
     const res = await handleLine("next", session, ask);
     expect(session.world!.tick).toBe(1);
-    expect(res.output).toContain("acted");
+    // User turns are not echoed and the scene panel is trimmed (no Nearby/Latest).
+    expect(res.output).not.toContain("Nearby");
+    expect(res.output).not.toContain("Latest");
+    expect(res.output).not.toMatch(/Tick \d+/);
+    expect(res.output).not.toContain("acted");
     expect(logger.store.byEvent("turn_completed")).toHaveLength(1);
   });
 
@@ -119,8 +120,9 @@ describe("text UI session flow", () => {
     const { session } = makeSession();
     const text = "Walk to N and say hello, newcomer style!";
     const res = await handleLine(`action: ${text}`, session, ask);
-    expect(res.output).toContain(text);
+    // User text lands in history (no Latest echo); NPC + Your-turn prompt follow.
     expect(session.world!.history[0]).toContain(text);
+    expect(res.output).toContain("Your turn");
   });
 
   it("action: on an NPC turn refuses instead of mutating", async () => {
@@ -130,12 +132,20 @@ describe("text UI session flow", () => {
     expect(res.output).toContain("Not your turn");
   });
 
-  it("debug toggles the view", async () => {
+  it("debug toggles concise story tracing", async () => {
     const { session } = makeSession();
     await handleLine("debug on", session, ask);
     expect(session.debug).toBe(true);
+    // Scene stays trimmed even in debug; story trace carries the detail.
     const out = (await handleLine("look", session, ask)).output;
-    expect(out).toContain("objective world");
+    expect(out).toContain("trimmed");
+    await handleLine("next", session, ask);
+    const story = (await handleLine("story", session, ask)).output;
+    expect(story).toContain("proposal:");
+    expect(story).toContain("selection:");
+    expect(story).toContain("consequence:");
+    expect(story).toContain("validation:");
+    expect(story).not.toContain("secret-prompt");
   });
 
   it("runs the office scenario end to end with mocks", async () => {
@@ -146,7 +156,9 @@ describe("text UI session flow", () => {
     expect(res.output).toContain("Jeff");
     // User turn + 2 NPC turns auto-advance (no manual `next` needed).
     expect(session.world!.tick).toBe(3);
-    expect(res.output).toContain("NPC");
+    // Single perceivable NPC lines, no tick headers or double messages.
+    expect(res.output).not.toMatch(/Tick \d+/);
+    expect(res.output).not.toContain("acted");
     expect(res.output).toContain("Your turn");
   });
 

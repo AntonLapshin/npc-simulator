@@ -7,11 +7,7 @@
 
 import type { Actor, SceneObject, World } from "../../types.js";
 import type { LogEntry } from "../../logging/logTypes.js";
-import {
-  getVisibleActors,
-  getVisibleObjects,
-  getActorById,
-} from "../../engine/perceptionHelpers.js";
+import { actorColorCode, paint, paintError } from "../../logging/colors.js";
 
 export type Command =
   | { kind: "start"; path?: string }
@@ -29,6 +25,7 @@ export type Command =
   | { kind: "logTail"; limit?: number }
   | { kind: "logModule"; module: string; limit?: number }
   | { kind: "logTick"; tick: number; limit?: number }
+  | { kind: "story"; tick?: number; limit?: number }
   | { kind: "debug"; on: boolean }
   | { kind: "help" }
   | { kind: "quit" }
@@ -100,6 +97,23 @@ export function parseCommand(line: string): Command | ParseError {
         ? { kind: "error", message: "Usage: history [n]" }
         : { kind: "history", limit };
     }
+    case "story": {
+      if (rest.length === 0) return { kind: "story" };
+      if (rest.length === 1) {
+        const n = numArg(rest[0]);
+        return n === undefined
+          ? { kind: "error", message: "Usage: story [tick] [n]" }
+          : { kind: "story", tick: n };
+      }
+      if (rest.length === 2) {
+        const tick = numArg(rest[0]);
+        const limit = numArg(rest[1]);
+        return tick === undefined || limit === undefined
+          ? { kind: "error", message: "Usage: story [tick] [n]" }
+          : { kind: "story", tick, limit };
+      }
+      return { kind: "error", message: "Usage: story [tick] [n]" };
+    }
     case "save":
       return { kind: "save", path: rest[0] };
     case "load":
@@ -160,7 +174,7 @@ export const HELP_TEXT = [
   "  start [path]              Load a scenario JSON (default: scenarios/office.json).",
   "  next                      Advance one turn (on an NPC turn, auto-runs NPCs until your turn).",
   "  action: <text>            Act on your turn — NPCs then respond automatically until your next turn.",
-  "  look                      Scene panel (title, tick, current actor, narrative, nearby).",
+  "  look                      Scene narrative (opening text only; details via look actor/object).",
   "  look actor <id>           Actor panel (state, emotion, goal, memories, beliefs, relations).",
   "  look object <id>          Object panel (description, rectangle, flags).",
   "  thoughts [actor]          Show one-time thoughts (default: your actor).",
@@ -168,17 +182,18 @@ export const HELP_TEXT = [
   "  beliefs [actor]           Show beliefs (default: your actor).",
   "  relationships [actor]     Show relationships (default: your actor).",
   "  history [n]               Show world history (default: last 10).",
+  "  story [tick] [n]          Show concise story trace (module chain) for a tick or last n turns.",
   "  save [path]               Save world JSON (default: saves/<id>_tick<tick>.json).",
   "  load <path>               Load a saved world JSON.",
   "  log tail [n]              Show recent log entries (default: last 10).",
   "  log module <module> [n]   Filter logs by module (turn, proposal, selection, ...).",
   "  log tick <tick> [n]       Filter logs by tick.",
-  "  debug on|off              Debug view: full world + LLM prompts/responses/reasoning.",
+  "  debug on|off              Debug view: concise story trace after each turn (no prompts).",
   "  help                      Show this help.",
   "  quit                      Exit.",
   "",
-  "Tip: on your turn, type a number shown in [brackets] to use a suggestion,",
-  "or type any free-form text (optionally prefixed with 'action:').",
+  "Tip: on your turn, just type what you do or say (optionally prefixed with 'action:').",
+  "No suggestions are generated for you — you decide freely.",
 ].join("\n");
 
 // --- Panels ----------------------------------------------------------------
@@ -187,52 +202,25 @@ function bullet(items: string[]): string {
   return items.length > 0 ? items.map((m) => `  - ${m}`).join("\n") : "  (none)";
 }
 
-function currentActorId(world: World): string {
-  return world.order[world.turnIndex % world.order.length] ?? "(none)";
-}
-
 /**
- * Scene panel (§17.1). Default view shows only what the user actor
- * perceives (visible actors/objects); debug view shows the objective
- * world (every actor and object with coordinates).
+ * Scene panel (§17.1, trimmed per UX request).
+ *
+ * "Nearby actors/objects" and the "Latest:" history tail were removed:
+ * they duplicated per-turn NPC output and added noise. The panel now
+ * shows only the opening narrative when `includeNarrative` is true,
+ * otherwise an empty string (callers skip empty panels).
  */
 export function renderScenePanel(
   world: World,
-  options: { viewerId?: string; debug?: boolean } = {},
+  _options: { viewerId?: string; debug?: boolean; includeNarrative?: boolean } = {},
 ): string {
-  const debug = options.debug ?? false;
-  const viewerId = options.viewerId ?? world.userActorId;
-  const viewer = getActorById(world, viewerId);
-  const current = currentActorId(world);
+  if (_options.includeNarrative) return `Narrative: ${world.narrative}`;
+  return "";
+}
 
-  let perception: string;
-  if (debug) {
-    perception = [
-      `Actors (${world.actors.length}): ${world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y}): ${a.state} [${a.emotion}]`).join(" | ")}`,
-      `Objects (${world.scene.objects.length}): ${world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ")}`,
-    ].join("\n");
-  } else if (viewer) {
-    const actors = getVisibleActors(world, viewer.id);
-    const objects = getVisibleObjects(world, viewer.id);
-    perception = [
-      `Nearby actors: ${actors.length > 0 ? actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y}): ${a.state}`).join(" | ") : "(none)"}`,
-      `Nearby objects: ${objects.length > 0 ? objects.map((o) => `${o.name} (${o.id}): ${o.description}`).join(" | ") : "(none)"}`,
-    ].join("\n");
-  } else {
-    perception = "(viewer unknown)";
-  }
-
-  const historyTail = world.history.slice(-2);
-  return [
-    `=== ${world.title} ===`,
-    `Tick ${world.tick} | turn ${world.turnIndex} | current actor: ${current}${current === world.userActorId ? " (you)" : ""}`,
-    `Narrative: ${world.narrative}`,
-    perception,
-    historyTail.length > 0 ? `Latest:\n${historyTail.map((h) => `  ${h}`).join("\n")}` : "",
-    debug ? "(debug view: objective world)" : `(subjective view: what ${viewer?.name ?? viewerId} perceives)`,
-  ]
-    .filter((l) => l.length > 0)
-    .join("\n");
+/** Strip legacy "Tick N - " prefixes so no ticks are ever displayed. */
+function stripTickPrefix(entry: string): string {
+  return entry.replace(/^Tick \d+ - /, "");
 }
 
 /** Actor panel (§17.1). */
@@ -274,22 +262,26 @@ export function renderSuggestions(suggestions: string[]): string {
 
 /** World history (most recent last; limit defaults to 10). */
 export function renderHistory(world: World, limit = 10): string {
-  const entries = world.history.slice(-limit);
+  const entries = world.history.slice(-limit).map(stripTickPrefix);
   if (entries.length === 0) return "(no history yet)";
   return entries.map((h) => `  ${h}`).join("\n");
 }
 
 /** One log entry as a single line. Debug adds reasoning/errors/prompt info. */
-export function formatLogEntry(entry: LogEntry, debug = false): string {
-  const head = `tick=${entry.tick} ${entry.module}/${entry.event}${entry.actorId ? ` actor=${entry.actorId}` : ""}`;
+export function formatLogEntry(entry: LogEntry, debug = false, color = false): string {
+  const actorBit = entry.actorId
+    ? ` actor=${color ? paint(entry.actorId, actorColorCode(entry.actorId)) : entry.actorId}`
+    : "";
+  const head = `tick=${entry.tick} ${entry.module}/${entry.event}${actorBit}`;
+  const errBit = (s: string): string => (color ? paintError(s) : s);
   if (!debug) {
     const extra = entry.error ? ` error=${truncate(entry.error, 160)}` : "";
-    return `${head}${extra}`;
+    return extra ? `${head}${errBit(extra)}` : head;
   }
   const parts = [head];
   if (entry.reasoning) parts.push(`reasoning=${truncate(entry.reasoning, 200)}`);
-  if (entry.validationErrors?.length) parts.push(`validationErrors=[${entry.validationErrors.map((e) => truncate(e, 120)).join("; ")}]`);
-  if (entry.error) parts.push(`error=${truncate(entry.error, 300)}`);
+  if (entry.validationErrors?.length) parts.push(errBit(`validationErrors=[${entry.validationErrors.map((e) => truncate(e, 120)).join("; ")}]`));
+  if (entry.error) parts.push(errBit(`error=${truncate(entry.error, 300)}`));
   if (entry.rawResponse) parts.push(`raw=${truncate(entry.rawResponse, 300)}`);
   if (entry.prompt) parts.push(`prompt=${truncate(entry.prompt, 200)}…`);
   if (entry.durationMs !== undefined) parts.push(`${entry.durationMs}ms`);

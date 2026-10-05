@@ -48,7 +48,7 @@ describe("golden office scenario", () => {
     const consequenceEngine = new MockConsequenceEngine(logger, {
       "hey guys, i'm a new team member, my name is jeff!": {
         narrative:
-          "Jeff speaks aloud to the office. Ana hears him clearly from her desk. Dan also hears him, but remains focused on his urgent design work.",
+          "Jeff speaks aloud to the office: \"Hey guys, I'm a new team member, my name is Jeff!\"",
         actorPatches: [
           {
             actorId: "jeff",
@@ -166,14 +166,12 @@ describe("golden office scenario", () => {
     const door = final.scene.objects.find((o) => o.id === "door")!;
     expect(door.description).toBe("The office entrance door. It is open.");
 
-    // World history: 2 entries per turn x 3 turns.
-    expect(final.history).toHaveLength(6);
+    // World history: 1 tickless entry per turn x 3 turns.
+    expect(final.history).toHaveLength(3);
     expect(final.history[0]).toContain("Jeff: Hey guys, I'm a new team member");
-    expect(final.history[1]).toContain("Jeff speaks aloud to the office.");
-    expect(final.history[2]).toContain("Ana: Walk over to Jeff and welcome him.");
-    expect(final.history[3]).toContain("Ana stands up from her desk");
-    expect(final.history[4]).toContain("Dan: Keep working");
-    expect(final.history[5]).toContain("Dan remains at his desk");
+    expect(final.history[0]).not.toMatch(/^Tick \d+ - /);
+    expect(final.history[1]).toContain("Ana: Walk over to Jeff and welcome him.");
+    expect(final.history[2]).toContain("Dan: Keep working");
 
     // Tick / turn advancement: 3 ticks, wraps back to jeff.
     expect(final.tick).toBe(3);

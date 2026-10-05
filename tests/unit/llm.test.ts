@@ -60,10 +60,16 @@ describe("llm json extraction", () => {
     expect(extractJsonPayload(`Sure! Here you go:\n${proposalJson}\nDone.`)).toBe(proposalJson);
   });
 
-  it("rejects empty and truncated responses", () => {
+  it("rejects empty and severely truncated responses", () => {
     expect(() => extractJsonPayload("   ")).toThrow();
-    expect(() => extractJsonPayload('{"suggestions": [')).toThrow();
+    expect(() => extractJsonPayload('{"suggestions": ')).toThrow();
     expect(() => extractJsonPayload("no json here")).toThrow();
+  });
+
+  it("repairs max_tokens-truncated tails (unclosed final string)", () => {
+    const truncated = `{"action": "Say hello.", "reasoning": "To gauge the situation without adding to his stress`;
+    const payload = extractJsonPayload(truncated);
+    expect(JSON.parse(payload)).toMatchObject({ action: "Say hello." });
   });
 });
 

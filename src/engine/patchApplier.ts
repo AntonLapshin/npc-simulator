@@ -54,8 +54,12 @@ export function applyConsequence(
   }
 
   const actorName = actorById.get(action.actorId)?.name ?? action.actorId;
-  next.history.push(`Tick ${world.tick} - ${actorName}: ${action.text}`);
-  next.history.push(`Tick ${world.tick} - ${result.narrative}`);
+  // Single history entry per turn: the acting actor's action text, with no
+  // tick prefix. The consequence narrative is logged (consequence_completed)
+  // but not duplicated here — it must describe only the acting actor
+  // (see TURN DISCIPLINE) so repeating it would double-report the turn.
+  // UI layers show this entry only when the viewer can perceive the actor.
+  next.history.push(`${actorName}: ${action.text}`);
   if (next.history.length > config.maxHistoryEntries) {
     next.history.splice(0, next.history.length - config.maxHistoryEntries);
   }

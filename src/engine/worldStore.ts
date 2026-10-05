@@ -60,7 +60,7 @@ export class WorldStore {
       turnIndex: this.world.turnIndex,
       actorId: action.actorId,
       input: { consequence: result, action },
-      output: { historyTail: this.world.history.slice(-2) },
+      output: { historyTail: this.world.history.slice(-1) },
     });
     return this.getWorld();
   }

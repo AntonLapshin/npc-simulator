@@ -204,8 +204,9 @@ async function autosave(world: World, deps: EngineDependencies): Promise<void> {
 
 /**
  * Run a single immediate turn for the current actor and return the next world.
- * User actors: propose (for suggestions) + getUserAction. NPC actors:
- * propose + select. Every stage is logged.
+ * User actors: no proposal/selection — the user decides freely via
+ * getUserAction (called with no suggestions). NPC actors: propose + select.
+ * Every stage is logged.
  */
 export async function runTurn(world: World, deps: EngineDependencies): Promise<World> {
   const config = depsConfig(deps);
@@ -226,13 +227,23 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
 
   let action: Action;
   if (actor.id === world.userActorId) {
-    const proposal = await deps.proposalEngine.propose(world, actor.id);
-    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
+    // User turns: no proposal, no selection. The user decides how to act
+    // without suggestions — skip both engines entirely so no
+    // proposal/selection LLM calls (or logs) happen for the user.
+    logger.log({
+      module: "proposal",
+      event: "proposal_skipped",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: actor.id,
+      input: { actorId: actor.id, reason: "user turn: user acts freely, no suggestions generated" },
+    });
+    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal skipped (user turn)` });
     report(deps, { stage: "waiting_user_input", actorId: actor.id, message: "waiting for your action…" });
     if (!deps.getUserAction) {
       throw new Error("getUserAction is required for user-controlled turns");
     }
-    const userText = await deps.getUserAction(actor.id, proposal.suggestions);
+    const userText = await deps.getUserAction(actor.id, []);
     if (!userText || userText.trim().length === 0) {
       logger.log({
         module: "turn",
@@ -240,7 +251,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: actor.id,
-        input: { suggestions: proposal.suggestions },
+        input: { suggestions: [] },
         error: "empty user action text",
       });
       throw new Error("empty user action text: request action again");
@@ -252,7 +263,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId: actor.id,
-      input: { suggestions: proposal.suggestions },
+      input: { suggestions: [] },
       output: action,
     });
   } else {
@@ -286,7 +297,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     turnIndex: world.turnIndex,
     actorId: action.actorId,
     input: { consequence, action },
-    output: { historyTail: patched.history.slice(-2) },
+    output: { historyTail: patched.history.slice(-1) },
   });
   logger.log({
     module: "turn",
@@ -294,7 +305,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     tick: world.tick,
     turnIndex: world.turnIndex,
     actorId: action.actorId,
-    output: { history: patched.history.slice(-2) },
+    output: { history: patched.history.slice(-1) },
   });
 
   const ticked = incrementTick(patched);

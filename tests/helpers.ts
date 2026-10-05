@@ -29,7 +29,7 @@ export function makeTestDeps(
     consequenceEngine: new MockConsequenceEngine(logger),
     logger,
     config: { ...defaultConfig, autosaveEnabled: false },
-    getUserAction: async (_actorId, suggestions) => suggestions[0] ?? "Do nothing.",
+    getUserAction: async (_actorId, _suggestions) => "Do nothing.",
     ...overrides,
   };
 }

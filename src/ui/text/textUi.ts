@@ -28,7 +28,7 @@ import type { Action, Actor, World } from "../../types.js";
 import { loadScenario } from "../../engine/scenarioLoader.js";
 import { getCurrentActor } from "../../engine/worldStore.js";
 import { loadWorld, saveWorld, defaultSavePath } from "../../engine/persistence.js";
-import { getActorById } from "../../engine/perceptionHelpers.js";
+import { getActorById, getAudibleActors, getVisibleActors } from "../../engine/perceptionHelpers.js";
 import { runTurn, type EngineDependencies } from "../../engine/turnOrchestrator.js";
 import { resolveConfig } from "../../config.js";
 import { Logger } from "../../logging/logger.js";
@@ -46,6 +46,7 @@ import {
   renderHistory,
   formatLogEntry,
 } from "./commands.js";
+import { loggedTicks, renderStoryRange, renderTurnStory } from "../../logging/storyTrace.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
@@ -90,9 +91,13 @@ export class TextSession {
     return this.world?.userActorId ?? "";
   }
 
-  showScene(): string {
+  showScene(includeNarrative = false): string {
     if (!this.world) return "No scenario loaded. Use: start [path]";
-    return renderScenePanel(this.world, { viewerId: this.viewerId(), debug: this.debug });
+    return renderScenePanel(this.world, {
+      viewerId: this.viewerId(),
+      debug: this.debug,
+      includeNarrative,
+    });
   }
 
   showActor(idOrEmpty: string | undefined): string {
@@ -178,7 +183,21 @@ async function loadScenarioFile(path: string, session: TextSession): Promise<str
   session.lastSuggestions = [];
   session.lastNarrative = world.narrative;
   session.lastAction = null;
-  return [`Loaded scenario: ${world.title} (you play ${world.userActorId}).`, session.showScene()].join("\n");
+  // Opening narrative is shown exactly once here — subsequent scene panels
+  // omit it (see TextSession.showScene).
+  return [`Loaded scenario: ${world.title} (you play ${world.userActorId}).`, session.showScene(true)].join("\n");
+}
+
+/**
+ * True when the observer can currently see or hear the target actor.
+ * Used to decide whether an NPC turn is shown to the user: imperceptible
+ * turns (e.g. someone quietly working across the room) produce no output.
+ */
+function isPerceivable(world: World, observerId: string, targetId: string): boolean {
+  if (observerId === targetId) return true;
+  if (getVisibleActors(world, observerId).some((a) => a.id === targetId)) return true;
+  if (getAudibleActors(world, observerId).some((a) => a.id === targetId)) return true;
+  return false;
 }
 
 async function runSingleTurn(
@@ -193,8 +212,9 @@ async function runSingleTurn(
   const includeScene = opts.includeScene ?? true;
   const out: string[] = [];
 
-  // Single-line loading indicator: runTurn awaits several sequential LLM
-  // calls (proposal → selection → consequence, each up to 60s). Exactly one
+  // Single-line loading indicator: runTurn awaits sequential LLM calls
+  // (NPC: proposal → selection → consequence; user: consequence only,
+  // each up to 60s). Exactly one
   // terminal line is used — it always shows the current pending stage and
   // is fully cleared when the turn finishes, so no spinner text hangs
   // around. The indicator pauses while the user is typing.
@@ -253,10 +273,18 @@ async function runSingleTurn(
     // Pause the spinner while the user types; resume for the slow
     // consequence call that follows the submitted action.
     pauseHeartbeat();
-    // Print directly so suggestions appear before the input prompt.
-    console.log(renderSuggestions(suggestions));
+    // User turns carry no suggestions (proposal is skipped) — prompt for
+    // free-form text directly instead of showing a suggestion list.
+    const promptText =
+      suggestions.length > 0
+        ? "action (number, 'action: <text>', or free text): "
+        : "action (free text, e.g. action: <what you do or say>): ";
+    if (suggestions.length > 0) {
+      // Print directly so suggestions appear before the input prompt.
+      console.log(renderSuggestions(suggestions));
+    }
     for (;;) {
-      const answer = (await ask("action (number, 'action: <text>', or free text): ")).trim();
+      const answer = (await ask(promptText)).trim();
       if (!answer) {
         console.log("Empty action — please enter what you do or say.");
         continue;
@@ -290,32 +318,46 @@ async function runSingleTurn(
   }
   stopIndicator();
   const entries = session.logger.store.all();
-  const lastPatch = entries.filter((e) => e.tick === beforeTick && e.event === "patch_applied").at(-1);
-  const historyTail = session.world.history.slice(-2);
-  session.lastNarrative = historyTail.at(-1) ?? "";
-  session.lastAction = { actorId: actor.id, text: historyTail.at(-2) ?? "" };
+  // Single history entry per turn ("Name: action text", no ticks). The
+  // consequence narrative is logged but never echoed — it must describe
+  // only the acting actor, and any observer reaction belongs to that
+  // observer's own future turn.
+  const historyEntry = session.world.history.at(-1) ?? "";
+  session.lastNarrative = historyEntry;
+  session.lastAction = { actorId: actor.id, text: historyEntry };
 
-  out.push(
-    isUser
-      ? `--- Tick ${beforeTick} — you (${actor.name}) acted ---`
-      : `--- Tick ${beforeTick} — ${actor.name} (${actor.id}, NPC) acted ---`,
-    ...historyTail.map((h) => `  ${h}`),
-  );
-  void lastPatch;
+  // The user's own action needs no echo — they just typed it.
+  // NPC turns are shown only when the user can currently perceive that
+  // actor (see or hear); imperceptible turns stay silent.
+  if (!isUser && session.world) {
+    if (isPerceivable(session.world, session.world.userActorId, actor.id)) {
+      out.push(historyEntry);
+    }
+  }
   const validationFailures = entries.filter((e) => e.tick === beforeTick && e.event === "validation_failed");
   if (session.debug && validationFailures.length > 0) {
     out.push("Validation failures (debug):");
-    for (const v of validationFailures) out.push(`  ${formatLogEntry(v, true)}`);
+    for (const v of validationFailures) out.push(`  ${formatLogEntry(v, true, true)}`);
+  }
+  if (session.debug && session.world) {
+    const roster = session.world.actors.map((a) => ({ id: a.id, name: a.name }));
+    out.push(
+      renderTurnStory(entries.filter((e) => e.tick === beforeTick), beforeTick, roster, {
+        userActorId: session.world.userActorId,
+        color: true,
+      }),
+    );
   }
   if (includeScene) out.push(session.showScene());
-  return out.join("\n");
+  return out.filter((p) => p.trim().length > 0).join("\n");
 }
 
 /**
  * Run the user's turn, then automatically run following NPC turns until it
  * is the user's turn again. This removes the need to type `next` for every
- * NPC. Intermediate turns render a concise header + narrative; only the
- * final scene panel is shown, ending with an explicit "Your turn" prompt.
+ * NPC. Only perceivable NPC actions produce output; the user's own action
+ * is not echoed. Only the final scene panel is shown, ending with an
+ * explicit "Your turn" prompt.
  */
 async function runUserTurnAndNpcs(
   session: TextSession,
@@ -341,7 +383,7 @@ async function runUserTurnAndNpcs(
       parts.push(`Your turn (${me?.name ?? session.world.userActorId}) — type your action (e.g. action: <what you do or say>).`);
     }
   }
-  return parts.join("\n");
+  return parts.filter((p) => p.trim().length > 0).join("\n");
 }
 
 function showLogs(session: TextSession, filter: { module?: string; tick?: number }, limit = 10): string {
@@ -350,7 +392,35 @@ function showLogs(session: TextSession, filter: { module?: string; tick?: number
   if (filter.tick !== undefined) entries = entries.filter((e) => e.tick === filter.tick);
   const tail = entries.slice(-limit);
   if (tail.length === 0) return "(no log entries)";
-  return tail.map((e) => formatLogEntry(e, session.debug)).join("\n");
+  return tail.map((e) => formatLogEntry(e, session.debug, session.debug)).join("\n");
+}
+
+function showStory(session: TextSession, tick?: number, limit?: number): string {
+  if (!session.world) return "No scenario loaded. Use: start [path]";
+  const all = session.logger.store.all();
+  if (all.length === 0) return "(no turns logged yet)";
+  const roster = session.world.actors.map((a) => ({ id: a.id, name: a.name }));
+  const opts = { userActorId: session.world.userActorId, color: true };
+  if (tick !== undefined && limit === undefined) {
+    return renderTurnStory(all.filter((e) => e.tick === tick), tick, roster, opts);
+  }
+  // Group by action tick: turn_completed is logged with the *next* tick,
+  // so plain max-tick would land on a sparse bookkeeping entry. Prefer
+  // ticks that actually ran proposal/selection/consequence.
+  const meaningful = new Set(
+    all
+      .filter((e) =>
+        (e.module === "proposal" && e.event.startsWith("proposal_")) ||
+        (e.module === "selection" && e.event.startsWith("selection_")) ||
+        (e.module === "consequence" && e.event.startsWith("consequence_")) ||
+        (e.module === "turn" && (e.event === "action_chosen" || e.event === "useractionsubmitted" || e.event === "patch_applied")),
+      )
+      .map((e) => e.tick),
+  );
+  const ticks = loggedTicks(all).filter((t) => (meaningful.size === 0 ? true : meaningful.has(t)));
+  const selected = tick !== undefined ? ticks.filter((t) => t >= tick).slice(0, limit ?? 1) : ticks.slice(-(limit ?? 1));
+  if (selected.length === 0) return `(no log entries for tick ${tick})`;
+  return renderStoryRange(all, selected, roster, opts);
 }
 
 export async function handleLine(
@@ -368,7 +438,7 @@ export async function handleLine(
       return { output: "Goodbye.", quit: true };
     case "debug":
       session.debug = parsed.on;
-      return { output: `Debug mode ${parsed.on ? "ON (objective world + LLM traces)" : "OFF (subjective view)"}.`, quit: false };
+      return { output: `Debug mode ${parsed.on ? "ON (concise story trace after each turn; use story [tick] to review)" : "OFF"}.`, quit: false };
     case "start": {
       const path = parsed.path ?? DEFAULT_SCENARIO;
       try {
@@ -395,7 +465,7 @@ export async function handleLine(
             parts.push(`Your turn (${me?.name ?? session.world.userActorId}) — type your action (e.g. action: <what you do or say>).`);
           }
         }
-        return { output: parts.join("\n"), quit: false };
+        return { output: parts.filter((p) => p.trim().length > 0).join("\n"), quit: false };
       }
       return { output: await runSingleTurn(session, ask), quit: false };
     }
@@ -407,8 +477,13 @@ export async function handleLine(
       // User act → NPCs respond automatically, then control returns to you.
       return { output: await runUserTurnAndNpcs(session, ask, parsed.text), quit: false };
     }
-    case "look":
-      return { output: session.showScene(), quit: false };
+    case "look": {
+      const panel = session.showScene();
+      return {
+        output: panel || "(scene view trimmed — use history, look actor <id>, look object <id>, or story)",
+        quit: false,
+      };
+    }
     case "lookActor":
       return { output: session.showActor(parsed.actorId), quit: false };
     case "lookObject":
@@ -434,6 +509,9 @@ export async function handleLine(
     case "history": {
       if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
       return { output: renderHistory(session.world, parsed.limit ?? 10), quit: false };
+    }
+    case "story": {
+      return { output: showStory(session, parsed.tick, parsed.limit), quit: false };
     }
     case "save": {
       if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };

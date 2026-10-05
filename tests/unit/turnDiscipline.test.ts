@@ -129,7 +129,8 @@ describe("turn discipline", () => {
     const world = await runTurn(makeTinyWorld(), deps);
     expect(logger.store.byEvent("validation_failed").length).toBeGreaterThanOrEqual(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    expect(world.history[world.history.length - 1]).toContain("Nothing changes.");
+    expect(world.history[world.history.length - 1]).toContain("Hi!");
+    expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
   });
 });
 
@@ -143,7 +144,9 @@ describe("turn progress reporting", () => {
     });
     await runTurn(makeTinyWorld(), deps);
     const stages = events.map((e) => e.stage);
-    expect(stages).toContain("proposal_started");
+    // User turns skip proposal (proposal_skipped is logged, proposal_done
+    // reported) — no proposal_started stage for the user.
+    expect(stages).toContain("proposal_done");
     expect(stages).toContain("consequence_started");
     expect(stages).toContain("turn_completed");
     for (const e of events) {

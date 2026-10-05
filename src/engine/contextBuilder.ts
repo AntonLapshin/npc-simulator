@@ -1,6 +1,7 @@
 import type { Action, World } from "../types.js";
 import {
   getVisibleActors,
+  getAudibleActors,
   getVisibleObjects,
   getActorById,
 } from "./perceptionHelpers.js";
@@ -95,15 +96,33 @@ export function buildConsequenceContext(
   action: Action,
   feedback?: string,
 ): string {
+  const actor = getActorById(world, action.actorId);
+  const perceivers = actor
+    ? world.actors.filter((o) => {
+        if (o.id === action.actorId) return true;
+        const from = { x: o.x, y: o.y };
+        const to = { x: actor.x, y: actor.y };
+        return (
+          getVisibleActors(world, o.id).some((a) => a.id === action.actorId) ||
+          getAudibleActors(world, o.id).some((a) => a.id === action.actorId) ||
+          Math.abs(from.x - to.x) + Math.abs(from.y - to.y) <= 2
+        );
+      })
+    : [];
   const lines = [
     "Full Objective World",
     "",
-    JSON.stringify(world, null, 2),
+    JSON.stringify(world),
     "",
     "Current Action",
     "",
     `Actor ID: ${action.actorId}`,
     `Action text: ${action.text}`,
+    "",
+    `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
+      perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"
+    }`,
+    "Actors NOT listed here perceived nothing — do NOT patch them.",
     "",
     "Physical Constraints",
     "",
@@ -127,16 +146,20 @@ export function buildConsequenceContext(
     `Acting actor this turn: ${action.actorId}. ONLY this actor may speak, move, change physical state, or perform any observable action.`,
     "All other actors are observers of this event. They MUST NOT speak (no dialogue, no quoted replies, no 'calls back' / 'says' / 'nods welcome'), MUST NOT move (no x/y changes), and MUST NOT change state.",
     "Observers may only react INTERNALLY: set their one-time 'thoughts' field (immediate inner reaction to this event, e.g. surprise, recognition, annoyance), and optionally adjust emotion, goal, memoriesAppend, beliefsAppend, relationshipsAppend.",
-    "Set 'thoughts' for EVERY actor who perceives the event (including the acting actor — its take on what just happened). Thoughts are one-time and will guide that actor's next turn.",
-    `Narrative rule: describe ONLY what ${action.actorId} observably does plus how others passively perceive it (e.g. 'Tanya hears it', 'Dana glances up briefly'). Never narrate an observer speaking, approaching, gesturing, or responding — their response belongs to their own future turn.`,
+    "Set 'thoughts' for EVERY perceiving actor listed above (including the acting actor — its take on what just happened). Thoughts are one-time and will guide that actor's next turn. An event with no observer patch means that observer recorded no reaction.",
+    `Narrative rule: describe ONLY what ${action.actorId} observably does, grounded strictly in the given action text.`,
+    "If the action is speech, preserve its wording — quote or closely paraphrase it, never invent different dialogue lines. If the action contains quoted words, the narrative MUST contain those same words.",
+    "Do NOT describe any other actor perceiving, hearing, speaking, moving, glancing, looking up, or reacting — even passively.",
+    "You may name another actor only as a stationary spatial landmark for the acting actor's own movement (e.g. 'toward Jeff'), never as someone doing something.",
+    "Observer awareness belongs ONLY in their thoughts/memoriesAppend patches, never in the narrative. Each observer's visible response belongs to their own future turn.",
     "",
     "Task",
     "",
     "Interpret the action naturally and determine what happens next.",
-    "Update only affected actors and objects.",
+    "Patch ONLY affected actors/objects (listed perceivers + observably changed objects) — never re-emit unchanged walls/furniture.",
     "Add memories, beliefs, and relationships when relevant.",
     "Use concise natural-language strings.",
-    "Return JSON only.",
+    "Return COMPACT single-line JSON only.",
   );
   return lines.join("\n");
 }

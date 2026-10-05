@@ -15,7 +15,10 @@
     "serve:laya": "bash scripts/serve-laya.sh",
     "setup:ollama": "bash scripts/setup-ollama.sh",
     "diagnose:ai": "tsx scripts/diagnose-ai.ts",
-    "diagnose:ai:live": "tsx scripts/diagnose-ai.ts --live"
+    "diagnose:ai:live": "tsx scripts/diagnose-ai.ts --live",
+    "clean:logs": "rm -rf logs && mkdir logs",
+    "clean:saves": "rm -rf saves && mkdir saves",
+    "clean": "npm run clean:logs && npm run clean:saves"
   },
   "dependencies": {
     "zod": "^3.23.8"
