@@ -91,6 +91,52 @@ describe("text UI panels (§17.1)", () => {
     expect(formatLogEntry(entry, false)).not.toContain("secret-prompt");
     expect(formatLogEntry(entry, true)).toContain("why");
   });
+
+  it("log formatting colors lines per actor and errors red", () => {
+    const entry = {
+      id: "log_1", sessionId: "s", timestamp: new Date().toISOString(),
+      tick: 1, turnIndex: 0, module: "proposal", event: "proposal_completed",
+      actorId: "u", reasoning: "why",
+    };
+    const plain = formatLogEntry(entry, true, false);
+    expect(plain).not.toContain("\u001b[");
+    const colored = formatLogEntry(entry, true, true);
+    expect(colored).toContain("\u001b[");
+    const errEntry = { ...entry, event: "proposal_failed", error: "boom" };
+    expect(formatLogEntry(errEntry, true, true)).toContain("\u001b[31m");
+  });
+
+  it("story trace colors every per-actor line and distinguishes actors", async () => {
+    const { renderTurnStory } = await import("../../src/logging/storyTrace.js");
+    const mk = (event: string, module = "turn", extra: Record<string, unknown> = {}) => ({
+      id: `log_${event}`, sessionId: "s", timestamp: new Date().toISOString(),
+      tick: 0, turnIndex: 0, module, event, actorId: "u", ...extra,
+    });
+    const entries = [
+      mk("turn_started"),
+      mk("proposal_skipped", "proposal"),
+      mk("useractionsubmitted", "turn", { output: { actorId: "u", text: "Hi all!" } }),
+      mk("action_chosen", "turn", { output: { actorId: "u", text: "Hi all!" } }),
+      mk("consequence_completed", "consequence", {
+        output: { narrative: "U greets.", actorPatches: [], objectPatches: [], reasoning: "r" },
+      }),
+      mk("validation_passed", "validator"),
+      mk("patch_applied", "turn", { output: { historyTail: ["U: Hi all!"] } }),
+    ];
+    const roster = [{ id: "u", name: "U" }, { id: "n", name: "N" }];
+    const colored = renderTurnStory(entries, 0, roster, { userActorId: "u", color: true });
+    const lines = colored.split("\n");
+    // Every non-empty line carries ANSI color; no line is left plain.
+    for (const line of lines) {
+      if (line.trim().length > 0) expect(line).toContain("\u001b[");
+    }
+    // A different actor gets a different color code on the header.
+    const other = renderTurnStory(
+      entries.map((e) => ({ ...e, actorId: "n" })),
+      0, roster, { userActorId: "u", color: true },
+    );
+    expect(other.split("\n")[0]).not.toBe(lines[0]);
+  });
 });
 
 describe("text UI session flow", () => {

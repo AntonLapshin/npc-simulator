@@ -107,11 +107,11 @@ export function renderTurnStory(
   const maxSug = opts.maxSuggestions ?? 6;
   const useColor = opts.color ?? false;
   const lines: string[] = [];
-  // Per-actor color for this turn's block; errors/fallbacks always red.
-  const actorPaint = (s: string): string => (useColor ? paintActor(s, actorIdForColor) : s);
-  const errPaint = (s: string): string => (useColor ? paintError(s) : s);
 
-  if (tickEntries.length === 0) return `-- tick ${tick}: (no log entries) --`;
+  if (tickEntries.length === 0) {
+    const empty = `-- tick ${tick}: (no log entries) --`;
+    return useColor ? paintError(empty) : empty;
+  }
 
   const turnStarted = findEntry(tickEntries, "turn", "turn_started");
   const actionChosen = findEntry(tickEntries, "turn", "action_chosen");
@@ -120,8 +120,12 @@ export function renderTurnStory(
     actionChosen?.actorId ?? userSubmitted?.actorId ?? turnStarted?.actorId ?? tickEntries[0]?.actorId ?? "?";
   const actorIdForColor = actorId;
   const isUser = userSubmitted !== undefined || (opts.userActorId !== undefined && actorId === opts.userActorId);
+  // Every non-error line carries this turn's actor color so consecutive
+  // turns are visually distinct; errors/fallbacks are always red.
+  const ok = (s: string): string => (useColor ? paintActor(s, actorIdForColor) : s);
+  const errPaint = (s: string): string => (useColor ? paintError(s) : s);
 
-  lines.push(actorPaint(`-- tick ${tick} | ${actorLabel(actorId, actors, opts.userActorId)} --`));
+  lines.push(ok(`-- tick ${tick} | ${actorLabel(actorId, actors, opts.userActorId)} --`));
 
   // Chronological order: proposal -> selection -> action -> consequence ->
   // validation -> history. (The action is the *result* of proposal/selection,
@@ -137,20 +141,20 @@ export function renderTurnStory(
       | ProposalResult
       | undefined;
     const suggestions = Array.isArray(out?.suggestions) ? out.suggestions : [];
-    lines.push(`proposal: in actor=${actorId} | out ${suggestions.length} suggestion(s)`);
+    lines.push(ok(`proposal: in actor=${actorId} | out ${suggestions.length} suggestion(s)`));
     for (const [i, s] of suggestions.slice(0, maxSug).entries()) {
-      lines.push(`  [${i + 1}] ${flat(s, max)}`);
+      lines.push(ok(`  [${i + 1}] ${flat(s, max)}`));
     }
-    if (suggestions.length > maxSug) lines.push(`  … (+${suggestions.length - maxSug} more)`);
+    if (suggestions.length > maxSug) lines.push(ok(`  … (+${suggestions.length - maxSug} more)`));
     const why = typeof proposalDone.reasoning === "string" ? proposalDone.reasoning : out?.reasoning;
-    lines.push(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`);
+    lines.push(ok(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`));
   } else if (proposalSkipped || isUser) {
-    lines.push(`proposal: skipped (user turn — no suggestions generated; user acts freely)`);
+    lines.push(ok(`proposal: skipped (user turn — no suggestions generated; user acts freely)`));
   } else if (proposalFail) {
     lines.push(errPaint(`proposal: FAILED -> fallback suggestions used`));
     if (proposalFail.error) lines.push(errPaint(`  error: ${flat(proposalFail.error, 200)}`));
   } else {
-    lines.push(`proposal: (no proposal entry)`);
+    lines.push(ok(`proposal: (no proposal entry)`));
   }
 
   // 2. Selection: options it had, decision, why. Skipped on user turns.
@@ -168,32 +172,32 @@ export function renderTurnStory(
   const submittedText = typeof submittedAction?.text === "string" ? submittedAction.text : undefined;
   const finalActionText = actionText ?? submittedText;
   if (isUser) {
-    lines.push(`selection: skipped (user turn; Decision AI not run)`);
+    lines.push(ok(`selection: skipped (user turn; Decision AI not run)`));
   } else if (selectionDone) {
     const out = (asRecord(selectionDone.output) ?? asRecord(selectionDone.parsedResponse)) as unknown as
       | SelectionResult
       | undefined;
     const n = startedSuggestions?.length ?? " ?";
-    lines.push(`selection: in${typeof n === "number" ? ` ${n} option(s)` : ""} | out "${flat(out?.action ?? "", 200)}"`);
+    lines.push(ok(`selection: in${typeof n === "number" ? ` ${n} option(s)` : ""} | out "${flat(out?.action ?? "", 200)}"`));
     if (startedSuggestions && startedSuggestions.length > 0 && typeof out?.action === "string") {
       const idx = startedSuggestions.findIndex((s) => s === out.action);
-      lines.push(idx >= 0 ? `  picked: option [${idx + 1}] (verbatim)` : `  picked: new wording (not verbatim from options)`);
+      lines.push(ok(idx >= 0 ? `  picked: option [${idx + 1}] (verbatim)` : `  picked: new wording (not verbatim from options)`));
     }
     const why = typeof selectionDone.reasoning === "string" ? selectionDone.reasoning : out?.reasoning;
-    lines.push(`  why (Decision AI): ${why ? flat(why, 200) : "(no reasoning)"}`);
+    lines.push(ok(`  why (Decision AI): ${why ? flat(why, 200) : "(no reasoning)"}`));
   } else if (selectionFail) {
     lines.push(errPaint(`selection: FAILED -> fallback action used`));
     if (selectionFail.error) lines.push(errPaint(`  error: ${flat(selectionFail.error, 200)}`));
     if (finalActionText) lines.push(errPaint(`  fallback action: "${flat(finalActionText, 200)}" (NOT from proposals above)`));
   } else {
-    lines.push(`selection: (no selection entry)`);
+    lines.push(ok(`selection: (no selection entry)`));
   }
 
   // 3. Action (result of proposal/selection, or free user text).
   if (actionText) {
-    lines.push(actorPaint(`action: "${flat(actionText, 200)}"${isUser ? "  [user typed]" : "  [NPC decided]"}`));
+    lines.push(ok(`action: "${flat(actionText, 200)}"${isUser ? "  [user typed]" : "  [NPC decided]"}`));
   } else if (isUser && userSubmitted && submittedText) {
-    lines.push(actorPaint(`action: "${flat(submittedText, 200)}"  [user typed]`));
+    lines.push(ok(`action: "${flat(submittedText, 200)}"  [user typed]`));
   }
 
   // 4. Consequence: why + exact changes + affected/unaffected.
@@ -203,26 +207,26 @@ export function renderTurnStory(
     const out = (asRecord(consequenceDone.output) ?? asRecord(consequenceDone.parsedResponse)) as unknown as
       | ConsequenceResult
       | undefined;
-    lines.push(`consequence: narrative "${flat(out?.narrative ?? "", 200)}"`);
+    lines.push(ok(`consequence: narrative "${flat(out?.narrative ?? "", 200)}"`));
     const why = typeof consequenceDone.reasoning === "string" ? consequenceDone.reasoning : out?.reasoning;
-    lines.push(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`);
+    lines.push(ok(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`));
     const actorPatches = Array.isArray(out?.actorPatches) ? out.actorPatches : [];
     const objectPatches = Array.isArray(out?.objectPatches) ? out.objectPatches : [];
     if (actorPatches.length > 0) {
-      lines.push(`  changes:`);
+      lines.push(ok(`  changes:`));
       for (const p of actorPatches as ActorPatch[]) {
-        lines.push(`    - ${shortName(p.actorId, actors)}: ${summarizeActorPatch(p, max)}`);
+        lines.push(ok(`    - ${shortName(p.actorId, actors)}: ${summarizeActorPatch(p, max)}`));
       }
     } else {
-      lines.push(`  changes: (none — no actor patches)`);
+      lines.push(ok(`  changes: (none — no actor patches)`));
     }
     if (objectPatches.length > 0) {
-      lines.push(`  objects changed:`);
+      lines.push(ok(`  objects changed:`));
       for (const p of objectPatches as ObjectPatch[]) {
-        lines.push(`    - ${p.objectId}: ${summarizeObjectPatch(p, max)}`);
+        lines.push(ok(`    - ${p.objectId}: ${summarizeObjectPatch(p, max)}`));
       }
     } else {
-      lines.push(`  objects changed: (none)`);
+      lines.push(ok(`  objects changed: (none)`));
     }
     // Affected = patched actors (the only ones with a recorded reaction).
     // "Not affected" means no patch this turn — the model recorded no
@@ -232,20 +236,25 @@ export function renderTurnStory(
     if (actors.length > 0) {
       const affected = actors.filter((a) => patchedIds.has(a.id));
       const unaffected = actors.filter((a) => !patchedIds.has(a.id));
-      lines.push(`  affected by event (patched):`);
-      lines.push(affected.length > 0 ? affected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`);
-      lines.push(`  not affected (no patch — no recorded reaction):`);
-      lines.push(unaffected.length > 0 ? unaffected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`);
+      lines.push(ok(`  affected by event (patched):`));
+      lines.push(ok(affected.length > 0 ? affected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`));
+      lines.push(ok(`  not affected (no patch — no recorded reaction):`));
+      lines.push(ok(unaffected.length > 0 ? unaffected.map((a) => `    - ${a.name}`).join("\n") : `    (none)`));
     } else if (patchedIds.size > 0) {
-      lines.push(`  affected by event (patched):`);
-      for (const id of patchedIds) lines.push(`    - ${id}`);
+      lines.push(ok(`  affected by event (patched):`));
+      for (const id of patchedIds) lines.push(ok(`    - ${id}`));
     }
   } else if (consequenceFails.length > 0) {
-    lines.push(errPaint(`consequence: FAILED (${consequenceFails.length} attempt(s)) -> fallback "Nothing changes."`));
-    const last = consequenceFails.at(-1);
+    // completeJson logs one entry per parse attempt plus a final
+    // "fallback: ..." summary from the engine — count only real attempts
+    // so the number matches the retry budget (maxRetries + 1).
+    const attempts = consequenceFails.filter((e) => !(typeof e.error === "string" && e.error.startsWith("fallback:")));
+    const shown = attempts.length > 0 ? attempts : consequenceFails;
+    lines.push(errPaint(`consequence: FAILED (${shown.length} attempt(s)) -> fallback "Nothing changes."`));
+    const last = shown.at(-1);
     if (last?.error) lines.push(errPaint(`  error: ${flat(last.error, 200)}`));
   } else {
-    lines.push(`consequence: (no consequence entry)`);
+    lines.push(ok(`consequence: (no consequence entry)`));
   }
 
   // 5. Validation + retries + fallback.
@@ -254,7 +263,7 @@ export function renderTurnStory(
   const retries = findAll(tickEntries, "turn", "retry_started");
   const fallback = findEntry(tickEntries, "turn", "fallback_used");
   if (validationFails.length === 0 && validationPass) {
-    lines.push(`validation: passed (attempt 1)`);
+    lines.push(ok(`validation: passed (attempt 1)`));
   } else if (validationFails.length > 0) {
     for (const [i, v] of validationFails.entries()) {
       const errs = Array.isArray(v.validationErrors) ? v.validationErrors : [];
@@ -264,10 +273,10 @@ export function renderTurnStory(
         ),
       );
     }
-    if (validationPass) lines.push(`validation: passed after ${validationFails.length + 1} attempt(s)`);
+    if (validationPass) lines.push(ok(`validation: passed after ${validationFails.length + 1} attempt(s)`));
     else if (!fallback) lines.push(errPaint(`validation: failed, no pass recorded`));
   }
-  if (retries.length > 0) lines.push(`retries: ${retries.length} (feedback sent back to consequence engine)`);
+  if (retries.length > 0) lines.push(ok(`retries: ${retries.length} (feedback sent back to consequence engine)`));
   if (fallback) {
     lines.push(errPaint(`turn: FALLBACK used ("Nothing changes." — max retries exceeded)`));
     if (fallback.error) lines.push(errPaint(`  reason: ${flat(fallback.error, max)}`));
@@ -278,9 +287,9 @@ export function renderTurnStory(
   const historyTail = asRecord(patchApplied?.output) as { historyTail?: unknown } | undefined;
   const tailArr = Array.isArray(historyTail?.historyTail) ? historyTail!.historyTail : undefined;
   if (tailArr && tailArr.length > 0) {
-    lines.push(`history: "${flat(tailArr[tailArr.length - 1], 200)}"`);
+    lines.push(ok(`history: "${flat(tailArr[tailArr.length - 1], 200)}"`));
   } else if (actionText) {
-    lines.push(`history: (entry appended for ${shortName(actorId, actors)})`);
+    lines.push(ok(`history: (entry appended for ${shortName(actorId, actors)})`));
   }
 
   return lines.join("\n");

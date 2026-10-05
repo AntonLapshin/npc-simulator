@@ -53,6 +53,10 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       input: { action, feedback },
       maxRetries,
       schema: consequenceResultSchema,
+      repairHint:
+        "Field rules: actorPatches must be an array of {\"actorId\": ...} (never \"id\", never a quoted string); " +
+        "objectPatches must be an array of {\"objectId\": ...} (never \"id\", never a quoted string); " +
+        "\"reasoning\" is required; do not nest objectPatches inside actorPatches.",
     });
 
     if (!result.ok) {

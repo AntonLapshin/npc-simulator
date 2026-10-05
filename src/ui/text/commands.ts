@@ -269,23 +269,27 @@ export function renderHistory(world: World, limit = 10): string {
 
 /** One log entry as a single line. Debug adds reasoning/errors/prompt info. */
 export function formatLogEntry(entry: LogEntry, debug = false, color = false): string {
+  // Whole line carries the acting actor's color (errors stay red) so
+  // `log tail/module/tick` output is distinguishable per character.
+  const ok = (s: string): string =>
+    color && entry.actorId ? paint(s, actorColorCode(entry.actorId)) : s;
   const actorBit = entry.actorId
     ? ` actor=${color ? paint(entry.actorId, actorColorCode(entry.actorId)) : entry.actorId}`
     : "";
-  const head = `tick=${entry.tick} ${entry.module}/${entry.event}${actorBit}`;
+  const head = ok(`tick=${entry.tick} ${entry.module}/${entry.event}`) + actorBit;
   const errBit = (s: string): string => (color ? paintError(s) : s);
   if (!debug) {
     const extra = entry.error ? ` error=${truncate(entry.error, 160)}` : "";
     return extra ? `${head}${errBit(extra)}` : head;
   }
   const parts = [head];
-  if (entry.reasoning) parts.push(`reasoning=${truncate(entry.reasoning, 200)}`);
+  if (entry.reasoning) parts.push(ok(`reasoning=${truncate(entry.reasoning, 200)}`));
   if (entry.validationErrors?.length) parts.push(errBit(`validationErrors=[${entry.validationErrors.map((e) => truncate(e, 120)).join("; ")}]`));
   if (entry.error) parts.push(errBit(`error=${truncate(entry.error, 300)}`));
-  if (entry.rawResponse) parts.push(`raw=${truncate(entry.rawResponse, 300)}`);
-  if (entry.prompt) parts.push(`prompt=${truncate(entry.prompt, 200)}…`);
-  if (entry.durationMs !== undefined) parts.push(`${entry.durationMs}ms`);
-  return parts.join(" | ");
+  if (entry.rawResponse) parts.push(ok(`raw=${truncate(entry.rawResponse, 300)}`));
+  if (entry.prompt) parts.push(ok(`prompt=${truncate(entry.prompt, 200)}…`));
+  if (entry.durationMs !== undefined) parts.push(ok(`${entry.durationMs}ms`));
+  return parts.join(ok(" | "));
 }
 
 function truncate(s: string, max: number): string {

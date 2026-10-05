@@ -263,6 +263,77 @@ describe("LLM consequence engine + validation retry", () => {
   });
 });
 
+describe("lenient consequence parsing for small models", () => {
+  it("accepts missing reasoning (defaults to empty)", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U waves hello.",
+        actorPatches: [{ actorId: "u", thoughts: "Friendly." }],
+        objectPatches: [],
+      }),
+    ]);
+    const engine = new LLMConsequenceEngine(logger, provider);
+    const result = await engine.resolve(makeTinyWorld(), { actorId: "u", text: "Wave." });
+    expect(result.narrative).toContain("waves hello");
+    expect(logger.store.events()).toContain("consequence_completed");
+  });
+
+  it("accepts id aliases for actorId/objectId", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U looks around.",
+        actorPatches: [{ id: "u", thoughts: "Quiet room." }],
+        objectPatches: [],
+        reasoning: "No movement needed.",
+      }),
+    ]);
+    const engine = new LLMConsequenceEngine(logger, provider);
+    const result = await engine.resolve(makeTinyWorld(), { actorId: "u", text: "Look." });
+    expect(result.narrative).toContain("looks around");
+    expect(logger.store.events()).toContain("consequence_completed");
+  });
+
+  it("accepts stringified patch arrays", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U nods.",
+        actorPatches: JSON.stringify([{ actorId: "u", thoughts: "Agreed." }]),
+        objectPatches: "[]",
+        reasoning: "A nod is silent.",
+      }),
+    ]);
+    const engine = new LLMConsequenceEngine(logger, provider);
+    const result = await engine.resolve(makeTinyWorld(), { actorId: "u", text: "Nod." });
+    expect(result.narrative).toContain("nods");
+    expect(logger.store.events()).toContain("consequence_completed");
+  });
+
+  it("hoists objectPatches nested inside an actor patch element", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U nods.",
+        actorPatches: [{ actorId: "u", thoughts: "Agreed.", objectPatches: [] }],
+        objectPatches: [],
+        reasoning: "A nod is silent.",
+      }),
+    ]);
+    const engine = new LLMConsequenceEngine(logger, provider);
+    const result = await engine.resolve(makeTinyWorld(), { actorId: "u", text: "Nod." });
+    expect(result.narrative).toContain("nods");
+    expect(logger.store.events()).toContain("consequence_completed");
+  });
+
+  it("extracts doubled key-delimiter quotes ([{\"\"actorId\"\"...}])", () => {
+    const raw = '{"narrative": "U nods.", "actorPatches": [{""actorId"": "u"}], "objectPatches": [], "reasoning": "ok"}';
+    const payload = extractJsonPayload(raw);
+    expect(JSON.parse(payload)).toMatchObject({ narrative: "U nods." });
+  });
+});
+
 describe("subjective vs objective contexts (§16.6)", () => {
   it("proposal/selection hide other actors' private knowledge; consequence sees all", async () => {
     const logger = createTestLogger();

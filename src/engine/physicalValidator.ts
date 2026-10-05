@@ -26,11 +26,14 @@ export function validateConsequence(
     }
     return { valid: false, errors };
   }
+  // Use the normalized payload (id-aliases resolved, stringified arrays
+  // parsed, missing reasoning defaulted) for all checks below.
+  const normalized = parsed.data;
 
   const actorById = new Map(world.actors.map((a) => [a.id, a]));
   const objectById = new Map(world.scene.objects.map((o) => [o.id, o]));
 
-  for (const patch of result.actorPatches) {
+  for (const patch of normalized.actorPatches) {
     const actor = actorById.get(patch.actorId);
     if (!actor) {
       errors.push(`unknown actor id: ${patch.actorId}`);
@@ -99,7 +102,7 @@ export function validateConsequence(
     }
   }
 
-  for (const patch of result.objectPatches) {    const obj = objectById.get(patch.objectId);
+  for (const patch of normalized.objectPatches) {    const obj = objectById.get(patch.objectId);
     if (!obj) {
       errors.push(`unknown object id: ${patch.objectId}`);
       continue;
@@ -141,7 +144,7 @@ export function validateConsequence(
   // action clearly implies speech without quoting it, e.g. "introduce
   // yourself", where a short greeting quote is a reasonable rendering).
   if (action) {
-    errors.push(...validateSpeechPreservation(action.text, result.narrative));
+    errors.push(...validateSpeechPreservation(action.text, normalized.narrative));
   }
 
   return { valid: errors.length === 0, errors };

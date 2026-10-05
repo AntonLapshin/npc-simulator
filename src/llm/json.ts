@@ -6,6 +6,27 @@
 
 /** Strip markdown code fences and extract the JSON payload from raw text. */
 export function extractJsonPayload(raw: string): string {
+  try {
+    return extractJsonPayloadInner(raw);
+  } catch (err) {
+    // Small models sometimes double key-delimiter quotes ([{""id":"x", ...}]),
+    // which corrupts brace scanning (string tracking goes haywire and the
+    // first balanced candidate fails JSON.parse). Retry once with
+    // identifier-wrapping doubled quotes collapsed — only as a fallback
+    // after normal extraction already failed, and only around identifiers
+    // (keys), so legitimate `""` empty strings and `\""` escaped-quote +
+    // delimiter sequences elsewhere are never touched.
+    if (raw.includes('""')) {
+      const collapsed = raw
+        .replace(/""([A-Za-z_][A-Za-z0-9_]*)""/g, '"$1"')
+        .replace(/""([A-Za-z_][A-Za-z0-9_]*)"(?=\s*:)/g, '"$1"');
+      if (collapsed !== raw) return extractJsonPayloadInner(collapsed);
+    }
+    throw err;
+  }
+}
+
+function extractJsonPayloadInner(raw: string): string {
   let text = raw.trim();
   if (text.length === 0) throw new Error("empty LLM response");
 
@@ -148,17 +169,18 @@ export function parseJsonObject<T = unknown>(raw: string): T {
 }
 
 /** Repair prompt appended after a parse failure (§16.3 formatting retry). */
-export function formatRepairPrompt(raw: string, error: string): string {
+export function formatRepairPrompt(raw: string, error: string, hint?: string): string {
   // Cap the echoed response: full verbose dumps (e.g. wall-by-wall patches)
   // bloat the retry prompt and make a second truncation more likely.
   const clipped = raw.length > 2000 ? `${raw.slice(0, 2000)}\n…(truncated)` : raw;
-  return [
+  const lines = [
     "Your previous response was not valid JSON.",
     `Parse error: ${error}`,
     "Return ONLY the corrected JSON object now.",
     "Return COMPACT single-line JSON (no pretty-print, no markdown). Keep strings short; include ONLY affected actors/objects.",
     "Do not include markdown, commentary, or extra text.",
-    "Previous invalid response:",
-    clipped,
-  ].join("\n");
+  ];
+  if (hint) lines.push(hint);
+  lines.push("Previous invalid response:", clipped);
+  return lines.join("\n");
 }

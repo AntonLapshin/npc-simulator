@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ActorPatch, ConsequenceResult, ObjectPatch } from "./types.js";
 
 const nonEmptyString = z.string().min(1, "must be a non-empty string");
 
@@ -86,43 +87,148 @@ export const selectionResultSchema = z
   })
   .strict();
 
-export const actorPatchSchema = z
-  .object({
-    actorId: nonEmptyString,
-    x: z.number().finite().optional(),
-    y: z.number().finite().optional(),
-    state: z.string().optional(),
-    emotion: z.string().optional(),
-    goal: z.string().optional(),
-    thoughts: z.string().optional(),
-    memoriesAppend: z.array(z.string()).optional(),
-    beliefsAppend: z.array(z.string()).optional(),
-    relationshipsAppend: z.array(z.string()).optional(),
-  })
-  .strict();
+/**
+ * Lenient normalization for small-LLM consequence output (e.g. 3B Ollama
+ * models). Observed failure modes in real runs:
+ * - `id` instead of `actorId` / `objectId`;
+ * - `actorPatches` / `objectPatches` emitted as JSON-encoded *strings*;
+ * - missing `reasoning`;
+ * - `objectPatches` nested inside an actor-patch element.
+ * All are repaired here so validation judges content, not field-name
+ * drift. Unknown keys are stripped (not rejected) at this layer —
+ * physical validation still rejects unknown ids and bad coordinates.
+ */
+function parseMaybeStringifiedArray(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("[")) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return value;
+      }
+    }
+    // A single patch object encoded as a string ("{...}") — wrap in an array.
+    if (trimmed.startsWith("{")) {
+      try {
+        return [JSON.parse(trimmed)];
+      } catch {
+        return value;
+      }
+    }
+  }
+  return value;
+}
 
-export const objectPatchSchema = z
-  .object({
-    objectId: nonEmptyString,
-    description: z.string().optional(),
-    x: z.number().finite().optional(),
-    y: z.number().finite().optional(),
-    w: z.number().finite().optional(),
-    h: z.number().finite().optional(),
-    passable: z.boolean().optional(),
-    blocksVision: z.boolean().optional(),
-    blocksSound: z.boolean().optional(),
-  })
-  .strict();
+function normalizeActorPatch(patch: unknown): unknown {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) return patch;
+  const p = { ...(patch as Record<string, unknown>) };
+  if (typeof p["actorId"] !== "string" && typeof p["id"] === "string") {
+    p["actorId"] = p["id"];
+  }
+  delete p["id"];
+  return p;
+}
 
-export const consequenceResultSchema = z
-  .object({
+function normalizeObjectPatch(patch: unknown): unknown {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) return patch;
+  const p = { ...(patch as Record<string, unknown>) };
+  if (typeof p["objectId"] !== "string" && typeof p["id"] === "string") {
+    p["objectId"] = p["id"];
+  }
+  delete p["id"];
+  return p;
+}
+
+function normalizeConsequenceResult(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const v = { ...(value as Record<string, unknown>) };
+  let actorPatches = parseMaybeStringifiedArray(v["actorPatches"]);
+  let objectPatches = parseMaybeStringifiedArray(v["objectPatches"]);
+  // Hoist mis-nested objectPatches out of actor-patch elements
+  // (small models sometimes emit [{actorId, ..., objectPatches: [...]}]).
+  if (Array.isArray(actorPatches)) {
+    const hoisted: unknown[] = [];
+    const cleaned: unknown[] = [];
+    for (const p of actorPatches) {
+      if (typeof p === "object" && p !== null && !Array.isArray(p)) {
+        const rec = { ...(p as Record<string, unknown>) };
+        const nested = parseMaybeStringifiedArray(rec["objectPatches"]);
+        if (Array.isArray(nested)) {
+          hoisted.push(...nested);
+          delete rec["objectPatches"];
+        }
+        // Drop hollow remnants that only carried the nested patches
+        // ({objectPatches: [...]} with no actor fields at all).
+        const keys = Object.keys(rec);
+        if (keys.length === 0 || (keys.length === 1 && keys[0] === "id")) continue;
+        cleaned.push(normalizeActorPatch(rec));
+      } else {
+        cleaned.push(normalizeActorPatch(p));
+      }
+    }
+    actorPatches = cleaned;
+    if (hoisted.length > 0) {
+      const top = Array.isArray(objectPatches) ? [...objectPatches] : [];
+      objectPatches = [...top, ...hoisted];
+    }
+  }
+  if (Array.isArray(objectPatches)) {
+    objectPatches = objectPatches.map(normalizeObjectPatch);
+  }
+  // A missing patch list means "nothing of that kind changed".
+  if (actorPatches === undefined) actorPatches = [];
+  if (objectPatches === undefined) objectPatches = [];
+  v["actorPatches"] = actorPatches;
+  v["objectPatches"] = objectPatches;
+  if (typeof v["reasoning"] !== "string") v["reasoning"] = "";
+  return v;
+}
+
+const lenientActorPatchSchema = z.object({
+  actorId: nonEmptyString,
+  x: z.number().finite().optional(),
+  y: z.number().finite().optional(),
+  state: z.string().optional(),
+  emotion: z.string().optional(),
+  goal: z.string().optional(),
+  thoughts: z.string().optional(),
+  memoriesAppend: z.array(z.string()).optional(),
+  beliefsAppend: z.array(z.string()).optional(),
+  relationshipsAppend: z.array(z.string()).optional(),
+});
+
+const lenientObjectPatchSchema = z.object({
+  objectId: nonEmptyString,
+  description: z.string().optional(),
+  x: z.number().finite().optional(),
+  y: z.number().finite().optional(),
+  w: z.number().finite().optional(),
+  h: z.number().finite().optional(),
+  passable: z.boolean().optional(),
+  blocksVision: z.boolean().optional(),
+  blocksSound: z.boolean().optional(),
+});
+
+export const actorPatchSchema: z.ZodType<ActorPatch> = z.preprocess(
+  normalizeActorPatch,
+  lenientActorPatchSchema,
+) as z.ZodType<ActorPatch>;
+
+export const objectPatchSchema: z.ZodType<ObjectPatch> = z.preprocess(
+  normalizeObjectPatch,
+  lenientObjectPatchSchema,
+) as z.ZodType<ObjectPatch>;
+
+export const consequenceResultSchema: z.ZodType<ConsequenceResult> = z.preprocess(
+  normalizeConsequenceResult,
+  z.object({
     narrative: z.string().min(1, "narrative must be non-empty"),
-    actorPatches: z.array(actorPatchSchema),
-    objectPatches: z.array(objectPatchSchema),
-    reasoning: z.string(),
-  })
-  .strict();
+    actorPatches: z.array(lenientActorPatchSchema),
+    objectPatches: z.array(lenientObjectPatchSchema),
+    reasoning: z.string().default(""),
+  }),
+) as z.ZodType<ConsequenceResult>;
 
 export const engineConfigSchema = z
   .object({

@@ -27,6 +27,8 @@ export type CompleteJsonOptions<T> = {
   schema: z.ZodType<T>;
   /** Extra semantic check. Return an error message when the value is unusable. */
   extraCheck?: (value: T) => string | undefined;
+  /** Module-specific field rules appended to the formatting-retry prompt. */
+  repairHint?: string;
 };
 
 export type CompleteJsonResult<T> =
@@ -110,7 +112,7 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
         rawResponse: raw,
         error: message,
       });
-      userPrompt = `${baseUserPrompt}\n\n${formatRepairPrompt(raw, message)}`;
+      userPrompt = `${baseUserPrompt}\n\n${formatRepairPrompt(raw, message, opts.repairHint)}`;
     }
   }
 
