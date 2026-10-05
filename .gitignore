@@ -7,3 +7,6 @@ saves/*.json
 coverage/
 *.log
 .DS_Store
+.env
+.laya-venv/
+models/
