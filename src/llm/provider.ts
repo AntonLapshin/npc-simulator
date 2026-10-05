@@ -19,6 +19,13 @@
 //     API (POST /v1/systemone), not OpenAI Chat Completions, so it is not
 //     a valid LAYA_BASE_URL target — see .env.example for details.
 //
+//   - OllamaProvider — any model served by local Ollama
+//     (https://ollama.com) via its OpenAI-compatible endpoint
+//     (http://127.0.0.1:11434/v1 by default). Install with
+//     `npm run setup:ollama` (pulls the two recommended models, see
+//     scripts/setup-ollama.sh), then:
+//       LLM_BACKEND=ollama OLLAMA_MODEL=fluffy/l3-8b-stheno-v3.2
+//
 // Both speak the OpenAI Chat Completions dialect; only defaults differ.
 
 export interface LLMProvider {
@@ -180,21 +187,68 @@ export class LocalLayaProvider extends OpenAICompatibleProvider {
   }
 }
 
-export type LlmBackend = "joingonka" | "laya-local";
+/** Locally served model via Ollama (OpenAI-compatible endpoint). */
+export class OllamaProvider extends OpenAICompatibleProvider {
+  static readonly DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
+  /** Native Ollama API root derived from the OpenAI-compatible base URL. */
+  static readonly DEFAULT_API_URL = "http://127.0.0.1:11434";
+  /** Recommended uncensored models (see scripts/setup-ollama.sh). */
+  static readonly RECOMMENDED_MODELS = [
+    "fluffy/l3-8b-stheno-v3.2",
+    "huihui_ai/llama3.2-abliterate:3b",
+  ] as const;
+  /** Default model: the more capable 8B roleplay model. */
+  static readonly DEFAULT_MODEL = "fluffy/l3-8b-stheno-v3.2";
+
+  constructor(options: {
+    baseUrl?: string;
+    model?: string;
+    apiKey?: string;
+    temperature?: number;
+    maxTokens?: number;
+    timeoutMs?: number;
+    fetchImpl?: typeof fetch;
+  } = {}) {
+    super("ollama", {
+      baseUrl: options.baseUrl ?? OllamaProvider.DEFAULT_BASE_URL,
+      model: options.model ?? OllamaProvider.DEFAULT_MODEL,
+      apiKey: options.apiKey,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    });
+  }
+}
+
+/** Derive the native Ollama API root (…:11434) from any base URL form. */
+export function ollamaApiRoot(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, "");
+  // OpenAI-compatible form ends with /v1 → strip it; native form stays.
+  return trimmed.replace(/\/v1$/, "") || OllamaProvider.DEFAULT_API_URL;
+}
+
+export type LlmBackend = "joingonka" | "laya-local" | "ollama";
 
 export type LlmEnvConfig = {
   backend: LlmBackend;
   joingonka: { apiKey?: string; baseUrl: string; model: string };
   laya: { baseUrl: string; model: string; apiKey?: string };
+  ollama: { baseUrl: string; model: string; apiKey?: string };
   timeoutMs: number;
   temperature: number;
   maxTokens: number;
 };
 
+const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
+
 /** Read backend configuration from environment (no secrets are ever logged). */
 export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfig {
+  const raw = env["LLM_BACKEND"];
+  const backend: LlmBackend =
+    raw === "laya-local" || raw === "ollama" || raw === "joingonka" ? raw : "joingonka";
   return {
-    backend: env["LLM_BACKEND"] === "laya-local" ? "laya-local" : "joingonka",
+    backend,
     joingonka: {
       apiKey: env["JOINGONKA_API_KEY"],
       baseUrl: env["JOINGONKA_BASE_URL"] ?? JoinGonkaProvider.DEFAULT_BASE_URL,
@@ -205,10 +259,20 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
       model: env["LAYA_MODEL"] ?? LocalLayaProvider.DEFAULT_MODEL,
       apiKey: env["LAYA_API_KEY"],
     },
+    ollama: {
+      baseUrl: env["OLLAMA_BASE_URL"] ?? OllamaProvider.DEFAULT_BASE_URL,
+      model: env["OLLAMA_MODEL"] ?? OllamaProvider.DEFAULT_MODEL,
+      apiKey: env["OLLAMA_API_KEY"],
+    },
     timeoutMs: Number(env["LLM_TIMEOUT_MS"] ?? DEFAULT_TIMEOUT_MS),
     temperature: Number(env["LLM_TEMPERATURE"] ?? 0.7),
     maxTokens: Number(env["LLM_MAX_TOKENS"] ?? 1500),
   };
+}
+
+/** Backends accepted by LLM_BACKEND / --provider. */
+export function knownBackends(): LlmBackend[] {
+  return [...KNOWN_BACKENDS];
 }
 
 /**
@@ -228,6 +292,16 @@ export function createProviderFromEnv(
       baseUrl: cfg.laya.baseUrl,
       model: cfg.laya.model,
       apiKey: cfg.laya.apiKey,
+      temperature: cfg.temperature,
+      maxTokens: cfg.maxTokens,
+      timeoutMs: cfg.timeoutMs,
+    });
+  }
+  if (which === "ollama") {
+    return new OllamaProvider({
+      baseUrl: cfg.ollama.baseUrl,
+      model: cfg.ollama.model,
+      apiKey: cfg.ollama.apiKey,
       temperature: cfg.temperature,
       maxTokens: cfg.maxTokens,
       timeoutMs: cfg.timeoutMs,

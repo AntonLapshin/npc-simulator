@@ -1,7 +1,15 @@
 // Playable terminal interface (Milestone 3, §17).
 //
-// Run:  npm run start:text -- [scenario] [--mock] [--debug] [--help]
+// Run:  npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--help]
 //   scenario defaults to scenarios/office.json.
+//   --provider selects the LLM backend: joingonka (default), laya-local, ollama.
+//     Aliases: --backend. Overrides LLM_BACKEND (and .env) for this run.
+//   --model overrides the model id for the selected provider
+//     (JOINGONKA_MODEL / LAYA_MODEL / OLLAMA_MODEL). Examples:
+//       --provider ollama --model fluffy/l3-8b-stheno-v3.2
+//       --provider ollama --model huihui_ai/llama3.2-abliterate:3b
+//   --base-url overrides the provider endpoint
+//     (JOINGONKA_BASE_URL / LAYA_BASE_URL / OLLAMA_BASE_URL).
 //   --mock forces deterministic mock engines (no network, no API key).
 //   Without --mock the real LLM engines are used; if provider setup fails
 //   (e.g. missing JOINGONKA_API_KEY) the UI falls back to mocks with a
@@ -27,7 +35,7 @@ import { Logger } from "../../logging/logger.js";
 import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
-import { createLlmEngines } from "../../llm/index.js";
+import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
 import {
   parseCommand,
   HELP_TEXT,
@@ -48,6 +56,12 @@ export type TextUiOptions = {
   useMock?: boolean;
   debug?: boolean;
   autosave?: boolean;
+  /** LLM backend override (joingonka | laya-local | ollama). */
+  provider?: string;
+  /** Model id override for the selected provider. */
+  model?: string;
+  /** Endpoint override for the selected provider. */
+  baseUrl?: string;
 };
 
 export class TextSession {
@@ -95,7 +109,31 @@ export class TextSession {
   }
 }
 
-function buildDeps(logger: Logger, useMock: boolean, autosave: boolean): { deps: EngineDependencies; usingMock: boolean } {
+/** Apply --provider/--model/--base-url overrides on top of process.env. */
+export function resolveRuntimeEnv(opts: Pick<TextUiOptions, "provider" | "model" | "baseUrl">): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const provider = opts.provider?.trim();
+  if (provider) env["LLM_BACKEND"] = provider;
+  const backend = (env["LLM_BACKEND"] ?? "joingonka").trim();
+  if (opts.model?.trim()) {
+    if (backend === "ollama") env["OLLAMA_MODEL"] = opts.model.trim();
+    else if (backend === "laya-local") env["LAYA_MODEL"] = opts.model.trim();
+    else env["JOINGONKA_MODEL"] = opts.model.trim();
+  }
+  if (opts.baseUrl?.trim()) {
+    if (backend === "ollama") env["OLLAMA_BASE_URL"] = opts.baseUrl.trim();
+    else if (backend === "laya-local") env["LAYA_BASE_URL"] = opts.baseUrl.trim();
+    else env["JOINGONKA_BASE_URL"] = opts.baseUrl.trim();
+  }
+  return env;
+}
+
+function buildDeps(
+  logger: Logger,
+  useMock: boolean,
+  autosave: boolean,
+  llmOpts: Pick<TextUiOptions, "provider" | "model" | "baseUrl"> = {},
+): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
   const config = resolveConfig({ autosaveEnabled: autosave });
   if (useMock) {
     return {
@@ -110,8 +148,12 @@ function buildDeps(logger: Logger, useMock: boolean, autosave: boolean): { deps:
     };
   }
   try {
-    const engines = createLlmEngines(logger, { env: process.env });
-    return { usingMock: false, deps: { ...engines, logger, config } };
+    const env = resolveRuntimeEnv(llmOpts);
+    const engines = createLlmEngines(logger, { env });
+    const cfg = resolveLlmEnv(env);
+    const model =
+      cfg.backend === "ollama" ? cfg.ollama.model : cfg.backend === "laya-local" ? cfg.laya.model : cfg.joingonka.model;
+    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `${cfg.backend}/${model}` };
   } catch (err) {
     console.log(
       `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,
@@ -359,13 +401,33 @@ export async function handleLine(
 function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
   const opts: TextUiOptions & { help: boolean } = { help: false };
   const positional: string[] = [];
+  const takeValue = (i: number, flag: string): string | undefined => {
+    const eq = flag.indexOf("=");
+    if (eq !== -1) return flag.slice(eq + 1).trim() || undefined;
+    return argv[i + 1]?.trim() || undefined;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--mock") opts.useMock = true;
     else if (a === "--debug") opts.debug = true;
     else if (a === "--no-autosave") opts.autosave = false;
     else if (a === "--help" || a === "-h") opts.help = true;
-    else if (!a.startsWith("--")) positional.push(a);
+    else if (a === "--provider" || a === "--backend" || a.startsWith("--provider=") || a.startsWith("--backend=")) {
+      const v = takeValue(i, a);
+      if (!v) throw new Error(`${a.split("=")[0]} needs a value: joingonka | laya-local | ollama`);
+      opts.provider = v;
+      if (!a.includes("=")) i++;
+    } else if (a === "--model" || a.startsWith("--model=")) {
+      const v = takeValue(i, a);
+      if (!v) throw new Error("--model needs a value (model id)");
+      opts.model = v;
+      if (!a.includes("=")) i++;
+    } else if (a === "--base-url" || a === "--baseUrl" || a.startsWith("--base-url=") || a.startsWith("--baseUrl=")) {
+      const v = takeValue(i, a);
+      if (!v) throw new Error("--base-url needs a value (endpoint URL)");
+      opts.baseUrl = v;
+      if (!a.includes("=")) i++;
+    } else if (!a.startsWith("--")) positional.push(a);
   }
   if (positional[0]) opts.scenarioPath = positional[0];
   return opts;
@@ -395,9 +457,17 @@ async function main(): Promise<void> {
     }
   }
 
-  const opts = parseArgv(process.argv.slice(2));
+  let opts: TextUiOptions & { help: boolean };
+  try {
+    opts = parseArgv(process.argv.slice(2));
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave]", "", HELP_TEXT].join("\n"));
+    process.exitCode = 2;
+    return;
+  }
   if (opts.help) {
-    console.log(["Usage: npm run start:text -- [scenario] [--mock] [--debug] [--no-autosave]", "", HELP_TEXT].join("\n"));
+    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave]", "  backends: joingonka | laya-local | ollama", "", HELP_TEXT].join("\n"));
     return;
   }
 
@@ -406,11 +476,11 @@ async function main(): Promise<void> {
     logDir: resolveConfig().logDir,
     writeToFile: true,
   });
-  const { deps, usingMock } = buildDeps(logger, opts.useMock ?? false, opts.autosave ?? true);
+  const { deps, usingMock, llmLabel } = buildDeps(logger, opts.useMock ?? false, opts.autosave ?? true, opts);
   const session = new TextSession(logger, deps, opts.debug ?? false, usingMock);
 
   console.log("NPC Simulator — text interface (Milestone 3). Type 'help' for commands.");
-  console.log(usingMock ? "Engines: MOCK (deterministic, offline)." : "Engines: REAL LLM (see .env for backend).");
+  console.log(usingMock ? "Engines: MOCK (deterministic, offline)." : `Engines: REAL LLM (${llmLabel ?? "see .env for backend"}).`);
 
   const scenarioPath = opts.scenarioPath ?? DEFAULT_SCENARIO;
   try {

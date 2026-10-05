@@ -22,7 +22,15 @@ import { LLMProposalEngine } from "./llmProposalEngine.js";
 import { LLMSelectionEngine } from "./llmSelectionEngine.js";
 
 export type { LLMProvider, LlmBackend };
-export { JoinGonkaProvider, LocalLayaProvider, createProviderFromEnv, resolveLlmEnv } from "./provider.js";
+export {
+  JoinGonkaProvider,
+  LocalLayaProvider,
+  OllamaProvider,
+  createProviderFromEnv,
+  knownBackends,
+  ollamaApiRoot,
+  resolveLlmEnv,
+} from "./provider.js";
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
 export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
 export { LLMSelectionEngine, FALLBACK_SELECTION } from "./llmSelectionEngine.js";

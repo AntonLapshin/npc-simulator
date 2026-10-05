@@ -16,6 +16,8 @@ import {
   createLlmEngines,
   createProviderFromEnv,
   extractJsonPayload,
+  ollamaApiRoot,
+  OllamaProvider,
   resolveLlmEnv,
   type LLMProvider,
 } from "../src/llm/index.js";
@@ -79,14 +81,29 @@ async function probeHttp(url: string, init?: RequestInit, timeoutMs = 8_000): Pr
   }
 }
 
+async function fetchJson(url: string, timeoutMs = 8_000): Promise<unknown | undefined> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return undefined;
+    return (await res.json()) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   const dotEnv = loadDotEnv();
   const cfg = resolveLlmEnv();
   const layaLocal = cfg.backend === "laya-local";
+  const ollamaActive = cfg.backend === "ollama";
   // Local-Laya findings are WARN when hosted is the active backend (local
   // decisions simply unused), and FAIL when laya-local is selected.
   const localSeverity = (name: string, detail: string) =>
     layaLocal ? fail(name, detail) : warn(name, detail);
+  // Same rule for Ollama: missing server/models only FAIL when
+  // LLM_BACKEND=ollama, otherwise WARN.
+  const ollamaSeverity = (name: string, detail: string) =>
+    ollamaActive ? fail(name, detail) : warn(name, detail);
 
   // 1. Runtime -------------------------------------------------------------
   const major = Number(process.versions.node.split(".")[0]);
@@ -102,7 +119,8 @@ async function main(): Promise<void> {
   // 2. Backend selection ----------------------------------------------------
   const rawBackend = process.env["LLM_BACKEND"];
   if (!rawBackend) pass("LLM_BACKEND", `unset, defaulting to "${cfg.backend}"`);
-  else if (rawBackend === "joingonka" || rawBackend === "laya-local") pass("LLM_BACKEND", `"${cfg.backend}"`);
+  else if (rawBackend === "joingonka" || rawBackend === "laya-local" || rawBackend === "ollama")
+    pass("LLM_BACKEND", `"${cfg.backend}"`);
   else warn("LLM_BACKEND", `unknown value "${rawBackend}" — falling back to "${cfg.backend}"`);
 
   // 3. Hosted provider (JoinGonka) ------------------------------------------
@@ -113,8 +131,8 @@ async function main(): Promise<void> {
     } catch (err) {
       fail("joingonka config", err instanceof Error ? err.message : String(err));
     }
-  } else if (layaLocal) {
-    warn("joingonka config", "JOINGONKA_API_KEY not set (not needed while LLM_BACKEND=laya-local)");
+  } else if (layaLocal || ollamaActive) {
+    warn("joingonka config", `JOINGONKA_API_KEY not set (not needed while LLM_BACKEND=${cfg.backend})`);
   } else {
     fail("joingonka config", "JOINGONKA_API_KEY is not set — get one at https://gate.joingonka.ai/dashboard");
   }
@@ -178,6 +196,55 @@ async function main(): Promise<void> {
     pass("laya-serve reachable", `${serveUrl} answered HTTP ${upStatus}`);
   } else {
     localSeverity("laya-serve reachable", `${serveUrl} refused connection — start it: npm run serve:laya`);
+  }
+
+  // 6b. Ollama installation / server / models ----------------------------------
+  try {
+    createProviderFromEnv(process.env, "ollama");
+    pass("ollama config", `model "${cfg.ollama.model}" @ ${cfg.ollama.baseUrl}`);
+  } catch (err) {
+    ollamaSeverity("ollama config", err instanceof Error ? err.message : String(err));
+  }
+
+  const ollamaBin = run("ollama", ["--version"]);
+  if (ollamaBin.ok) pass("ollama binary", ollamaBin.out.split("\n")[0] ?? "ollama found");
+  else ollamaSeverity("ollama binary", "ollama not on PATH — run: npm run setup:ollama");
+
+  const ollamaRoot = ollamaApiRoot(cfg.ollama.baseUrl);
+  const tagsData = await fetchJson(`${ollamaRoot}/api/tags`);
+  const tagModels: string[] = Array.isArray((tagsData as { models?: unknown })?.models)
+    ? ((tagsData as { models: Array<{ name?: unknown }> }).models
+        .map((m) => (typeof m.name === "string" ? m.name : ""))
+        .filter(Boolean))
+    : [];
+  if (tagsData !== undefined) {
+    pass("ollama reachable", `${ollamaRoot} answered /api/tags (${tagModels.length} model${tagModels.length === 1 ? "" : "s"})`);
+  } else {
+    ollamaSeverity("ollama reachable", `${ollamaRoot} refused connection — start it: ollama serve (or npm run setup:ollama)`);
+  }
+
+  if (tagsData !== undefined) {
+    const norm = (s: string) => s.toLowerCase();
+    const present = new Set(tagModels.map(norm));
+    const baseName = (ref: string) => ref.split("/").pop() ?? ref;
+    const matches = (ref: string) =>
+      present.has(norm(ref)) ||
+      [...present].some((p) => p === norm(baseName(ref)) || p.startsWith(`${norm(ref)}:`) || norm(ref).startsWith(`${p.split(":")[0]}:`));
+    const missing = OllamaProvider.RECOMMENDED_MODELS.filter((m) => !matches(m));
+    const configuredOk = matches(cfg.ollama.model);
+    if (missing.length === 0) {
+      pass("ollama models", `both recommended models present (${tagModels.join(", ")})`);
+    } else if (!configuredOk) {
+      ollamaSeverity(
+        "ollama models",
+        `configured OLLAMA_MODEL "${cfg.ollama.model}" not pulled — run: npm run setup:ollama (missing: ${missing.join(", ")})`,
+      );
+    } else {
+      // Configured model works; the other recommended one is just absent.
+      warn("ollama models", `configured "${cfg.ollama.model}" present; also recommended: ${missing.join(", ")} — run: npm run setup:ollama`);
+    }
+  } else {
+    ollamaSeverity("ollama models", "unknown — server unreachable, run: npm run setup:ollama");
   }
 
   // 7. Engine wiring (offline, stub provider) ----------------------------------
@@ -247,6 +314,21 @@ async function main(): Promise<void> {
     else if (status !== undefined) warn("laya live", `server is up but answered HTTP ${status} for the probe payload`);
     else if (layaLocal) fail("laya live", "server unreachable and LLM_BACKEND=laya-local");
     else warn("laya live", "server unreachable (ok while hosted backend is active)");
+
+    const ollamaModelsUrl = `${cfg.ollama.baseUrl.replace(/\/+$/, "")}/models`;
+    const ollamaStatus = await probeHttp(ollamaModelsUrl, undefined, 15_000);
+    if (ollamaStatus === 200) {
+      const data = await fetchJson(ollamaModelsUrl, 15_000) as { data?: Array<{ id?: string }> } | undefined;
+      const ids = Array.isArray(data?.data) ? data.data.map((d) => d.id).filter(Boolean) : [];
+      const hasConfigured = ids.some((id) => id === cfg.ollama.model);
+      if (hasConfigured || ids.length === 0) pass("ollama live", `OpenAI endpoint answered /models (${ids.length} model${ids.length === 1 ? "" : "s"} listed)`);
+      else if (ids.length > 0) warn("ollama live", `server is up but "${cfg.ollama.model}" not in /models [${ids.join(", ")}] — run: npm run setup:ollama`);
+      else pass("ollama live", "server answered /models");
+    } else if (ollamaStatus !== undefined) {
+      if (ollamaActive) fail("ollama live", `unexpected HTTP ${ollamaStatus} from Ollama endpoint`);
+      else warn("ollama live", `Ollama endpoint answered HTTP ${ollamaStatus}`);
+    } else if (ollamaActive) fail("ollama live", "server unreachable and LLM_BACKEND=ollama — run: npm run setup:ollama");
+    else warn("ollama live", "server unreachable (ok while another backend is active)");
   }
 
   // Report ----------------------------------------------------------------------
@@ -259,7 +341,7 @@ async function main(): Promise<void> {
   const warns = checks.filter((c) => c.status === "WARN").length;
   console.log(`\n${checks.length - fails - warns} passed, ${warns} warnings, ${fails} failures.`);
   if (fails > 0) {
-    console.log("Fix: npm run setup:laya  →  cp .env.example .env (add keys)  →  npm run serve:laya");
+    console.log("Fix: npm run setup:ollama  →  npm run setup:laya  →  cp .env.example .env (add keys)  →  npm run serve:laya");
     process.exitCode = 1;
   }
 }

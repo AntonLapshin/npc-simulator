@@ -31,7 +31,23 @@ cp .env.example .env   # then add your JOINGONKA_API_KEY (see https://gate.joing
 npm run diagnose:ai     # offline checks — expect all "PASS"
 ```
 
-Optional local model:
+Local Ollama models (uncensored, no API key needed):
+
+```bash
+npm run setup:ollama   # install Ollama + pull both recommended models
+npm run diagnose:ai    # verifies binary, server, and pulled models
+```
+
+Pulled models:
+
+| Ollama id | Description | Size |
+|---|---|---|
+| `fluffy/l3-8b-stheno-v3.2` | L3 8B Stheno (primary, 8K ctx) | ~4.9 GB |
+| `huihui_ai/llama3.2-abliterate:3b` | Llama 3.2 3B abliterated (fast, 128K ctx) | ~2.2 GB |
+
+Subset install: `npm run setup:ollama -- --only stheno` or `-- --only llama3.2`.
+
+Optional legacy local model:
 
 ```bash
 npm run setup:laya   # install Laya weights (~808 MB)
@@ -41,14 +57,36 @@ npm run serve:laya   # serve the decision-AI endpoint
 ## Playing (Milestone 3 — text interface)
 
 ```bash
-npm run start:text -- [scenario] [--mock] [--debug] [--no-autosave]
+npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave]
 ```
 
 - `scenario` defaults to `scenarios/office.json` (you play Jeff).
 - Without `--mock` the real LLM engines are used (backend from `.env`);
   if provider setup fails the UI warns and falls back to deterministic mocks.
+- `--provider` picks the backend for this run: `joingonka` (default),
+  `laya-local`, or `ollama` (alias `--backend`). Overrides `LLM_BACKEND`.
+- `--model` picks the model id for the active provider
+  (`JOINGONKA_MODEL` / `LAYA_MODEL` / `OLLAMA_MODEL`).
+- `--base-url` overrides the provider endpoint
+  (`JOINGONKA_BASE_URL` / `LAYA_BASE_URL` / `OLLAMA_BASE_URL`).
 - `--mock` forces offline deterministic engines — no network, no API key.
 - `--debug` starts with the objective world + LLM traces visible.
+
+Provider examples:
+
+```bash
+# Hosted gateway (needs JOINGONKA_API_KEY in .env)
+npm run start:text -- --provider joingonka
+
+# Local Ollama, default Stheno 8B model (needs `npm run setup:ollama` first)
+npm run start:text -- --provider ollama
+
+# Local Ollama, fast 3B abliterated model
+npm run start:text -- --provider ollama --model huihui_ai/llama3.2-abliterate:3b
+
+# Same via environment (no flags)
+LLM_BACKEND=ollama OLLAMA_MODEL=fluffy/l3-8b-stheno-v3.2 npm run start:text
+```
 
 Example session (mock engines):
 
@@ -114,7 +152,8 @@ Notes:
 npm run dev            # run src/index.ts
 npm test               # vitest (88 tests: unit, integration, golden)
 npm run typecheck      # tsc --noEmit
-npm run diagnose:ai:live  # + live probes against JoinGonka and laya-serve
+npm run diagnose:ai       # offline: binary + server + model checks (JoinGonka, Laya, Ollama)
+npm run diagnose:ai:live  # + live probes against JoinGonka, laya-serve, and Ollama
 ```
 
 ## Repository layout
