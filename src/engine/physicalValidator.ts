@@ -1,6 +1,6 @@
 import type { Action, ConsequenceResult, ValidationResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
-import { isInsideScene, isPointBlocked } from "./geometry.js";
+import { isInsideScene, isPointBlocked, pointInRect } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
 
 /**
@@ -54,10 +54,20 @@ export function validateConsequence(
         if (!isInsideScene(world.scene, to)) {
           errors.push(`actor ${patch.actorId}: coordinates outside scene bounds`);
         } else if (isPointBlocked(world.scene, to)) {
-          errors.push(`actor ${patch.actorId}: coordinates inside non-passable object`);
+          const blocker = world.scene.objects.find(
+            (o) => !o.passable && pointInRect(to, o),
+          );
+          const where = blocker
+            ? ` inside non-passable object ${blocker.id} at (${blocker.x},${blocker.y},${blocker.w}x${blocker.h})`
+            : " inside non-passable object";
+          errors.push(
+            `actor ${patch.actorId}: coordinates (${x}, ${y})${where}: pick a nearby free cell outside that rectangle with a valid path from current (${actor.x}, ${actor.y}) — never the center of a desk/table, stand NEXT to it instead`,
+          );
         } else if (x !== actor.x || y !== actor.y) {
           if (!canMoveBetween(world.scene, { x: actor.x, y: actor.y }, to)) {
-            errors.push(`actor ${patch.actorId}: no valid path from current position`);
+            errors.push(
+              `actor ${patch.actorId}: no valid path from current (${actor.x}, ${actor.y}) to (${x}, ${y}): pick an adjacent reachable free cell instead`,
+            );
           }
         }
       }
@@ -151,16 +161,34 @@ export function validateConsequence(
   return { valid: errors.length === 0, errors };
 }
 
-/** True when the action text explicitly describes movement. */
+/** True when the action text explicitly describes whole-body locomotion by the acting actor. */
 export function looksLikeMovementIntent(text: string): boolean {
+  let t = text;
+  // Body-part noun ("shake his head", "nod her head") is an in-place
+  // gesture, never locomotion — mask it before matching.
+  t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
+  // Subordinate "as/while/when ..." clauses typically describe someone
+  // ELSE's motion ("Turn to look at Anton as he enters") — the acting
+  // actor itself stays put. Drop those clauses so only the acting
+  // actor's own main-clause motion counts.
+  t = t.replace(/\b(as|while|when)\b[^,.;]*/gi, " ");
+  // "head" is locomotion only with a directional complement
+  // ("head to/toward/into/out ..."); bare "head" was already masked above.
   if (
-    /\b(walk|walks|walking|go|goes|going|move|moves|moving|moved|run|runs|running|step|steps|stepping|come|comes|coming|came|approach|approaches|approaching|head|heads|heading|enter|enters|entering|leave|leaves|leaving|follow|follows|following|join|joins|joining|return|returns|returning|advance|advances|proceed|shift|slide|stroll|hurry|rush|rushing)\b/i.test(
-      text,
+    /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i.test(
+      t,
     )
   ) {
     return true;
   }
-  return /\b(closer|close to|nearer|toward|towards|up to|next to|beside|over to)\b/i.test(text);
+  if (
+    /\b(walk|walks|walking|go|goes|going|move|moves|moving|moved|run|runs|running|step|steps|stepping|come|comes|coming|came|approach|approaches|approaching|enter|enters|entering|leave|leaves|leaving|follow|follows|following|join|joins|joining|return|returns|returning|advance|advances|proceed|shift|slide|stroll|hurry|rush|rushing)\b/i.test(
+      t,
+    )
+  ) {
+    return true;
+  }
+  return /\b(closer|close to|nearer|toward|towards|up to|next to|beside|over to)\b/i.test(t);
 }
 
 /** Find an actor referenced by name or id inside free-form action text. */

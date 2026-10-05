@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { looksLikeMovementIntent, validateConsequence } from "../../src/engine/physicalValidator.js";
 import { makeTinyWorld } from "../helpers.js";
 import type { ConsequenceResult } from "../../src/types.js";
 
@@ -124,5 +124,58 @@ describe("physicalValidator", () => {
       reasoning: "r",
     };
     expect(validateConsequence(world, faithful, action)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("does not treat in-place gestures as movement (log regression)", () => {
+    expect(
+      looksLikeMovementIntent(
+        "Shake his head and let out a frustrated grunt, before reaching for his coffee mug and taking a long swig to collect himself, his gaze fixed intensely on his computer screen.",
+      ),
+    ).toBe(false);
+    expect(
+      looksLikeMovementIntent(
+        "Turn to look at Anton as he enters, smiling in his direction and raising a hand in a casual wave, before focusing back on her task with a slight rustle of papers.",
+      ),
+    ).toBe(false);
+    expect(looksLikeMovementIntent("Shake his head")).toBe(false);
+    expect(looksLikeMovementIntent("Nod her head and wave")).toBe(false);
+  });
+
+  it("still detects real locomotion", () => {
+    expect(looksLikeMovementIntent("Come closer to Tanya")).toBe(true);
+    expect(looksLikeMovementIntent("Walk to the coffee machine")).toBe(true);
+    expect(looksLikeMovementIntent("Head to the door")).toBe(true);
+  });
+
+  it("accepts gesture consequences without x/y position change", () => {
+    const world = makeTinyWorld();
+    const action = {
+      actorId: "u",
+      text: "Shake his head and take a long swig of coffee, gazing at the screen.",
+    };
+    const result: ConsequenceResult = {
+      narrative: "U shakes his head and takes a long swig of coffee, gazing at the screen.",
+      actorPatches: [{ actorId: "u", thoughts: "Focus." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, result, action)).toEqual({ valid: true, errors: [] });
+  });
+
+  it("names the blocking object when coordinates land inside furniture", () => {
+    const world = makeTinyWorld();
+    world.scene.objects.push({
+      id: "desk", name: "Desk", description: "A desk.",
+      x: 2, y: 1, w: 2, h: 2, passable: false, blocksVision: false, blocksSound: false,
+    });
+    const result: ConsequenceResult = {
+      narrative: "U walks to the desk.",
+      actorPatches: [{ actorId: "u", x: 2, y: 1 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const v = validateConsequence(world, result, { actorId: "u", text: "Walk to the desk" });
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/desk/);
   });
 });
