@@ -141,11 +141,12 @@ async function main(): Promise<void> {
   const numerics: Array<[string, number, (n: number) => boolean]> = [
     ["LLM_TIMEOUT_MS", cfg.timeoutMs, (n) => Number.isFinite(n) && n > 0],
     ["LLM_TEMPERATURE", cfg.temperature, (n) => Number.isFinite(n) && n >= 0],
+    ["LLM_REPEAT_PENALTY", cfg.repeatPenalty, (n) => Number.isFinite(n) && n >= 1.0 && n <= 2.0],
     ["LLM_MAX_TOKENS", cfg.maxTokens, (n) => Number.isFinite(n) && n > 0],
   ];
   const badNumerics = numerics.filter(([key, value, valid]) => process.env[key] !== undefined && !valid(value));
   if (badNumerics.length === 0) {
-    pass("tuning", `timeout=${cfg.timeoutMs}ms temperature=${cfg.temperature} maxTokens=${cfg.maxTokens}`);
+    pass("tuning", `timeout=${cfg.timeoutMs}ms temperature=${cfg.temperature} repeat_penalty=${cfg.repeatPenalty} maxTokens=${cfg.maxTokens}`);
   } else {
     warn("tuning", `ignoring invalid: ${badNumerics.map(([k]) => k).join(", ")}`);
   }

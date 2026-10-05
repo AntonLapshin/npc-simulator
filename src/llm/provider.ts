@@ -40,6 +40,8 @@ export type OpenAICompatibleOptions = {
   model: string;
   apiKey?: string;
   temperature?: number;
+  /** Repeat penalty (1.0 = disabled). Helps prevent repetitive RP prose. */
+  repeatPenalty?: number;
   maxTokens?: number;
   timeoutMs?: number;
   /** Extra fetch init (custom headers, dispatcher, ...). */
@@ -71,7 +73,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.options = {
       baseUrl: options.baseUrl,
       model: options.model,
-      temperature: options.temperature ?? 0.7,
+      temperature: options.temperature ?? 0.9,
+      repeatPenalty: options.repeatPenalty ?? 1.1,
       maxTokens: options.maxTokens ?? 1500,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       apiKey: options.apiKey,
@@ -101,6 +104,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
             { role: "user", content: userPrompt },
           ],
           temperature: this.options.temperature,
+          repeat_penalty: this.options.repeatPenalty,
           max_tokens: this.options.maxTokens,
         }),
       });
@@ -143,6 +147,7 @@ export class JoinGonkaProvider extends OpenAICompatibleProvider {
     baseUrl?: string;
     model?: string;
     temperature?: number;
+    repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
     fetchImpl?: typeof fetch;
@@ -153,6 +158,7 @@ export class JoinGonkaProvider extends OpenAICompatibleProvider {
       model: options.model ?? JoinGonkaProvider.DEFAULT_MODEL,
       apiKey: options.apiKey,
       temperature: options.temperature,
+      repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
       fetchImpl: options.fetchImpl,
@@ -171,6 +177,7 @@ export class LocalLayaProvider extends OpenAICompatibleProvider {
     model?: string;
     apiKey?: string;
     temperature?: number;
+    repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
     fetchImpl?: typeof fetch;
@@ -180,6 +187,7 @@ export class LocalLayaProvider extends OpenAICompatibleProvider {
       model: options.model ?? LocalLayaProvider.DEFAULT_MODEL,
       apiKey: options.apiKey,
       temperature: options.temperature,
+      repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
       fetchImpl: options.fetchImpl,
@@ -205,6 +213,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
     model?: string;
     apiKey?: string;
     temperature?: number;
+    repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
     fetchImpl?: typeof fetch;
@@ -214,6 +223,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
       model: options.model ?? OllamaProvider.DEFAULT_MODEL,
       apiKey: options.apiKey,
       temperature: options.temperature,
+      repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
       fetchImpl: options.fetchImpl,
@@ -237,6 +247,7 @@ export type LlmEnvConfig = {
   ollama: { baseUrl: string; model: string; apiKey?: string };
   timeoutMs: number;
   temperature: number;
+  repeatPenalty: number;
   maxTokens: number;
 };
 
@@ -265,7 +276,8 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
       apiKey: env["OLLAMA_API_KEY"],
     },
     timeoutMs: Number(env["LLM_TIMEOUT_MS"] ?? DEFAULT_TIMEOUT_MS),
-    temperature: Number(env["LLM_TEMPERATURE"] ?? 0.7),
+    temperature: Number(env["LLM_TEMPERATURE"] ?? 0.9),
+    repeatPenalty: Number(env["LLM_REPEAT_PENALTY"] ?? 1.1),
     maxTokens: Number(env["LLM_MAX_TOKENS"] ?? 1500),
   };
 }
@@ -293,6 +305,7 @@ export function createProviderFromEnv(
       model: cfg.laya.model,
       apiKey: cfg.laya.apiKey,
       temperature: cfg.temperature,
+      repeatPenalty: cfg.repeatPenalty,
       maxTokens: cfg.maxTokens,
       timeoutMs: cfg.timeoutMs,
     });
@@ -303,6 +316,7 @@ export function createProviderFromEnv(
       model: cfg.ollama.model,
       apiKey: cfg.ollama.apiKey,
       temperature: cfg.temperature,
+      repeatPenalty: cfg.repeatPenalty,
       maxTokens: cfg.maxTokens,
       timeoutMs: cfg.timeoutMs,
     });
@@ -315,6 +329,7 @@ export function createProviderFromEnv(
     baseUrl: cfg.joingonka.baseUrl,
     model: cfg.joingonka.model,
     temperature: cfg.temperature,
+    repeatPenalty: cfg.repeatPenalty,
     maxTokens: cfg.maxTokens,
     timeoutMs: cfg.timeoutMs,
   });

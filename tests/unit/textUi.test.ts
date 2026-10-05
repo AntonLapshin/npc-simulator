@@ -144,6 +144,18 @@ describe("text UI session flow", () => {
     session.world = loadOfficeScenario();
     const res = await handleLine("action: Hey guys, I'm a new team member, my name is Jeff!", session, ask);
     expect(res.output).toContain("Jeff");
+    // User turn + 2 NPC turns auto-advance (no manual `next` needed).
+    expect(session.world!.tick).toBe(3);
+    expect(res.output).toContain("NPC");
+    expect(res.output).toContain("Your turn");
+  });
+
+  it("next on an NPC turn drains NPCs back to the user", async () => {
+    const { session } = makeSession();
+    await handleLine("next", session, ask); // user turn done; now NPC's turn
     expect(session.world!.tick).toBe(1);
+    const res = await handleLine("next", session, ask);
+    expect(session.world!.tick).toBe(2);
+    expect(res.output).toContain("Your turn");
   });
 });

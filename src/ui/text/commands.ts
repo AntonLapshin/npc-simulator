@@ -158,8 +158,8 @@ export function parseCommand(line: string): Command | ParseError {
 export const HELP_TEXT = [
   "Commands:",
   "  start [path]              Load a scenario JSON (default: scenarios/office.json).",
-  "  next                      Run one turn (NPC turns need no input; your turn prompts for action).",
-  "  action: <text>            Submit a free-form action for your turn. Any text is accepted.",
+  "  next                      Advance one turn (on an NPC turn, auto-runs NPCs until your turn).",
+  "  action: <text>            Act on your turn — NPCs then respond automatically until your next turn.",
   "  look                      Scene panel (title, tick, current actor, narrative, nearby).",
   "  look actor <id>           Actor panel (state, emotion, goal, memories, beliefs, relations).",
   "  look object <id>          Object panel (description, rectangle, flags).",

@@ -185,50 +185,61 @@ async function runSingleTurn(
   session: TextSession,
   ask: (query: string) => Promise<string>,
   forcedActionText?: string,
+  opts: { includeScene?: boolean } = {},
 ): Promise<string> {
   if (!session.world) return "No scenario loaded. Use: start [path]";
   const actor = getCurrentActor(session.world);
   const isUser = actor.id === session.world.userActorId;
+  const includeScene = opts.includeScene ?? true;
   const out: string[] = [];
 
-  // Agentic-style loading indicator: runTurn awaits several sequential
-  // LLM calls (proposal → selection → consequence, each up to 60s), so the
-  // terminal would otherwise freeze with no feedback. The orchestrator
-  // reports each stage via onProgress; we echo the stage immediately and
-  // keep a "Thinking… (Ns)" heartbeat so the user sees what is happening.
-  // The heartbeat pauses while the user is typing, so the input line is
-  // never garbled.
+  // Single-line loading indicator: runTurn awaits several sequential LLM
+  // calls (proposal → selection → consequence, each up to 60s). Exactly one
+  // terminal line is used — it always shows the current pending stage and
+  // is fully cleared when the turn finishes, so no spinner text hangs
+  // around. The indicator pauses while the user is typing.
+  const canAnimate = Boolean((output as typeof output & { isTTY?: boolean }).isTTY);
   const previousProgress = session.deps.onProgress;
   let currentStage = "starting…";
+  let currentActorLabel = isUser ? `you (${actor.name})` : `${actor.name} (NPC)`;
   const startedAt = Date.now();
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let frame = 0;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const renderLine = () => {
+    if (!canAnimate) return;
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    output.write(`\r\x1b[K${frames[frame % frames.length]} ${currentActorLabel} — ${currentStage} (${elapsed}s)`);
+  };
   const startHeartbeat = () => {
-    if (heartbeat !== undefined) return;
+    if (!canAnimate || heartbeat !== undefined) return;
     heartbeat = setInterval(() => {
       frame++;
-      const elapsed = Math.round((Date.now() - startedAt) / 1000);
-      output.write(`\r${frames[frame % frames.length]} Thinking… ${currentStage} (${elapsed}s)   `);
-    }, 500);
+      renderLine();
+    }, 200);
+  };
+  const clearLine = () => {
+    if (canAnimate) output.write("\r\x1b[K");
   };
   const pauseHeartbeat = () => {
     if (heartbeat !== undefined) {
       clearInterval(heartbeat);
       heartbeat = undefined;
     }
-    output.write("\n");
+    clearLine();
   };
   const stopIndicator = () => {
     if (heartbeat !== undefined) {
       clearInterval(heartbeat);
       heartbeat = undefined;
     }
+    // Remove the loading line entirely — nothing hangs after the turn.
+    clearLine();
     session.deps.onProgress = previousProgress;
   };
   session.deps.onProgress = (event) => {
     currentStage = event.message;
-    console.log(`  ${frames[frame % frames.length]} ${event.message}`);
+    renderLine();
     try {
       previousProgress?.(event);
     } catch {
@@ -267,18 +278,17 @@ async function runSingleTurn(
   };
 
   const beforeTick = session.world.tick;
-  console.log(`Thinking… (${actor.name} · tick ${beforeTick})`);
+  currentStage = "starting…";
+  renderLine();
   startHeartbeat();
 
   try {
     session.world = await runTurn(session.world, session.deps);
   } catch (err) {
     stopIndicator();
-    output.write("\n");
     return `Turn failed: ${err instanceof Error ? err.message : String(err)}`;
   }
   stopIndicator();
-  output.write("\n");
   const entries = session.logger.store.all();
   const lastPatch = entries.filter((e) => e.tick === beforeTick && e.event === "patch_applied").at(-1);
   const historyTail = session.world.history.slice(-2);
@@ -288,7 +298,7 @@ async function runSingleTurn(
   out.push(
     isUser
       ? `--- Tick ${beforeTick} — you (${actor.name}) acted ---`
-      : `--- Tick ${beforeTick} — ${actor.name} (${actor.id}) acted ---`,
+      : `--- Tick ${beforeTick} — ${actor.name} (${actor.id}, NPC) acted ---`,
     ...historyTail.map((h) => `  ${h}`),
   );
   void lastPatch;
@@ -297,8 +307,41 @@ async function runSingleTurn(
     out.push("Validation failures (debug):");
     for (const v of validationFailures) out.push(`  ${formatLogEntry(v, true)}`);
   }
-  out.push(session.showScene());
+  if (includeScene) out.push(session.showScene());
   return out.join("\n");
+}
+
+/**
+ * Run the user's turn, then automatically run following NPC turns until it
+ * is the user's turn again. This removes the need to type `next` for every
+ * NPC. Intermediate turns render a concise header + narrative; only the
+ * final scene panel is shown, ending with an explicit "Your turn" prompt.
+ */
+async function runUserTurnAndNpcs(
+  session: TextSession,
+  ask: (query: string) => Promise<string>,
+  forcedActionText?: string,
+): Promise<string> {
+  if (!session.world) return "No scenario loaded. Use: start [path]";
+  const parts: string[] = [];
+  // User turn (scene suppressed — the final scene is rendered once at end).
+  parts.push(await runSingleTurn(session, ask, forcedActionText, { includeScene: false }));
+  // Auto-advance NPCs (guarded so a misconfigured order can't loop forever).
+  const maxNpcTurns = Math.max(0, session.world.order.length - 1);
+  for (let i = 0; i < maxNpcTurns; i++) {
+    if (!session.world) break;
+    const current = getCurrentActor(session.world);
+    if (current.id === session.world.userActorId) break;
+    parts.push(await runSingleTurn(session, ask, undefined, { includeScene: false }));
+  }
+  if (session.world) {
+    parts.push(session.showScene());
+    const me = getActorById(session.world, session.world.userActorId);
+    if (getCurrentActor(session.world).id === session.world.userActorId) {
+      parts.push(`Your turn (${me?.name ?? session.world.userActorId}) — type your action (e.g. action: <what you do or say>).`);
+    }
+  }
+  return parts.join("\n");
 }
 
 function showLogs(session: TextSession, filter: { module?: string; tick?: number }, limit = 10): string {
@@ -334,14 +377,35 @@ export async function handleLine(
         return { output: `Failed to load scenario '${path}': ${err instanceof Error ? err.message : String(err)}`, quit: false };
       }
     }
-    case "next":
+    case "next": {
+      if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
+      // On an NPC turn, drain all consecutive NPC turns so one `next`
+      // always returns control to the user.
+      if (getCurrentActor(session.world).id !== session.world.userActorId) {
+        const parts: string[] = [];
+        const maxNpcTurns = Math.max(1, session.world.order.length);
+        for (let i = 0; i < maxNpcTurns; i++) {
+          if (!session.world || getCurrentActor(session.world).id === session.world.userActorId) break;
+          parts.push(await runSingleTurn(session, ask, undefined, { includeScene: false }));
+        }
+        if (session.world) {
+          parts.push(session.showScene());
+          if (getCurrentActor(session.world).id === session.world.userActorId) {
+            const me = getActorById(session.world, session.world.userActorId);
+            parts.push(`Your turn (${me?.name ?? session.world.userActorId}) — type your action (e.g. action: <what you do or say>).`);
+          }
+        }
+        return { output: parts.join("\n"), quit: false };
+      }
       return { output: await runSingleTurn(session, ask), quit: false };
+    }
     case "action": {
       if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
       if (getCurrentActor(session.world).id !== session.world.userActorId) {
-        return { output: `Not your turn — current actor is ${getCurrentActor(session.world).id}. Use 'next' to advance NPC turns.`, quit: false };
+        return { output: `Not your turn — current actor is ${getCurrentActor(session.world).id}. Use 'next' to auto-advance NPC turns.`, quit: false };
       }
-      return { output: await runSingleTurn(session, ask, parsed.text), quit: false };
+      // User act → NPCs respond automatically, then control returns to you.
+      return { output: await runUserTurnAndNpcs(session, ask, parsed.text), quit: false };
     }
     case "look":
       return { output: session.showScene(), quit: false };
