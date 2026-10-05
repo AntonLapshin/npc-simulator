@@ -19,3 +19,4 @@ export * from "./mocks/mockConsequenceEngine.js";
 export * from "./logging/logTypes.js";
 export * from "./logging/logStore.js";
 export * from "./logging/logger.js";
+export * from "./ui/text/commands.js";
