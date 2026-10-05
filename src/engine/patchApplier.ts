@@ -28,6 +28,7 @@ export function applyConsequence(
     if (patch.state !== undefined) actor.state = patch.state;
     if (patch.emotion !== undefined) actor.emotion = patch.emotion;
     if (patch.goal !== undefined) actor.goal = patch.goal;
+    if (patch.thoughts !== undefined) actor.thoughts = patch.thoughts;
     if (patch.memoriesAppend) actor.memories.push(...patch.memoriesAppend);
     if (patch.beliefsAppend) actor.beliefs.push(...patch.beliefsAppend);
     if (patch.relationshipsAppend) actor.relationships.push(...patch.relationshipsAppend);

@@ -16,6 +16,27 @@ import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import type { Logger } from "../logging/logger.js";
 
+export type TurnProgressStage =
+  | "turn_started"
+  | "proposal_started"
+  | "proposal_done"
+  | "waiting_user_input"
+  | "selection_started"
+  | "selection_done"
+  | "consequence_started"
+  | "consequence_retry"
+  | "validation_started"
+  | "validation_done"
+  | "patch_applied"
+  | "turn_completed";
+
+export type TurnProgressEvent = {
+  stage: TurnProgressStage;
+  actorId: string;
+  /** Human-readable one-liner for loading indicators (e.g. "consequence engine…"). */
+  message: string;
+};
+
 export type EngineDependencies = {
   proposalEngine: ProposalEngine;
   selectionEngine: SelectionEngine;
@@ -26,7 +47,17 @@ export type EngineDependencies = {
   getUserAction?: (actorId: string, suggestions: string[]) => Promise<string>;
   /** Optional save hook (defaults to file persistence when autosave is on). */
   onAutosave?: (world: World) => Promise<void> | void;
+  /** Optional progress hook for UIs to show a loading indicator during slow LLM calls. */
+  onProgress?: (event: TurnProgressEvent) => void;
 };
+
+function report(deps: EngineDependencies, event: TurnProgressEvent): void {
+  try {
+    deps.onProgress?.(event);
+  } catch {
+    // Progress reporting must never break the turn.
+  }
+}
 
 export const FALLBACK_CONSEQUENCE: ConsequenceResult = {
   narrative: "Nothing changes.",
@@ -90,7 +121,12 @@ export async function resolveWithValidation(
       input: { action, result, attempt },
     });
 
-    const validation = validateConsequence(world, result);
+    report(deps, {
+      stage: "validation_started",
+      actorId: action.actorId,
+      message: `validating consequence (attempt ${attempt})…`,
+    });
+    const validation = validateConsequence(world, result, action);
     if (validation.valid) {
       logger.log({
         module: "validator",
@@ -116,6 +152,11 @@ export async function resolveWithValidation(
 
     feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
+    report(deps, {
+      stage: "consequence_retry",
+      actorId: action.actorId,
+      message: `consequence invalid — retrying (attempt ${attempt + 1})…`,
+    });
     logger.log({
       module: "turn",
       event: "retry_started",
@@ -180,9 +221,14 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     input: { world: structuredClone(world) },
   });
 
+  report(deps, { stage: "turn_started", actorId: actor.id, message: `turn started — ${actor.id} (tick ${world.tick})` });
+  report(deps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
+
   let action: Action;
   if (actor.id === world.userActorId) {
     const proposal = await deps.proposalEngine.propose(world, actor.id);
+    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
+    report(deps, { stage: "waiting_user_input", actorId: actor.id, message: "waiting for your action…" });
     if (!deps.getUserAction) {
       throw new Error("getUserAction is required for user-controlled turns");
     }
@@ -211,7 +257,10 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     });
   } else {
     const proposal = await deps.proposalEngine.propose(world, actor.id);
+    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
+    report(deps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
     const selection = await deps.selectionEngine.select(world, actor.id, proposal.suggestions);
+    report(deps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
     action = { actorId: actor.id, text: selection.action };
   }
 
@@ -224,9 +273,12 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     output: action,
   });
 
+  report(deps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
   const consequence = await resolveWithValidation(world, action, deps);
+  report(deps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
 
   const patched = applyConsequence(world, consequence, action, config);
+  report(deps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({
     module: "turn",
     event: "patch_applied",
@@ -258,6 +310,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   });
 
   await autosave(nextWorld, deps);
+  report(deps, { stage: "turn_completed", actorId: action.actorId, message: "turn completed" });
   return nextWorld;
 }
 

@@ -35,6 +35,9 @@ export const actorSchema = z
     state: z.string(),
     emotion: z.string(),
     goal: z.string(),
+    // One-time inner reaction; defaults to "" so older scenario/save
+    // files without the field still load.
+    thoughts: z.string().default(""),
     memories: z.array(z.string()),
     beliefs: z.array(z.string()),
     relationships: z.array(z.string()),
@@ -91,6 +94,7 @@ export const actorPatchSchema = z
     state: z.string().optional(),
     emotion: z.string().optional(),
     goal: z.string().optional(),
+    thoughts: z.string().optional(),
     memoriesAppend: z.array(z.string()).optional(),
     beliefsAppend: z.array(z.string()).optional(),
     relationshipsAppend: z.array(z.string()).optional(),

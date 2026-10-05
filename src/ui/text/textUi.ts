@@ -149,34 +149,94 @@ async function runSingleTurn(
   const isUser = actor.id === session.world.userActorId;
   const out: string[] = [];
 
+  // Agentic-style loading indicator: runTurn awaits several sequential
+  // LLM calls (proposal → selection → consequence, each up to 60s), so the
+  // terminal would otherwise freeze with no feedback. The orchestrator
+  // reports each stage via onProgress; we echo the stage immediately and
+  // keep a "Thinking… (Ns)" heartbeat so the user sees what is happening.
+  // The heartbeat pauses while the user is typing, so the input line is
+  // never garbled.
+  const previousProgress = session.deps.onProgress;
+  let currentStage = "starting…";
+  const startedAt = Date.now();
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let frame = 0;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const startHeartbeat = () => {
+    if (heartbeat !== undefined) return;
+    heartbeat = setInterval(() => {
+      frame++;
+      const elapsed = Math.round((Date.now() - startedAt) / 1000);
+      output.write(`\r${frames[frame % frames.length]} Thinking… ${currentStage} (${elapsed}s)   `);
+    }, 500);
+  };
+  const pauseHeartbeat = () => {
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    output.write("\n");
+  };
+  const stopIndicator = () => {
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    session.deps.onProgress = previousProgress;
+  };
+  session.deps.onProgress = (event) => {
+    currentStage = event.message;
+    console.log(`  ${frames[frame % frames.length]} ${event.message}`);
+    try {
+      previousProgress?.(event);
+    } catch {
+      // Ignore progress-hook errors.
+    }
+  };
+
   session.deps.getUserAction = async (_actorId, suggestions) => {
     session.lastSuggestions = [...suggestions];
     if (forcedActionText !== undefined) return forcedActionText;
+    // Pause the spinner while the user types; resume for the slow
+    // consequence call that follows the submitted action.
+    pauseHeartbeat();
     // Print directly so suggestions appear before the input prompt.
     console.log(renderSuggestions(suggestions));
     for (;;) {
       const answer = (await ask("action (number, 'action: <text>', or free text): ")).trim();
       if (!answer) {
-        out.push("Empty action — please enter what you do or say.");
+        console.log("Empty action — please enter what you do or say.");
         continue;
       }
       const asNumber = Number(answer);
       if (Number.isInteger(asNumber) && asNumber >= 1 && asNumber <= suggestions.length) {
+        startHeartbeat();
         return suggestions[asNumber - 1]!;
       }
       const parsed = parseCommand(answer);
-      if (parsed.kind === "action") return parsed.text;
+      if (parsed.kind === "action") {
+        startHeartbeat();
+        return parsed.text;
+      }
       // Any other text is accepted verbatim as the free-form action.
+      startHeartbeat();
       return answer.startsWith("action:") ? answer.slice("action:".length).trim() || answer : answer;
     }
   };
 
   const beforeTick = session.world.tick;
+  console.log(`Thinking… (${actor.name} · tick ${beforeTick})`);
+  startHeartbeat();
+
   try {
     session.world = await runTurn(session.world, session.deps);
   } catch (err) {
+    stopIndicator();
+    output.write("\n");
     return `Turn failed: ${err instanceof Error ? err.message : String(err)}`;
   }
+  stopIndicator();
+  output.write("\n");
   const entries = session.logger.store.all();
   const lastPatch = entries.filter((e) => e.tick === beforeTick && e.event === "patch_applied").at(-1);
   const historyTail = session.world.history.slice(-2);
@@ -247,6 +307,12 @@ export async function handleLine(
       return { output: session.showActor(parsed.actorId), quit: false };
     case "lookObject":
       return { output: session.showObject(parsed.objectId), quit: false };
+    case "thoughts": {
+      if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
+      const actor = getActorById(session.world, parsed.actorId ?? session.world.userActorId);
+      if (!actor) return { output: `Unknown actor: ${parsed.actorId}`, quit: false };
+      return { output: `${actor.name} (${actor.id}) thoughts:\n  ${actor.thoughts || "(none)"}`, quit: false };
+    }
     case "memories":
     case "beliefs":
     case "relationships": {

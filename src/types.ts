@@ -30,6 +30,10 @@ export type Actor = {
   state: string;
   emotion: string;
   goal: string;
+  /** One-time inner reaction to the most recent event. Rewritten after
+   *  every turn for actors who perceived it; guides the next action and
+   *  is included in proposal/selection prompts. */
+  thoughts: string;
   memories: string[];
   beliefs: string[];
   relationships: string[];
@@ -82,6 +86,8 @@ export type ActorPatch = {
   state?: string;
   emotion?: string;
   goal?: string;
+  /** Replacement for the actor's one-time thoughts field. */
+  thoughts?: string;
   memoriesAppend?: string[];
   beliefsAppend?: string[];
   relationshipsAppend?: string[];

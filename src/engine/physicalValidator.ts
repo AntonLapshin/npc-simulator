@@ -1,16 +1,20 @@
-import type { ConsequenceResult, ValidationResult, World } from "../types.js";
+import type { Action, ConsequenceResult, ValidationResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
 import { isInsideScene, isPointBlocked } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
 
 /**
  * Validate ConsequenceResult output. Checks schema, referenced ids,
- * coordinates, collisions, movement paths, and object rectangles.
+ * coordinates, collisions, movement paths, object rectangles, and
+ * turn discipline (only the acting actor may move/speak/act — other
+ * actors may only change internal state: thoughts, emotion, goal,
+ * memories, beliefs, relationships).
  * Never judges tone, morality, or social realism.
  */
 export function validateConsequence(
   world: World,
   result: ConsequenceResult,
+  action?: Action,
 ): ValidationResult {
   const errors: string[] = [];
 
@@ -58,9 +62,27 @@ export function validateConsequence(
       ["state", patch.state],
       ["emotion", patch.emotion],
       ["goal", patch.goal],
+      ["thoughts", patch.thoughts],
     ] as const) {
       if (value !== undefined && typeof value !== "string") {
         errors.push(`actor ${patch.actorId}: ${field} must be a string`);
+      }
+    }
+    // Turn discipline: a character only acts on its own turn. Observers
+    // of someone else's action must not move (x/y) or change physical
+    // state — they may only react internally (thoughts, emotion, goal,
+    // memories, beliefs, relationships). Any observable reply, approach,
+    // or gesture belongs to their own future turn.
+    if (action && patch.actorId !== action.actorId) {
+      if (patch.x !== undefined || patch.y !== undefined) {
+        errors.push(
+          `actor ${patch.actorId}: only the acting actor (${action.actorId}) may move; observers must not change position`,
+        );
+      }
+      if (patch.state !== undefined) {
+        errors.push(
+          `actor ${patch.actorId}: only the acting actor (${action.actorId}) may change state; observers may only update thoughts/emotion/goal/memories/beliefs/relationships`,
+        );
       }
     }
     for (const [field, value] of [

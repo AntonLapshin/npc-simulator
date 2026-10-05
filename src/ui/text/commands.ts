@@ -19,6 +19,7 @@ export type Command =
   | { kind: "look" }
   | { kind: "lookActor"; actorId: string }
   | { kind: "lookObject"; objectId: string }
+  | { kind: "thoughts"; actorId?: string }
   | { kind: "memories"; actorId?: string }
   | { kind: "beliefs"; actorId?: string }
   | { kind: "relationships"; actorId?: string }
@@ -84,6 +85,8 @@ export function parseCommand(line: string): Command | ParseError {
       }
       return { kind: "error", message: "Usage: look | look actor <id> | look object <id>" };
     }
+    case "thoughts":
+      return { kind: "thoughts", actorId: rest[0] };
     case "memories":
       return { kind: "memories", actorId: rest[0] };
     case "beliefs":
@@ -160,6 +163,7 @@ export const HELP_TEXT = [
   "  look                      Scene panel (title, tick, current actor, narrative, nearby).",
   "  look actor <id>           Actor panel (state, emotion, goal, memories, beliefs, relations).",
   "  look object <id>          Object panel (description, rectangle, flags).",
+  "  thoughts [actor]          Show one-time thoughts (default: your actor).",
   "  memories [actor]          Show memories (default: your actor).",
   "  beliefs [actor]           Show beliefs (default: your actor).",
   "  relationships [actor]     Show relationships (default: your actor).",
@@ -238,6 +242,7 @@ export function renderActorPanel(actor: Actor): string {
     `State: ${actor.state}`,
     `Emotion: ${actor.emotion}`,
     `Goal: ${actor.goal}`,
+    `Thoughts: ${actor.thoughts || "(none)"}`,
     `Persona: ${actor.persona}`,
     "Memories:",
     bullet(actor.memories),

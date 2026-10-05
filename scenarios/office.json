@@ -129,6 +129,7 @@
       "state": "standing near the entrance",
       "emotion": "nervous",
       "goal": "Introduce himself to the team.",
+      "thoughts": "",
       "memories": ["Jeff just entered the office."],
       "beliefs": ["This is the office where Jeff will work."],
       "relationships": []
@@ -142,6 +143,7 @@
       "state": "sitting at her desk and working on a laptop",
       "emotion": "focused",
       "goal": "Finish a small engineering task before lunch.",
+      "thoughts": "",
       "memories": [
         "Ana arrived at the office this morning.",
         "Ana started working on her current task."
@@ -161,6 +163,7 @@
       "state": "sitting at his desk and staring at a monitor",
       "emotion": "stressed",
       "goal": "Finish an urgent design draft.",
+      "thoughts": "",
       "memories": ["Dan has been working on the same design for several hours."],
       "beliefs": ["The design deadline is close."],
       "relationships": ["Dan knows Ana as a coworker."]

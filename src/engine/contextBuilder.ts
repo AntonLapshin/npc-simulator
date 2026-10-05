@@ -28,6 +28,7 @@ export function buildProposalContext(world: World, actorId: string): string {
     `State: ${actor.state}`,
     `Emotion: ${actor.emotion}`,
     `Goal: ${actor.goal}`,
+    `Thoughts (your immediate inner reaction to the last event — this guides what you do next): ${actor.thoughts || "(none yet)"}`,
     "",
     "Memories",
     "",
@@ -120,6 +121,14 @@ export function buildConsequenceContext(
     lines.push("", "Validation Feedback (previous output was invalid)", "", feedback);
   }
   lines.push(
+    "",
+    "TURN DISCIPLINE (strict — a character only acts on its own turn)",
+    "",
+    `Acting actor this turn: ${action.actorId}. ONLY this actor may speak, move, change physical state, or perform any observable action.`,
+    "All other actors are observers of this event. They MUST NOT speak (no dialogue, no quoted replies, no 'calls back' / 'says' / 'nods welcome'), MUST NOT move (no x/y changes), and MUST NOT change state.",
+    "Observers may only react INTERNALLY: set their one-time 'thoughts' field (immediate inner reaction to this event, e.g. surprise, recognition, annoyance), and optionally adjust emotion, goal, memoriesAppend, beliefsAppend, relationshipsAppend.",
+    "Set 'thoughts' for EVERY actor who perceives the event (including the acting actor — its take on what just happened). Thoughts are one-time and will guide that actor's next turn.",
+    `Narrative rule: describe ONLY what ${action.actorId} observably does plus how others passively perceive it (e.g. 'Tanya hears it', 'Dana glances up briefly'). Never narrate an observer speaking, approaching, gesturing, or responding — their response belongs to their own future turn.`,
     "",
     "Task",
     "",
