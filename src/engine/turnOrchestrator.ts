@@ -74,6 +74,16 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * LLMs sometimes echo the candidate list numbering ("3. Call out ...",
+ * "2) Nod ...") into the chosen action. That prefix is presentation, not
+ * part of the action — strip it so it never reaches consequences,
+ * validation, or history.
+ */
+export function stripSelectionPrefix(text: string): string {
+  return text.replace(/^\s*\d+\s*[.)]\s*/, "").trimStart();
+}
+
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
 export async function resolveWithValidation(
   world: World,
@@ -272,7 +282,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     report(deps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
     const selection = await deps.selectionEngine.select(world, actor.id, proposal.suggestions);
     report(deps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
-    action = { actorId: actor.id, text: selection.action };
+    action = { actorId: actor.id, text: stripSelectionPrefix(selection.action) };
   }
 
   logger.log({

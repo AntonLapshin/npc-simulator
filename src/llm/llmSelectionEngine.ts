@@ -99,6 +99,8 @@ export class LLMSelectionEngine implements SelectionEngine {
       output: result.value,
       durationMs: Date.now() - startedAt,
     });
-    return result.value;
+    // Strip echoed candidate numbering ("3. Do X" -> "Do X").
+    const cleaned = result.value.action.replace(/^\s*\d+\s*[.)]\s*/, "").trimStart();
+    return { ...result.value, action: cleaned };
   }
 }

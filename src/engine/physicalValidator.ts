@@ -167,6 +167,34 @@ export function looksLikeMovementIntent(text: string): boolean {
   // Body-part noun ("shake his head", "nod her head") is an in-place
   // gesture, never locomotion — mask it before matching.
   t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
+  // "return to <activity>" resumes a task, it is not locomotion
+  // ("return to typing", "returning to staring at the monitor",
+  // "return to work"). Mask those so only "return to <place>"
+  // ("return to the door/desk") still counts. Gerunds (-ing) after
+  // "return to" are activities, never destinations; bare activity nouns
+  // (work/task/focus/...) are likewise not places.
+  t = t.replace(
+    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  // Same for "go/back to <activity>" ("go back to typing").
+  t = t.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  t = t.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
   // Subordinate "as/while/when ..." clauses typically describe someone
   // ELSE's motion ("Turn to look at Anton as he enters") — the acting
   // actor itself stays put. Drop those clauses so only the acting

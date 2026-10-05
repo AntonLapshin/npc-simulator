@@ -85,6 +85,7 @@ export function buildSelectionContext(
     "",
     "Choose the action this actor actually performs.",
     "You may choose a candidate action or produce a different action if it better fits the actor and situation.",
+    "Return the action text alone, without any leading candidate number (never '1. ...' or '3) ...').",
     "Return JSON only.",
   ].join("\n");
 }
@@ -137,7 +138,7 @@ export function buildConsequenceContext(
     "Do not move actors into non-passable objects.",
     "MOVEMENT RULE: if the action text describes whole-body locomotion by the acting actor (walk/go/move/run/step/come/approach/enter/leave/follow/closer/toward/next to),",
     "the acting actor's patch MUST include x and y with a NEW position reflecting that movement; if it names another actor, the new position MUST be strictly closer to that actor.",
-    "In-place gestures (turn/look/shake or nod the head, wave/raise a hand, reach for an object, sip/drink) and someone ELSE's motion in a subordinate clause ('as he enters') are NOT locomotion — no x/y change needed. Never place an actor INSIDE a desk/table rect; stand NEXT to it.",
+    "In-place gestures (turn/look/shake or nod the head, wave/raise a hand, reach for an object, sip/drink) and someone ELSE's motion in a subordinate clause ('as he enters') are NOT locomotion — no x/y change needed. Resuming a task ('return/returning/back to typing/staring/work/task/focus') is NOT locomotion either — only 'return to <place>' counts. Never place an actor INSIDE a desk/table rect; stand NEXT to it.",
   ];
   if (feedback) {
     lines.push("", "Validation Feedback (previous output was invalid)", "", feedback);

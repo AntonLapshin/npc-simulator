@@ -145,6 +145,40 @@ describe("physicalValidator", () => {
     expect(looksLikeMovementIntent("Come closer to Tanya")).toBe(true);
     expect(looksLikeMovementIntent("Walk to the coffee machine")).toBe(true);
     expect(looksLikeMovementIntent("Head to the door")).toBe(true);
+    expect(looksLikeMovementIntent("Return to the door")).toBe(true);
+    expect(looksLikeMovementIntent("Return to her desk")).toBe(true);
+  });
+
+  it("does not treat resuming a task as movement (office-anton log regression)", () => {
+    // Tick 1: "then return to typing" is resuming work, not locomotion.
+    expect(
+      looksLikeMovementIntent(
+        "3. Call out a friendly 'Hey!' as she sees Anton, then return to typing, an open and welcoming demeanor still present even with full focus on the task at hand.",
+      ),
+    ).toBe(false);
+    // Tick 2: "returning to staring at the monitor" is resuming work.
+    expect(
+      looksLikeMovementIntent(
+        "Sighs, rubs temples, and mutters 'Just a few more minutes...' before returning to staring at the monitor, trying to refocus.",
+      ),
+    ).toBe(false);
+    expect(looksLikeMovementIntent("Return to work")).toBe(false);
+    expect(looksLikeMovementIntent("Go back to typing")).toBe(false);
+  });
+
+  it("accepts task-resuming consequences without x/y position change", () => {
+    const world = makeTinyWorld();
+    const action = {
+      actorId: "u",
+      text: "Call out a friendly 'Hey!' as she sees N, then return to typing.",
+    };
+    const result: ConsequenceResult = {
+      narrative: "U calls out a friendly 'Hey!' then returns to typing.",
+      actorPatches: [{ actorId: "u", thoughts: "Focused." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, result, action)).toEqual({ valid: true, errors: [] });
   });
 
   it("accepts gesture consequences without x/y position change", () => {
