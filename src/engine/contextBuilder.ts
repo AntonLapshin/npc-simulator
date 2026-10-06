@@ -120,6 +120,10 @@ export function buildConsequenceContext(
     `Actor ID: ${action.actorId}`,
     `Action text: ${action.text}`,
     "",
+    `Acting actor position: ${actor ? `${actor.name} (${actor.id}) at (${actor.x}, ${actor.y})` : "(unknown)"}`,
+    `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
+    "If the action says to move toward/close to/next to/beside someone, the new x,y MUST be strictly closer to that actor than the current position (Euclidean distance). Example: an actor at (1,10) moving toward someone at (8,8) could go to (5,8) — never inside a desk rect, stand NEXT to it.",
+    "",
     `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
       perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"
     }`,

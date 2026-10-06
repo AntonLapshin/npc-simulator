@@ -72,6 +72,7 @@ export function consequenceSuffix(): string {
     CONSEQUENCE_OUTPUT_SCHEMA,
     "",
     "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}",
+    "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"x\": 5, \"y\": 8, \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya.\"}",
     "",
     "FIELD RULES (must follow exactly, or the output is rejected):",
     "actorPatches MUST be a real JSON array of objects (never a quoted string).",

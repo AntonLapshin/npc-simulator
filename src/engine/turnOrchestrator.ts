@@ -14,6 +14,7 @@ import type {
 import { applyConsequence } from "./patchApplier.js";
 import { validateConsequence } from "./physicalValidator.js";
 import { resolveActionSemantics } from "./actionSemantics.js";
+import { isMovementOnlyFailure, suggestMoveTarget } from "./movementAssist.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
@@ -185,7 +186,80 @@ export async function resolveWithValidation(
       validationErrors: validation.errors,
     });
 
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}\nReturn corrected JSON only.`;
+    // Deterministic movement repair: small LLMs often narrate movement
+    // correctly but omit the required x/y patch on every retry. When the
+    // failure is movement-only and we can compute a valid closer position,
+    // patch it in directly instead of burning retries on a "Nothing
+    // changes." fallback. The narrative already describes the movement, so
+    // filling in coordinates preserves intent.
+    let movementHint: string | undefined;
+    if (resolved.semantics?.moves) {
+      const suggestion = suggestMoveTarget(
+        world,
+        action.actorId,
+        resolved.semantics.destinationActorId,
+      );
+      if (suggestion) {
+        const dest = resolved.semantics.destinationActorId
+          ? ` strictly closer to ${resolved.semantics.destinationActorId}`
+          : "";
+        movementHint =
+          `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
+          ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
+          `Set effects.moved=true${resolved.semantics.destinationActorId ? ` and effects.destinationActorId="${resolved.semantics.destinationActorId}"` : ""}.`;
+        if (isMovementOnlyFailure(validation.errors)) {
+          const repaired: ConsequenceResult = structuredClone(result);
+          const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
+          if (existing) {
+            existing.x = suggestion.x;
+            existing.y = suggestion.y;
+          } else {
+            repaired.actorPatches.push({
+              actorId: action.actorId,
+              x: suggestion.x,
+              y: suggestion.y,
+            });
+          }
+          if (repaired.effects) {
+            repaired.effects.moved = true;
+            if (resolved.semantics.destinationActorId !== undefined) {
+              repaired.effects.destinationActorId = resolved.semantics.destinationActorId;
+            }
+          }
+          // Re-validate against the same judged semantics (effects may now
+          // agree with the judge — either way the movement gate must pass).
+          const revalidation = validateConsequence(
+            world,
+            repaired,
+            action,
+            resolved.semantics,
+          );
+          if (revalidation.valid) {
+            logger.log({
+              module: "validator",
+              event: "validation_passed",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              input: { action, result: repaired, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+              output: { ...revalidation, repaired: true, suggestion },
+            });
+            logger.log({
+              module: "turn",
+              event: "movement_repaired",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              input: { action, result, attempt },
+              output: { suggestion, repaired },
+            });
+            return repaired;
+          }
+        }
+      }
+    }
+
+    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${movementHint ? `\n${movementHint}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
     report(deps, {
       stage: "consequence_retry",
