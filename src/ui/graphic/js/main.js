@@ -15,9 +15,8 @@
 // Static opens (preview.html, file://) have no flag and keep the offline
 // mock, with no probe delay.
 
-import { STATIC_SCENE } from "./data/staticScene.js";
+import { STATIC_SCENE, SceneRenderer } from "./scene/ui.js";
 import { OFFICE_SCENARIO } from "./data/officeScenario.js";
-import { SceneRenderer } from "./render/sceneRenderer.js";
 import { MockAdapter } from "./sim/mockAdapter.js";
 import { HttpAdapter } from "./sim/httpAdapter.js";
 import { App } from "./app.js";

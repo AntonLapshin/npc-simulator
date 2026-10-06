@@ -1,16 +1,16 @@
 {
-  "name": "npc-simulator-ui",
+  "name": "npc-simulator-graphic",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Web UI for the NPC simulator — 2.5D office scene + chat-style turn interface",
+  "description": "Thin graphic console for the NPC simulator — chat-style turn interface, cast/timeline/JSON panels. The scene itself is rendered by the sibling npc-simulator-ui project (see ui-lib/ link and js/scene/ui.js).",
   "scripts": {
     "start": "node tools/serve.mjs",
     "bundle": "node tools/bundle.mjs",
-    "test": "node tests/smoke.mjs && node tests/showcase.mjs && node tools/bundle.mjs && node tests/dom.mjs",
+    "test": "node tests/smoke.mjs && node tools/bundle.mjs && node tests/dom.mjs",
     "test:smoke": "node tests/smoke.mjs",
-    "test:showcase": "node tests/showcase.mjs",
     "test:dom": "node tests/dom.mjs",
-    "test:render": "node tests/render.mjs"
+    "test:render": "node tests/render.mjs",
+    "test:uilib": "node ui-lib/tests/showcase.mjs"
   }
 }

@@ -2,7 +2,7 @@
 // emotion chip, current line/state and a YOU badge for the user's actor.
 
 import { el } from "../core/dom.js";
-import { drawAvatar } from "../render/avatar.js";
+import { drawAvatar } from "../scene/ui.js";
 
 /** emotion → [textColor, chipBackground] (prototype EMO_STYLE). */
 export const EMO_STYLE = {

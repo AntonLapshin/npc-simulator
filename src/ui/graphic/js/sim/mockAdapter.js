@@ -11,8 +11,7 @@
 // real backend is wired in via httpAdapter.js.
 
 import { Emitter } from "../core/emitter.js";
-import { clamp, hashStr, mulberry } from "../core/utils.js";
-import { FLOOR_BOUNDS } from "../data/staticScene.js";
+import { clamp, hashStr, mulberry, FLOOR_BOUNDS } from "../scene/ui.js";
 import { extractQuoted } from "./textParse.js";
 
 /** Deep copy — turn events carry immutable snapshots. */

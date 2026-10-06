@@ -273,293 +273,7 @@ pre.json{margin:0;max-height:460px;overflow:auto;background:rgba(3,6,14,.55);bor
 <script>
 "use strict";
 (function(){
-/* ══ js/data/scenes/officeFloor3.js ══ */
-// data/scenes/officeFloor3.js — the bundled pretty-office scene (DATA ONLY).
-//
-// This used to live inline in data/staticScene.js. It is now one entry in the
-// scene registry (data/scenes/index.js): the renderer never imports it
-// directly, scenes are selected by id (`staticScene: "office_floor3"`).
-// No painter code lives here — just footprint/colour data composed from the
-// per-object defaults in js/render/objects/.
-
-const OFFICE_FLOOR3_ID = "office_floor3";
-
-const OFFICE_FLOOR3_SCENE = {
-  meta: {
-    name: "Northlight Studio · Floor 3",
-    style: "gem-flat 2.5D",
-    projection: "plan + vertical extrusion",
-    world: { w: 1040, h: 730 },
-  },
-  floor: { x: 60, y: 110, w: 920, h: 550, plank: 56, base: "#efe3cf", tone: "#e6d8bf" },
-  corridor: { x: 435, y: 680, w: 130, h: 50, color: "#1b2438" },
-  walls: [
-    { id: "wN", x: 40, y: 90, w: 960, h: 20, height: 70, face: "#dfe5f2", top: "#f4f7fd", layer: "back" },
-    { id: "wW", x: 40, y: 90, w: 20, h: 590, height: 70, face: "#d3dae9", top: "#eef2fa", layer: "back" },
-    { id: "wE", x: 980, y: 90, w: 20, h: 590, height: 70, face: "#cbd3e4", top: "#e8edf8", layer: "back" },
-    { id: "wSa", x: 40, y: 660, w: 395, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
-    { id: "wSb", x: 565, y: 660, w: 435, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
-  ],
-  windows: [
-    { id: "win1", wall: "wN", x: 110, y: 50, w: 180, h: 46, view: "city" },
-    { id: "win2", wall: "wN", x: 400, y: 50, w: 170, h: 46, view: "city" },
-    { id: "win3", wall: "wN", x: 650, y: 50, w: 180, h: 46, view: "hills" },
-  ],
-  door: { id: "door1", x: 435, y: 660, w: 130, h: 20, frame: "#8f6b45", label: "ENTRANCE" },
-  wallDecor: [
-    { id: "board1", asset: "whiteboard", x: 852, y: 48, w: 132, h: 50, ink: "#4f7cff" },
-    { id: "clock1", asset: "clock", x: 333, y: 64, r: 15 },
-    { id: "poster1", asset: "poster", x: 588, y: 50, w: 36, h: 46, color: "#ff5d7a" },
-  ],
-  floorDecals: [
-    { id: "rugLounge", asset: "rug", x: 205, y: 285, w: 290, h: 215, color: "#4f7cff", trim: "#9b6cf5" },
-    { id: "rugEntrance", asset: "rug", x: 500, y: 616, w: 212, h: 76, color: "#2ec4a6", trim: "#ffb648" },
-    { id: "zoneDesk", asset: "zone", x: 770, y: 390, w: 400, h: 330, color: "#ffb648", label: "DESK POD · A/B" },
-    { id: "zoneLounge", asset: "zone", x: 205, y: 285, w: 300, h: 230, color: "#4f7cff", label: "LOUNGE" },
-    { id: "zoneKitchen", asset: "zone", x: 520, y: 170, w: 260, h: 110, color: "#2ec4a6", label: "KITCHEN" },
-  ],
-  lightPatches: [{ x: 110, w: 180 }, { x: 400, w: 170 }, { x: 650, w: 180 }],
-
-  assets: [
-    /* ── lounge ─────────────────────────────────────────────── */
-    { id: "tbl_lounge", asset: "roundTable", x: 205, y: 272, r: 74, h: 42, t: 9, color: "#f7f0e4", edge: "#c9b694" },
-    { id: "ch_l1", asset: "chair", x: 205, y: 202, dir: "down", color: "#4f7cff" },
-    { id: "ch_l2", asset: "chair", x: 112, y: 272, dir: "right", color: "#9b6cf5" },
-    { id: "ch_l3", asset: "chair", x: 298, y: 272, dir: "left", color: "#2ec4a6" },
-    { id: "ch_l4", asset: "chair", x: 205, y: 344, dir: "up", color: "#ffb648" },
-    { id: "cup_l1", asset: "cup", x: 178, y: 262, z: 42, color: "#ff5d7a", sort: 305.6 },
-    { id: "cup_l2", asset: "cup", x: 238, y: 286, z: 42, color: "#4f7cff", sort: 305.7 },
-    { id: "notes", asset: "papers", x: 206, y: 274, z: 42, sort: 305.8 },
-
-    /* ── kitchen ────────────────────────────────────────────── */
-    { id: "counter", asset: "counter", x: 520, y: 158, w: 242, d: 58, h: 58, color: "#eaeef7", top: "#2b3550" },
-    { id: "coffee", asset: "coffeeMachine", x: 452, y: 152, z: 58, sort: 187.2 },
-    { id: "kettle", asset: "kettle", x: 536, y: 150, z: 58, color: "#ff5d7a", sort: 187.3 },
-    { id: "cups", asset: "cupRow", x: 602, y: 154, z: 58, sort: 187.4 },
-    { id: "cooler", asset: "waterCooler", x: 372, y: 170, w: 44, d: 42, h: 48 },
-    { id: "stool1", asset: "stool", x: 474, y: 240, color: "#ffb648" },
-
-    /* ── west wall / storage ────────────────────────────────── */
-    { id: "sofa", asset: "sofa", x: 112, y: 402, w: 66, d: 172, dir: "right", color: "#9b6cf5" },
-    { id: "cabinet", asset: "cabinet", x: 160, y: 546, w: 190, d: 60, h: 68, color: "#5b6b8c" },
-    { id: "crates", asset: "crates", x: 296, y: 524, color: "#c98a5e" },
-    { id: "printer", asset: "printer", x: 330, y: 600, w: 92, d: 64, h: 46, color: "#dfe5f0" },
-    { id: "plant5", asset: "plant", x: 386, y: 520, s: 0.85, pot: "#2ec4a6" },
-
-    /* ── desk pod ───────────────────────────────────────────── */
-    { id: "deskA1", asset: "desk", x: 660, y: 280, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
-    { id: "deskA2", asset: "desk", x: 860, y: 280, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
-    { id: "deskB1", asset: "desk", x: 660, y: 500, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
-    { id: "deskB2", asset: "desk", x: 860, y: 500, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
-
-    { id: "chA1", asset: "chair", x: 660, y: 216, dir: "down", color: "#2ec4a6" },
-    { id: "chA2", asset: "chair", x: 862, y: 216, dir: "down", color: "#4f7cff" },
-    { id: "chB1", asset: "chair", x: 664, y: 436, dir: "down", color: "#9b6cf5" },
-    { id: "chB2", asset: "chair", x: 860, y: 436, dir: "down", color: "#ff5d7a" },
-
-    { id: "lapA1", asset: "laptop", x: 630, y: 258, z: 44, sort: 318.2 },
-    { id: "lapA2", asset: "laptop", x: 830, y: 258, z: 44, sort: 318.3 },
-    { id: "lapB1", asset: "laptop", x: 628, y: 478, z: 44, sort: 538.2 },
-    { id: "lapB2", asset: "laptop", x: 830, y: 478, z: 44, sort: 538.3 },
-
-    { id: "mugA1", asset: "cup", x: 698, y: 276, z: 44, color: "#2ec4a6", sort: 318.4 },
-    { id: "mugA2", asset: "cup", x: 892, y: 278, z: 44, color: "#ffb648", sort: 318.5 },
-    { id: "mugB1", asset: "cup", x: 698, y: 496, z: 44, color: "#9b6cf5", sort: 538.4 },
-    { id: "bookB2", asset: "papers", x: 900, y: 494, z: 44, sort: 538.5 },
-    { id: "lampA1", asset: "lamp", x: 730, y: 256, z: 44, sort: 318.6 },
-    { id: "signNew", asset: "deskSign", x: 918, y: 298, z: 44, text: "NOAH", sort: 318.7 },
-
-    /* ── plants ─────────────────────────────────────────────── */
-    { id: "plant1", asset: "plant", x: 96, y: 152, s: 1.15, pot: "#ff5d7a" },
-    { id: "plant2", asset: "plant", x: 956, y: 150, s: 1.0, pot: "#4f7cff" },
-    { id: "plant3", asset: "plant", x: 98, y: 626, s: 0.95, pot: "#2ec4a6" },
-    { id: "plant4", asset: "plant", x: 952, y: 626, s: 1.1, pot: "#ffb648" },
-  ],
-};
-
-/** Walkable floor bounds for the office scene (used by the mock engine). */
-const OFFICE_FLOOR3_BOUNDS = {
-  minX: 80,
-  maxX: 960,
-  minY: 130,
-  maxY: 700,
-};
-
-;
-/* ══ js/data/staticScene.js ══ */
-// data/staticScene.js — backwards-compatible re-export (DO NOT EXTEND).
-//
-// The hardcoded office layout moved to data/scenes/officeFloor3.js and is
-// selected by id through data/scenes/index.js. This module keeps the old
-// `STATIC_SCENE` / `FLOOR_BOUNDS` names so main.js, tests and the bundle
-// keep working. New code should use the scene registry instead.
-
-const STATIC_SCENE = OFFICE_FLOOR3_SCENE;
-const FLOOR_BOUNDS = OFFICE_FLOOR3_BOUNDS;
-
-;
-/* ══ js/data/officeScenario.js ══ */
-// data/officeScenario.js — the default scenario in the engine's World format.
-//
-// Shape mirrors `Scenario` from the simulator's types.ts:
-//   { version, id, title, narrative, userActorId, order, scene, actors }
-// The same JSON can be loaded by the engine (loadScenario) — the UI never
-// mutates it, adapters turn it into a World.
-//
-// Two UI-only conventions on top of the engine format:
-//  • `presentation` — visual metadata (colors, roles, props, looks) keyed by
-//    actor id. The engine ignores it; if absent, the UI derives deterministic
-//    looks from actor ids (see sim/presentation.js).
-//  • Scene object `id`s that match a STATIC_SCENE asset id are considered
-//    "already painted" by the scenery renderer (no generic fallback box).
-//    Object x/y are footprint CENTERS in world coordinates (1040×730 here).
-
-const OFFICE_SCENARIO = {
-  version: 1,
-  id: "office_first_day",
-  title: "First Day — Northlight Studio",
-  narrative:
-    "Monday · 9:02 AM — Northlight Studio, floor 3. Noah walks in on his first day; the team is scattered between the desk pods, the lounge and the kitchen.",
-  userActorId: "noah",
-  order: ["noah", "maya", "priya", "lena", "dana"],
-
-  scene: {
-    width: 1040,
-    height: 730,
-    objects: [
-      { id: "tbl_lounge", name: "lounge round table", description: "A round white table with four chairs around it, scattered with notes and cups.", x: 205, y: 272, w: 148, h: 118, passable: false, blocksVision: false, blocksSound: false },
-      { id: "sofa", name: "purple sofa", description: "A three-seat sofa against the west wall, facing east.", x: 112, y: 402, w: 66, h: 172, passable: false, blocksVision: true, blocksSound: false },
-      { id: "counter", name: "kitchen counter", description: "The kitchen counter with the moody coffee machine, a kettle and a row of cups.", x: 520, y: 158, w: 242, h: 58, passable: false, blocksVision: false, blocksSound: false },
-      { id: "cooler", name: "water cooler", description: "A bubbling water cooler between the kitchen and the lounge.", x: 372, y: 170, w: 44, h: 42, passable: false, blocksVision: false, blocksSound: false },
-      { id: "cabinet", name: "storage cabinet", description: "A low grey cabinet topped with cardboard crates of office supplies.", x: 160, y: 546, w: 190, h: 60, passable: false, blocksVision: true, blocksSound: false },
-      { id: "printer", name: "office printer", description: "The communal printer by the south wall. It jams when it senses fear.", x: 330, y: 600, w: 92, h: 64, passable: false, blocksVision: false, blocksSound: false },
-      { id: "deskA1", name: "desk A1 (Maya)", description: "Maya's desk in pod A: laptop, mug, tidy cable management.", x: 660, y: 280, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
-      { id: "deskA2", name: "desk A2 (Noah)", description: "A brand-new desk with a NOAH sign, a laptop and a lamp. Still smells like unboxing.", x: 860, y: 280, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
-      { id: "deskB1", name: "desk B1", description: "An empty desk in pod B, reserved for the next hire.", x: 660, y: 500, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
-      { id: "deskB2", name: "desk B2 (Lena)", description: "Lena's QA desk in pod B: two monitors' worth of sticky notes and a purple mug.", x: 860, y: 500, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
-      { id: "crates", name: "cardboard crates", description: "Stacked crates of old release swag near the cabinet.", x: 296, y: 524, w: 70, h: 50, passable: false, blocksVision: false, blocksSound: false },
-      { id: "door1", name: "entrance door", description: "The glass entrance door at the south side of the floor, leading to the corridor.", x: 500, y: 670, w: 130, h: 20, passable: true, blocksVision: false, blocksSound: true },
-    ],
-  },
-
-  actors: [
-    {
-      id: "noah",
-      name: "Noah",
-      persona:
-        "New hire, frontend developer. Eager, polite and a little nervous; wants to make a good first impression and learn the codebase.",
-      x: 500,
-      y: 690,
-      state: "standing by the entrance with a bag over one shoulder",
-      emotion: "nervous",
-      goal: "introduce yourself to the team and settle in at the new desk",
-      thoughts: "Okay… deep breath. First day, brand new team. Everyone seems friendly so far.",
-      memories: ["Signed the offer two weeks ago; starts today at Northlight Studio."],
-      beliefs: ["Arriving a few minutes early is the right call."],
-      relationships: [],
-    },
-    {
-      id: "maya",
-      name: "Maya",
-      persona:
-        "Team lead, Platform. Confident and warm; she owns onboarding for the new hire and keeps an eye on everyone's workload.",
-      x: 660,
-      y: 216,
-      state: "at her desk in pod A, reviewing the sprint board",
-      emotion: "neutral",
-      goal: "get Noah settled in and introduce him to the team",
-      thoughts: "New starter today. I should show him the desk pod and the coffee machine before standup.",
-      memories: ["Approved Noah's hiring plan last month."],
-      beliefs: ["A good first day sets the tone for everything after."],
-      relationships: ["Leads the platform team Noah just joined."],
-    },
-    {
-      id: "priya",
-      name: "Priya",
-      persona:
-        "Product designer. Bubbly, extroverted snack-drawer raider; loves welcoming people and over-shares design trivia.",
-      x: 296,
-      y: 278,
-      state: "at the lounge table, sketching on paper with a cold cup of coffee",
-      emotion: "happy",
-      goal: "finish the lounge redesign mockups before lunch",
-      thoughts: "If the new person sits near the window, the lounge redesign is going to sell itself.",
-      memories: ["Raided the snack drawer twice before 9 AM."],
-      beliefs: ["Design reviews are better with coffee."],
-      relationships: [],
-    },
-    {
-      id: "lena",
-      name: "Lena",
-      persona:
-        "QA engineer. Shy and precise; speaks softly, types furiously, and knows every flaky test by name.",
-      x: 664,
-      y: 436,
-      state: "at her desk in pod B, stepping through a failing regression suite",
-      emotion: "neutral",
-      goal: "stabilise the flaky regression suite before the release cut",
-      thoughts: "Two more flakes to quarantine, then I can look up and pretend to be a normal person.",
-      memories: ["Filed eleven bug reports last week; three were her own typos."],
-      beliefs: ["If it isn't tested, it isn't done."],
-      relationships: [],
-    },
-    {
-      id: "dana",
-      name: "Dana",
-      persona:
-        "Ops manager. Cheerful, caffeinated, knows where everything is and who to ask; unofficial welcome committee.",
-      x: 424,
-      y: 214,
-      state: "by the kitchen counter, waiting for the coffee machine to finish gurgling",
-      emotion: "happy",
-      goal: "keep the office running — badges, coffee, and the new hire's desk setup",
-      thoughts: "Badge is printed, desk is labeled. The machine is moody before ten, as always.",
-      memories: ["Ordered the NOAH desk sign on Friday."],
-      beliefs: ["Most office problems are solved by coffee or a label maker."],
-      relationships: [],
-    },
-  ],
-
-  /* ── UI-only visual metadata (ignored by the engine) ─────────────── */
-  presentation: {
-    scene: { name: "Northlight Studio · Floor 3", staticScene: "office_floor3" },
-    actors: {
-      noah: {
-        color: "#4f7cff",
-        role: "New hire · Frontend",
-        prop: "bag",
-        look: { skin: "#f2cba6", skin2: "#e0b189", hair: "#3d2a20", hairStyle: "short", shirt: "#7fb6ff", shirt2: "#5b95e8", pants: "#39435c", shoes: "#1e2434" },
-      },
-      maya: {
-        color: "#2ec4a6",
-        role: "Team lead · Platform",
-        prop: null,
-        look: { skin: "#c98a5e", skin2: "#b0744a", hair: "#22191a", hairStyle: "bun", shirt: "#2ec4a6", shirt2: "#1f9e85", pants: "#2b3550", shoes: "#1a2032" },
-      },
-      priya: {
-        color: "#9b6cf5",
-        role: "Product designer",
-        prop: null,
-        look: { skin: "#e2a97c", skin2: "#c98f63", hair: "#2b1f22", hairStyle: "long", shirt: "#9b6cf5", shirt2: "#7d51d3", pants: "#3a3357", shoes: "#221d33" },
-      },
-      lena: {
-        color: "#ffb648",
-        role: "QA engineer",
-        prop: null,
-        look: { skin: "#ffe0cb", skin2: "#eec7ae", hair: "#b5502f", hairStyle: "ponytail", shirt: "#ffb648", shirt2: "#e2952c", pants: "#4a6fa5", shoes: "#26313f" },
-      },
-      dana: {
-        color: "#ff5d7a",
-        role: "Ops manager",
-        prop: "cup",
-        look: { skin: "#8d5a3b", skin2: "#78492e", hair: "#191315", hairStyle: "curly", shirt: "#ff5d7a", shirt2: "#dd3f5e", pants: "#2c3444", shoes: "#171d29" },
-      },
-    },
-  },
-};
-
-;
-/* ══ js/core/utils.js ══ */
+/* ══ ui-lib/js/core/utils.js ══ */
 // core/utils.js — math, color and canvas drawing helpers.
 //
 // Pure functions only (no DOM access), extracted verbatim in spirit from the
@@ -727,7 +441,7 @@ function hashStr(s) {
 }
 
 ;
-/* ══ js/render/viewOptions.js ══ */
+/* ══ ui-lib/js/render/viewOptions.js ══ */
 // render/viewOptions.js — shared view toggles (Names / Zones HUD buttons).
 
 const viewOptions = {
@@ -736,7 +450,7 @@ const viewOptions = {
 };
 
 ;
-/* ══ js/render/objects/wall.js ══ */
+/* ══ ui-lib/js/render/objects/wall.js ══ */
 // render/objects/wall.js — wall segment showcase file.
 
 const Wall = {
@@ -777,7 +491,7 @@ const Wall = {
 };
 
 ;
-/* ══ js/render/objects/window.js ══ */
+/* ══ ui-lib/js/render/objects/window.js ══ */
 // render/objects/window.js — window showcase file.
 
 const Win = {
@@ -837,7 +551,7 @@ const Win = {
 };
 
 ;
-/* ══ js/render/objects/door.js ══ */
+/* ══ ui-lib/js/render/objects/door.js ══ */
 // render/objects/door.js — entrance door showcase file.
 
 const Door = {
@@ -884,7 +598,7 @@ const Door = {
 };
 
 ;
-/* ══ js/render/objects/whiteboard.js ══ */
+/* ══ ui-lib/js/render/objects/whiteboard.js ══ */
 // render/objects/whiteboard.js — whiteboard decor showcase file.
 
 const Whiteboard = {
@@ -934,7 +648,7 @@ const Whiteboard = {
 };
 
 ;
-/* ══ js/render/objects/clock.js ══ */
+/* ══ ui-lib/js/render/objects/clock.js ══ */
 // render/objects/clock.js — wall clock showcase file.
 
 const Clock = {
@@ -977,7 +691,7 @@ const Clock = {
 };
 
 ;
-/* ══ js/render/objects/poster.js ══ */
+/* ══ ui-lib/js/render/objects/poster.js ══ */
 // render/objects/poster.js — poster decor showcase file.
 
 const Poster = {
@@ -1011,7 +725,7 @@ const Poster = {
 };
 
 ;
-/* ══ js/render/objects/rug.js ══ */
+/* ══ ui-lib/js/render/objects/rug.js ══ */
 // render/objects/rug.js — floor rug showcase file.
 
 const Rug = {
@@ -1053,7 +767,7 @@ const Rug = {
 };
 
 ;
-/* ══ js/render/objects/zone.js ══ */
+/* ══ ui-lib/js/render/objects/zone.js ══ */
 // render/objects/zone.js — dashed zone marker showcase file.
 
 const Zone = {
@@ -1086,7 +800,7 @@ const Zone = {
 };
 
 ;
-/* ══ js/render/background.js ══ */
+/* ══ ui-lib/js/render/background.js ══ */
 // render/background.js — static background layer (backwards-compat layer).
 //
 // Refactored: wall/window/door/decor/rug/zone painters now live in their own
@@ -1203,7 +917,7 @@ function paintBackground(c, scene, dims) {
 }
 
 ;
-/* ══ js/render/objects/desk.js ══ */
+/* ══ ui-lib/js/render/objects/desk.js ══ */
 // render/objects/desk.js — desk showcase file (showcase pattern).
 //
 // Each object file owns its renderer + showcase metadata: `name`,
@@ -1279,7 +993,7 @@ const Desk = {
 };
 
 ;
-/* ══ js/render/objects/roundTable.js ══ */
+/* ══ ui-lib/js/render/objects/roundTable.js ══ */
 // render/objects/roundTable.js — round table showcase file.
 
 /** Top ellipse centre is exactly (x, y-h). */
@@ -1342,7 +1056,7 @@ const RoundTable = {
 };
 
 ;
-/* ══ js/render/objects/direction.js ══ */
+/* ══ ui-lib/js/render/objects/direction.js ══ */
 // render/objects/direction.js — shared compass normalizer for rotatable objects.
 //
 // Showcase convention: rotatable objects accept `dir` as one of N/E/S/W
@@ -1364,7 +1078,7 @@ function normDir(dir, fallback) {
 const COMPASS_VARIANTS = ["N", "E", "S", "W"];
 
 ;
-/* ══ js/render/objects/chair.js ══ */
+/* ══ ui-lib/js/render/objects/chair.js ══ */
 // render/objects/chair.js — chair showcase file. Rotatable: N/E/S/W.
 //
 // Single-export pattern: one uniquely-named object per file (bundle-safe —
@@ -1438,7 +1152,7 @@ const Chair = {
 };
 
 ;
-/* ══ js/render/objects/stool.js ══ */
+/* ══ ui-lib/js/render/objects/stool.js ══ */
 // render/objects/stool.js — stool showcase file.
 
 const Stool = {
@@ -1474,7 +1188,7 @@ const Stool = {
 };
 
 ;
-/* ══ js/render/objects/laptop.js ══ */
+/* ══ ui-lib/js/render/objects/laptop.js ══ */
 // render/objects/laptop.js — laptop showcase file. Rotatable: N/S.
 
 
@@ -1551,7 +1265,7 @@ const Laptop = {
 };
 
 ;
-/* ══ js/render/objects/cup.js ══ */
+/* ══ ui-lib/js/render/objects/cup.js ══ */
 // render/objects/cup.js — mug/cup showcase file.
 
 const Cup = {
@@ -1590,7 +1304,7 @@ const Cup = {
 };
 
 ;
-/* ══ js/render/objects/cupRow.js ══ */
+/* ══ ui-lib/js/render/objects/cupRow.js ══ */
 // render/objects/cupRow.js — row of three mugs showcase file.
 
 const COLS = ["#2ec4a6", "#ffb648", "#4f7cff"];
@@ -1612,7 +1326,7 @@ const CupRow = {
 };
 
 ;
-/* ══ js/render/objects/papers.js ══ */
+/* ══ ui-lib/js/render/objects/papers.js ══ */
 // render/objects/papers.js — scattered papers showcase file.
 
 const Papers = {
@@ -1660,7 +1374,7 @@ const Papers = {
 };
 
 ;
-/* ══ js/render/objects/lamp.js ══ */
+/* ══ ui-lib/js/render/objects/lamp.js ══ */
 // render/objects/lamp.js — desk lamp showcase file.
 
 const Lamp = {
@@ -1703,7 +1417,7 @@ const Lamp = {
 };
 
 ;
-/* ══ js/render/objects/deskSign.js ══ */
+/* ══ ui-lib/js/render/objects/deskSign.js ══ */
 // render/objects/deskSign.js — desk name-plate showcase file.
 
 const DeskSign = {
@@ -1737,7 +1451,7 @@ const DeskSign = {
 };
 
 ;
-/* ══ js/render/objects/counter.js ══ */
+/* ══ ui-lib/js/render/objects/counter.js ══ */
 // render/objects/counter.js — kitchen counter showcase file.
 
 /** Solid carcass, worktop on top face, doors on front face. */
@@ -1794,7 +1508,7 @@ const Counter = {
 };
 
 ;
-/* ══ js/render/objects/coffeeMachine.js ══ */
+/* ══ ui-lib/js/render/objects/coffeeMachine.js ══ */
 // render/objects/coffeeMachine.js — coffee machine showcase file.
 
 const CoffeeMachine = {
@@ -1836,7 +1550,7 @@ const CoffeeMachine = {
 };
 
 ;
-/* ══ js/render/objects/kettle.js ══ */
+/* ══ ui-lib/js/render/objects/kettle.js ══ */
 // render/objects/kettle.js — kettle showcase file.
 
 const Kettle = {
@@ -1879,7 +1593,7 @@ const Kettle = {
 };
 
 ;
-/* ══ js/render/objects/waterCooler.js ══ */
+/* ══ ui-lib/js/render/objects/waterCooler.js ══ */
 // render/objects/waterCooler.js — water cooler showcase file.
 
 const WaterCooler = {
@@ -1928,7 +1642,7 @@ const WaterCooler = {
 };
 
 ;
-/* ══ js/render/objects/cabinet.js ══ */
+/* ══ ui-lib/js/render/objects/cabinet.js ══ */
 // render/objects/cabinet.js — storage cabinet showcase file.
 
 const Cabinet = {
@@ -1970,7 +1684,7 @@ const Cabinet = {
 };
 
 ;
-/* ══ js/render/objects/printer.js ══ */
+/* ══ ui-lib/js/render/objects/printer.js ══ */
 // render/objects/printer.js — office printer showcase file.
 
 const Printer = {
@@ -2018,7 +1732,7 @@ const Printer = {
 };
 
 ;
-/* ══ js/render/objects/crates.js ══ */
+/* ══ ui-lib/js/render/objects/crates.js ══ */
 // render/objects/crates.js — stacked crates showcase file.
 
 const Crates = {
@@ -2051,7 +1765,7 @@ const Crates = {
 };
 
 ;
-/* ══ js/render/objects/sofa.js ══ */
+/* ══ ui-lib/js/render/objects/sofa.js ══ */
 // render/objects/sofa.js — sofa showcase file. Rotatable: N/E/S/W.
 //
 // dir = way the sitter faces. Backrest opposite, arms on the two ends.
@@ -2139,7 +1853,7 @@ const Sofa = {
 };
 
 ;
-/* ══ js/render/objects/plant.js ══ */
+/* ══ ui-lib/js/render/objects/plant.js ══ */
 // render/objects/plant.js — potted plant showcase file.
 
 const Plant = {
@@ -2195,7 +1909,7 @@ const Plant = {
 };
 
 ;
-/* ══ js/render/character.js ══ */
+/* ══ ui-lib/js/render/character.js ══ */
 // render/character.js — character rendering (prototype §8): body, hair,
 // faces per emotion, mood FX and the name plate. A visual actor is:
 //   { id, name, color, look, prop, x, y, dir, emotion, visible, isUser }
@@ -2696,7 +2410,7 @@ function drawMoodFx(c, x, hy, emo) {
 }
 
 ;
-/* ══ js/render/objects/character.js ══ */
+/* ══ ui-lib/js/render/objects/character.js ══ */
 // render/objects/character.js — character showcase file (showcase pattern).
 //
 // Wraps render/character.js so people appear in the object gallery next to
@@ -2740,7 +2454,7 @@ const Character = {
 };
 
 ;
-/* ══ js/render/objects/index.js ══ */
+/* ══ ui-lib/js/render/objects/index.js ══ */
 // render/objects/index.js — object registry (showcase pattern).
 //
 // Mirrors https://github.com/AntonLapshin/showcase: every object file exports
@@ -2839,7 +2553,7 @@ function assetSortY(a) {
 }
 
 ;
-/* ══ js/render/assets.js ══ */
+/* ══ ui-lib/js/render/assets.js ══ */
 // render/assets.js — furniture/prop renderers (backwards-compat layer).
 //
 // Refactored: each object now lives in its own file under
@@ -2887,7 +2601,7 @@ const drawSofa = Sofa.draw;
 const drawPlant = Plant.draw;
 
 ;
-/* ══ js/render/bubble.js ══ */
+/* ══ ui-lib/js/render/bubble.js ══ */
 // render/bubble.js — speech & thought bubbles (prototype §9).
 //
 // Bubbles are collision-placed above speakers; `placed` accumulates rects
@@ -3007,7 +2721,7 @@ function drawBubble(c, b, placed, dims) {
 }
 
 ;
-/* ══ js/render/sceneRenderer.js ══ */
+/* ══ ui-lib/js/render/sceneRenderer.js ══ */
 // render/sceneRenderer.js — canvas host & frame pipeline (prototype §5 + §11).
 //
 // Owns the visible canvas and the cached background layer. The app calls
@@ -3188,6 +2902,357 @@ function drawWorldObject(c, o) {
 }
 
 ;
+/* ══ ui-lib/js/render/avatar.js ══ */
+// render/avatar.js — small cast-panel portrait rendered with the same
+// character code as the scene (prototype drawAvatar).
+
+
+function drawAvatar(cv, ch) {
+  const c = cv.getContext("2d");
+  if (!c) return;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, cv.width, cv.height);
+  const g = linGrad(c, 0, 0, 0, cv.height, [[0, rgba(ch.color, 0.2)], [1, "rgba(255,255,255,.02)"]]);
+  c.fillStyle = g || "rgba(255,255,255,.04)";
+  c.fillRect(0, 0, cv.width, cv.height);
+  c.save();
+  c.scale(1.32, 1.32);
+  c.translate(-10, -16);
+  const ghost = Object.assign({}, ch, { dir: "down", x: 34, y: 78, isUser: false });
+  try {
+    drawCharacter(c, ghost, { showNames: false });
+  } catch (err) {
+    console.error("[avatar]", err);
+  }
+  c.restore();
+}
+
+;
+/* ══ ui-lib/js/data/scenes/officeFloor3.js ══ */
+// data/scenes/officeFloor3.js — the bundled pretty-office scene (DATA ONLY).
+//
+// This used to live inline in data/staticScene.js. It is now one entry in the
+// scene registry (data/scenes/index.js): the renderer never imports it
+// directly, scenes are selected by id (`staticScene: "office_floor3"`).
+// No painter code lives here — just footprint/colour data composed from the
+// per-object defaults in js/render/objects/.
+
+const OFFICE_FLOOR3_ID = "office_floor3";
+
+const OFFICE_FLOOR3_SCENE = {
+  meta: {
+    name: "Northlight Studio · Floor 3",
+    style: "gem-flat 2.5D",
+    projection: "plan + vertical extrusion",
+    world: { w: 1040, h: 730 },
+  },
+  floor: { x: 60, y: 110, w: 920, h: 550, plank: 56, base: "#efe3cf", tone: "#e6d8bf" },
+  corridor: { x: 435, y: 680, w: 130, h: 50, color: "#1b2438" },
+  walls: [
+    { id: "wN", x: 40, y: 90, w: 960, h: 20, height: 70, face: "#dfe5f2", top: "#f4f7fd", layer: "back" },
+    { id: "wW", x: 40, y: 90, w: 20, h: 590, height: 70, face: "#d3dae9", top: "#eef2fa", layer: "back" },
+    { id: "wE", x: 980, y: 90, w: 20, h: 590, height: 70, face: "#cbd3e4", top: "#e8edf8", layer: "back" },
+    { id: "wSa", x: 40, y: 660, w: 395, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
+    { id: "wSb", x: 565, y: 660, w: 435, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
+  ],
+  windows: [
+    { id: "win1", wall: "wN", x: 110, y: 50, w: 180, h: 46, view: "city" },
+    { id: "win2", wall: "wN", x: 400, y: 50, w: 170, h: 46, view: "city" },
+    { id: "win3", wall: "wN", x: 650, y: 50, w: 180, h: 46, view: "hills" },
+  ],
+  door: { id: "door1", x: 435, y: 660, w: 130, h: 20, frame: "#8f6b45", label: "ENTRANCE" },
+  wallDecor: [
+    { id: "board1", asset: "whiteboard", x: 852, y: 48, w: 132, h: 50, ink: "#4f7cff" },
+    { id: "clock1", asset: "clock", x: 333, y: 64, r: 15 },
+    { id: "poster1", asset: "poster", x: 588, y: 50, w: 36, h: 46, color: "#ff5d7a" },
+  ],
+  floorDecals: [
+    { id: "rugLounge", asset: "rug", x: 205, y: 285, w: 290, h: 215, color: "#4f7cff", trim: "#9b6cf5" },
+    { id: "rugEntrance", asset: "rug", x: 500, y: 616, w: 212, h: 76, color: "#2ec4a6", trim: "#ffb648" },
+    { id: "zoneDesk", asset: "zone", x: 770, y: 390, w: 400, h: 330, color: "#ffb648", label: "DESK POD · A/B" },
+    { id: "zoneLounge", asset: "zone", x: 205, y: 285, w: 300, h: 230, color: "#4f7cff", label: "LOUNGE" },
+    { id: "zoneKitchen", asset: "zone", x: 520, y: 170, w: 260, h: 110, color: "#2ec4a6", label: "KITCHEN" },
+  ],
+  lightPatches: [{ x: 110, w: 180 }, { x: 400, w: 170 }, { x: 650, w: 180 }],
+
+  assets: [
+    /* ── lounge ─────────────────────────────────────────────── */
+    { id: "tbl_lounge", asset: "roundTable", x: 205, y: 272, r: 74, h: 42, t: 9, color: "#f7f0e4", edge: "#c9b694" },
+    { id: "ch_l1", asset: "chair", x: 205, y: 202, dir: "down", color: "#4f7cff" },
+    { id: "ch_l2", asset: "chair", x: 112, y: 272, dir: "right", color: "#9b6cf5" },
+    { id: "ch_l3", asset: "chair", x: 298, y: 272, dir: "left", color: "#2ec4a6" },
+    { id: "ch_l4", asset: "chair", x: 205, y: 344, dir: "up", color: "#ffb648" },
+    { id: "cup_l1", asset: "cup", x: 178, y: 262, z: 42, color: "#ff5d7a", sort: 305.6 },
+    { id: "cup_l2", asset: "cup", x: 238, y: 286, z: 42, color: "#4f7cff", sort: 305.7 },
+    { id: "notes", asset: "papers", x: 206, y: 274, z: 42, sort: 305.8 },
+
+    /* ── kitchen ────────────────────────────────────────────── */
+    { id: "counter", asset: "counter", x: 520, y: 158, w: 242, d: 58, h: 58, color: "#eaeef7", top: "#2b3550" },
+    { id: "coffee", asset: "coffeeMachine", x: 452, y: 152, z: 58, sort: 187.2 },
+    { id: "kettle", asset: "kettle", x: 536, y: 150, z: 58, color: "#ff5d7a", sort: 187.3 },
+    { id: "cups", asset: "cupRow", x: 602, y: 154, z: 58, sort: 187.4 },
+    { id: "cooler", asset: "waterCooler", x: 372, y: 170, w: 44, d: 42, h: 48 },
+    { id: "stool1", asset: "stool", x: 474, y: 240, color: "#ffb648" },
+
+    /* ── west wall / storage ────────────────────────────────── */
+    { id: "sofa", asset: "sofa", x: 112, y: 402, w: 66, d: 172, dir: "right", color: "#9b6cf5" },
+    { id: "cabinet", asset: "cabinet", x: 160, y: 546, w: 190, d: 60, h: 68, color: "#5b6b8c" },
+    { id: "crates", asset: "crates", x: 296, y: 524, color: "#c98a5e" },
+    { id: "printer", asset: "printer", x: 330, y: 600, w: 92, d: 64, h: 46, color: "#dfe5f0" },
+    { id: "plant5", asset: "plant", x: 386, y: 520, s: 0.85, pot: "#2ec4a6" },
+
+    /* ── desk pod ───────────────────────────────────────────── */
+    { id: "deskA1", asset: "desk", x: 660, y: 280, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
+    { id: "deskA2", asset: "desk", x: 860, y: 280, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
+    { id: "deskB1", asset: "desk", x: 660, y: 500, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
+    { id: "deskB2", asset: "desk", x: 860, y: 500, w: 170, d: 76, h: 44, t: 10, color: "#f4ece0", edge: "#c9b694" },
+
+    { id: "chA1", asset: "chair", x: 660, y: 216, dir: "down", color: "#2ec4a6" },
+    { id: "chA2", asset: "chair", x: 862, y: 216, dir: "down", color: "#4f7cff" },
+    { id: "chB1", asset: "chair", x: 664, y: 436, dir: "down", color: "#9b6cf5" },
+    { id: "chB2", asset: "chair", x: 860, y: 436, dir: "down", color: "#ff5d7a" },
+
+    { id: "lapA1", asset: "laptop", x: 630, y: 258, z: 44, sort: 318.2 },
+    { id: "lapA2", asset: "laptop", x: 830, y: 258, z: 44, sort: 318.3 },
+    { id: "lapB1", asset: "laptop", x: 628, y: 478, z: 44, sort: 538.2 },
+    { id: "lapB2", asset: "laptop", x: 830, y: 478, z: 44, sort: 538.3 },
+
+    { id: "mugA1", asset: "cup", x: 698, y: 276, z: 44, color: "#2ec4a6", sort: 318.4 },
+    { id: "mugA2", asset: "cup", x: 892, y: 278, z: 44, color: "#ffb648", sort: 318.5 },
+    { id: "mugB1", asset: "cup", x: 698, y: 496, z: 44, color: "#9b6cf5", sort: 538.4 },
+    { id: "bookB2", asset: "papers", x: 900, y: 494, z: 44, sort: 538.5 },
+    { id: "lampA1", asset: "lamp", x: 730, y: 256, z: 44, sort: 318.6 },
+    { id: "signNew", asset: "deskSign", x: 918, y: 298, z: 44, text: "NOAH", sort: 318.7 },
+
+    /* ── plants ─────────────────────────────────────────────── */
+    { id: "plant1", asset: "plant", x: 96, y: 152, s: 1.15, pot: "#ff5d7a" },
+    { id: "plant2", asset: "plant", x: 956, y: 150, s: 1.0, pot: "#4f7cff" },
+    { id: "plant3", asset: "plant", x: 98, y: 626, s: 0.95, pot: "#2ec4a6" },
+    { id: "plant4", asset: "plant", x: 952, y: 626, s: 1.1, pot: "#ffb648" },
+  ],
+};
+
+/** Walkable floor bounds for the office scene (used by the mock engine). */
+const OFFICE_FLOOR3_BOUNDS = {
+  minX: 80,
+  maxX: 960,
+  minY: 130,
+  maxY: 700,
+};
+
+;
+/* ══ ui-lib/js/data/scenes/index.js ══ */
+// data/scenes/index.js — scene registry (data-driven, no hardcoded imports).
+//
+// The renderer never imports a concrete scene file: callers ask for a scene
+// by id via getScene(id). To add a scene, create its data file next to
+// officeFloor3.js and register it in SCENES below — the scene preview
+// (scene.html) picks it up automatically.
+
+const SCENES = {
+  [OFFICE_FLOOR3_ID]: OFFICE_FLOOR3_SCENE,
+};
+
+/** Look up a registered pretty scene by id (or null when unknown). */
+function getScene(id) {
+  return SCENES[id] || null;
+}
+
+/** All registered scene ids (for debugging / gallery use). */
+function sceneIds() {
+  return Object.keys(SCENES);
+}
+
+;
+/* ══ js/scene/ui.js ══ */
+// scene/ui.js — thin bridge to npc-simulator-ui (the sibling visual project).
+//
+// The whole scene layer — SceneRenderer, object/character painters, scene
+// data, canvas utils — lives in npc-simulator-ui, linked here as `ui-lib/`
+// (src/ui/graphic/ui-lib → ../../../../npc-simulator-ui). This module only
+// re-exports the pieces the console needs so the rest of the UI imports from
+// exactly one place (the js/scene/ui.js bridge): SceneRenderer, drawAvatar,
+// canvas utils, STATIC_SCENE/FLOOR_BOUNDS, getScene/sceneIds.
+//
+// NOTE: this file uses plain `import` + `const` + `export { … }` on purpose —
+// tools/bundle.mjs concatenates modules into one scope and only understands
+// those forms (no `export … from` re-exports).
+//
+// Visuals work (new objects, variants, looks) happens in npc-simulator-ui
+// (showcase.html / scene.html there) — never in this folder. If the
+// `ui-lib` link dangles, the sibling checkout is missing: see README.md and
+// run `npm run diagnose` (it checks graphic-UI availability).
+
+
+
+
+
+/** Backwards-compatible scene names used across the console + tests. */
+const STATIC_SCENE = OFFICE_FLOOR3_SCENE;
+const FLOOR_BOUNDS = OFFICE_FLOOR3_BOUNDS;
+
+;
+/* ══ js/data/officeScenario.js ══ */
+// data/officeScenario.js — the default scenario in the engine's World format.
+//
+// Shape mirrors `Scenario` from the simulator's types.ts:
+//   { version, id, title, narrative, userActorId, order, scene, actors }
+// The same JSON can be loaded by the engine (loadScenario) — the UI never
+// mutates it, adapters turn it into a World.
+//
+// Two UI-only conventions on top of the engine format:
+//  • `presentation` — visual metadata (colors, roles, props, looks) keyed by
+//    actor id. The engine ignores it; if absent, the UI derives deterministic
+//    looks from actor ids (see sim/presentation.js).
+//  • Scene object `id`s that match a STATIC_SCENE asset id are considered
+//    "already painted" by the scenery renderer (no generic fallback box).
+//    Object x/y are footprint CENTERS in world coordinates (1040×730 here).
+
+const OFFICE_SCENARIO = {
+  version: 1,
+  id: "office_first_day",
+  title: "First Day — Northlight Studio",
+  narrative:
+    "Monday · 9:02 AM — Northlight Studio, floor 3. Noah walks in on his first day; the team is scattered between the desk pods, the lounge and the kitchen.",
+  userActorId: "noah",
+  order: ["noah", "maya", "priya", "lena", "dana"],
+
+  scene: {
+    width: 1040,
+    height: 730,
+    objects: [
+      { id: "tbl_lounge", name: "lounge round table", description: "A round white table with four chairs around it, scattered with notes and cups.", x: 205, y: 272, w: 148, h: 118, passable: false, blocksVision: false, blocksSound: false },
+      { id: "sofa", name: "purple sofa", description: "A three-seat sofa against the west wall, facing east.", x: 112, y: 402, w: 66, h: 172, passable: false, blocksVision: true, blocksSound: false },
+      { id: "counter", name: "kitchen counter", description: "The kitchen counter with the moody coffee machine, a kettle and a row of cups.", x: 520, y: 158, w: 242, h: 58, passable: false, blocksVision: false, blocksSound: false },
+      { id: "cooler", name: "water cooler", description: "A bubbling water cooler between the kitchen and the lounge.", x: 372, y: 170, w: 44, h: 42, passable: false, blocksVision: false, blocksSound: false },
+      { id: "cabinet", name: "storage cabinet", description: "A low grey cabinet topped with cardboard crates of office supplies.", x: 160, y: 546, w: 190, h: 60, passable: false, blocksVision: true, blocksSound: false },
+      { id: "printer", name: "office printer", description: "The communal printer by the south wall. It jams when it senses fear.", x: 330, y: 600, w: 92, h: 64, passable: false, blocksVision: false, blocksSound: false },
+      { id: "deskA1", name: "desk A1 (Maya)", description: "Maya's desk in pod A: laptop, mug, tidy cable management.", x: 660, y: 280, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
+      { id: "deskA2", name: "desk A2 (Noah)", description: "A brand-new desk with a NOAH sign, a laptop and a lamp. Still smells like unboxing.", x: 860, y: 280, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
+      { id: "deskB1", name: "desk B1", description: "An empty desk in pod B, reserved for the next hire.", x: 660, y: 500, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
+      { id: "deskB2", name: "desk B2 (Lena)", description: "Lena's QA desk in pod B: two monitors' worth of sticky notes and a purple mug.", x: 860, y: 500, w: 170, h: 76, passable: false, blocksVision: false, blocksSound: false },
+      { id: "crates", name: "cardboard crates", description: "Stacked crates of old release swag near the cabinet.", x: 296, y: 524, w: 70, h: 50, passable: false, blocksVision: false, blocksSound: false },
+      { id: "door1", name: "entrance door", description: "The glass entrance door at the south side of the floor, leading to the corridor.", x: 500, y: 670, w: 130, h: 20, passable: true, blocksVision: false, blocksSound: true },
+    ],
+  },
+
+  actors: [
+    {
+      id: "noah",
+      name: "Noah",
+      persona:
+        "New hire, frontend developer. Eager, polite and a little nervous; wants to make a good first impression and learn the codebase.",
+      x: 500,
+      y: 690,
+      state: "standing by the entrance with a bag over one shoulder",
+      emotion: "nervous",
+      goal: "introduce yourself to the team and settle in at the new desk",
+      thoughts: "Okay… deep breath. First day, brand new team. Everyone seems friendly so far.",
+      memories: ["Signed the offer two weeks ago; starts today at Northlight Studio."],
+      beliefs: ["Arriving a few minutes early is the right call."],
+      relationships: [],
+    },
+    {
+      id: "maya",
+      name: "Maya",
+      persona:
+        "Team lead, Platform. Confident and warm; she owns onboarding for the new hire and keeps an eye on everyone's workload.",
+      x: 660,
+      y: 216,
+      state: "at her desk in pod A, reviewing the sprint board",
+      emotion: "neutral",
+      goal: "get Noah settled in and introduce him to the team",
+      thoughts: "New starter today. I should show him the desk pod and the coffee machine before standup.",
+      memories: ["Approved Noah's hiring plan last month."],
+      beliefs: ["A good first day sets the tone for everything after."],
+      relationships: ["Leads the platform team Noah just joined."],
+    },
+    {
+      id: "priya",
+      name: "Priya",
+      persona:
+        "Product designer. Bubbly, extroverted snack-drawer raider; loves welcoming people and over-shares design trivia.",
+      x: 296,
+      y: 278,
+      state: "at the lounge table, sketching on paper with a cold cup of coffee",
+      emotion: "happy",
+      goal: "finish the lounge redesign mockups before lunch",
+      thoughts: "If the new person sits near the window, the lounge redesign is going to sell itself.",
+      memories: ["Raided the snack drawer twice before 9 AM."],
+      beliefs: ["Design reviews are better with coffee."],
+      relationships: [],
+    },
+    {
+      id: "lena",
+      name: "Lena",
+      persona:
+        "QA engineer. Shy and precise; speaks softly, types furiously, and knows every flaky test by name.",
+      x: 664,
+      y: 436,
+      state: "at her desk in pod B, stepping through a failing regression suite",
+      emotion: "neutral",
+      goal: "stabilise the flaky regression suite before the release cut",
+      thoughts: "Two more flakes to quarantine, then I can look up and pretend to be a normal person.",
+      memories: ["Filed eleven bug reports last week; three were her own typos."],
+      beliefs: ["If it isn't tested, it isn't done."],
+      relationships: [],
+    },
+    {
+      id: "dana",
+      name: "Dana",
+      persona:
+        "Ops manager. Cheerful, caffeinated, knows where everything is and who to ask; unofficial welcome committee.",
+      x: 424,
+      y: 214,
+      state: "by the kitchen counter, waiting for the coffee machine to finish gurgling",
+      emotion: "happy",
+      goal: "keep the office running — badges, coffee, and the new hire's desk setup",
+      thoughts: "Badge is printed, desk is labeled. The machine is moody before ten, as always.",
+      memories: ["Ordered the NOAH desk sign on Friday."],
+      beliefs: ["Most office problems are solved by coffee or a label maker."],
+      relationships: [],
+    },
+  ],
+
+  /* ── UI-only visual metadata (ignored by the engine) ─────────────── */
+  presentation: {
+    scene: { name: "Northlight Studio · Floor 3", staticScene: "office_floor3" },
+    actors: {
+      noah: {
+        color: "#4f7cff",
+        role: "New hire · Frontend",
+        prop: "bag",
+        look: { skin: "#f2cba6", skin2: "#e0b189", hair: "#3d2a20", hairStyle: "short", shirt: "#7fb6ff", shirt2: "#5b95e8", pants: "#39435c", shoes: "#1e2434" },
+      },
+      maya: {
+        color: "#2ec4a6",
+        role: "Team lead · Platform",
+        prop: null,
+        look: { skin: "#c98a5e", skin2: "#b0744a", hair: "#22191a", hairStyle: "bun", shirt: "#2ec4a6", shirt2: "#1f9e85", pants: "#2b3550", shoes: "#1a2032" },
+      },
+      priya: {
+        color: "#9b6cf5",
+        role: "Product designer",
+        prop: null,
+        look: { skin: "#e2a97c", skin2: "#c98f63", hair: "#2b1f22", hairStyle: "long", shirt: "#9b6cf5", shirt2: "#7d51d3", pants: "#3a3357", shoes: "#221d33" },
+      },
+      lena: {
+        color: "#ffb648",
+        role: "QA engineer",
+        prop: null,
+        look: { skin: "#ffe0cb", skin2: "#eec7ae", hair: "#b5502f", hairStyle: "ponytail", shirt: "#ffb648", shirt2: "#e2952c", pants: "#4a6fa5", shoes: "#26313f" },
+      },
+      dana: {
+        color: "#ff5d7a",
+        role: "Ops manager",
+        prop: "cup",
+        look: { skin: "#8d5a3b", skin2: "#78492e", hair: "#191315", hairStyle: "curly", shirt: "#ff5d7a", shirt2: "#dd3f5e", pants: "#2c3444", shoes: "#171d29" },
+      },
+    },
+  },
+};
+
+;
 /* ══ js/core/emitter.js ══ */
 // core/emitter.js — minimal event emitter used by adapters and the app.
 
@@ -3273,7 +3338,6 @@ function parseSpeechFromAction(text) {
 // consequence): keyword-classified reply pools + small world patches, with
 // the same progress/turn event stream, so the UI behaves identically when a
 // real backend is wired in via httpAdapter.js.
-
 
 
 
@@ -4854,32 +4918,6 @@ class StageHud {
 }
 
 ;
-/* ══ js/render/avatar.js ══ */
-// render/avatar.js — small cast-panel portrait rendered with the same
-// character code as the scene (prototype drawAvatar).
-
-
-function drawAvatar(cv, ch) {
-  const c = cv.getContext("2d");
-  if (!c) return;
-  c.setTransform(1, 0, 0, 1, 0, 0);
-  c.clearRect(0, 0, cv.width, cv.height);
-  const g = linGrad(c, 0, 0, 0, cv.height, [[0, rgba(ch.color, 0.2)], [1, "rgba(255,255,255,.02)"]]);
-  c.fillStyle = g || "rgba(255,255,255,.04)";
-  c.fillRect(0, 0, cv.width, cv.height);
-  c.save();
-  c.scale(1.32, 1.32);
-  c.translate(-10, -16);
-  const ghost = Object.assign({}, ch, { dir: "down", x: 34, y: 78, isUser: false });
-  try {
-    drawCharacter(c, ghost, { showNames: false });
-  } catch (err) {
-    console.error("[avatar]", err);
-  }
-  c.restore();
-}
-
-;
 /* ══ js/ui/castPanel.js ══ */
 // ui/castPanel.js — "Cast" tab: one row per actor with a live avatar,
 // emotion chip, current line/state and a YOU badge for the user's actor.
@@ -5211,7 +5249,6 @@ class Composer {
 // (e.g. scenarios/office-anton.json --provider ollama …) drive the view.
 // Static opens (preview.html, file://) have no flag and keep the offline
 // mock, with no probe delay.
-
 
 
 

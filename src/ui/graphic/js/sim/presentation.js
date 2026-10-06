@@ -5,7 +5,7 @@
 // missing gets a deterministic fallback derived from the actor id, so the UI
 // renders sensibly for *any* world the engine hands it.
 
-import { hashStr, mulberry } from "../core/utils.js";
+import { hashStr, mulberry } from "../scene/ui.js";
 
 const SKINS = [
   ["#f2cba6", "#e0b189"],

@@ -9,6 +9,45 @@ validator keeps movement coherent and every step is logged.
 
 See [`plan.md`](plan.md) for the full engineering plan.
 
+## Quick start (everything at once)
+
+```bash
+npm install
+npm start
+```
+
+`npm start` (`scripts/start.sh`) brings up the whole stack and runs the
+engine-backed graphic console in the foreground:
+
+1. ensures the Ollama server is up (`ollama serve`, started detached if needed),
+2. ensures `laya-serve` is up on `:8000` (started detached if installed —
+   skipped with a warning when `npm run setup:laya` was never run),
+3. serves the sibling `../npc-simulator-ui` gallery/preview on
+   `http://localhost:8124/`,
+4. runs the engine console on `http://localhost:8123/` with these defaults:
+
+```text
+scenarios/office-anton.json --provider ollama --model fluffy/l3-8b-stheno-v3.2 --debug
+```
+
+Everything is overridable without editing files — flags are forwarded to
+`npm run start:graphic`, sidecars can be skipped, ports moved:
+
+```bash
+npm start -- --help                                                # all options
+npm start -- --dry-run                                             # print what would run, start nothing
+npm start -- --model huihui_ai/llama3.2-abliterate:3b               # fast 3B model, same scenario
+npm start -- scenarios/office.json --provider joingonka            # different scenario/backend
+npm start -- --mock                                                # offline deterministic engines
+npm start -- --no-debug                                            # hide objective world + LLM traces
+npm start -- --port 8123 --ui-port 8124                           # move either web server
+npm start -- --engine-only                                         # skip ollama/laya/UI management
+```
+
+Already-running servers are reused, never duplicated; only processes this
+script started are torn down on Ctrl-C. Env equivalents: `ENGINE_PORT` /
+`UI_PORT` (= `--port` / `--ui-port`), `OLLAMA_HOST`, `LAYA_SERVE_URL`.
+
 ## Status
 
 - **Milestone 1 — Engine core:** done. Deterministic turn loop, scenario
@@ -32,7 +71,7 @@ See [`plan.md`](plan.md) for the full engineering plan.
 ```bash
 npm install
 cp .env.example .env   # then add your JOINGONKA_API_KEY (see https://gate.joingonka.ai/dashboard)
-npm run diagnose:ai     # offline checks — expect all "PASS"
+npm run diagnose       # unified offline checks (graphic UI + AI layer) — expect all "PASS"
 ```
 
 Local Ollama models (uncensored, no API key needed):
@@ -165,7 +204,19 @@ npm run test:graphic:render  # renders canvas frames to src/ui/graphic/tests/out
 `src/ui/graphic/preview.html` is a generated single-file build for contexts
 without a module server (double-click, sandboxed viewers).
 
-Query parameters:
+The graphic side is split in two: `src/ui/graphic/` is a thin console
+(composer, cast/timeline/JSON panels, adapters, engine server) while the
+actual 2.5D scene — objects, characters, renderer, gallery + scene preview —
+lives in the sibling project `../npc-simulator-ui`, linked as
+`src/ui/graphic/ui-lib` and bridged through `src/ui/graphic/js/scene/ui.js`.
+That project serves separately for visuals-only work:
+
+```bash
+cd ../npc-simulator-ui && npm start   # → http://localhost:8123/showcase.html (object gallery)
+                                      # → http://localhost:8123/scene.html (raw scene preview)
+```
+
+Query parameters (console):
 
 | param | effect |
 |---|---|
@@ -185,8 +236,10 @@ npm run dev            # run src/index.ts
 npm test               # vitest (88 tests: unit, integration, golden)
 npm run test:graphic   # graphic UI: smoke + bundle + jsdom dom test
 npm run typecheck      # tsc --noEmit
+npm run diagnose          # unified: graphic-UI availability + offline AI checks
 npm run diagnose:ai       # offline: binary + server + model checks (JoinGonka, Laya, Ollama)
 npm run diagnose:ai:live  # + live probes against JoinGonka, laya-serve, and Ollama
+npm run diagnose:ui       # graphic-UI availability only (sibling npc-simulator-ui + console link)
 ```
 
 ## Repository layout
@@ -202,11 +255,16 @@ src/
   mocks/                             # deterministic engines (Milestone 1)
   logging/                           # Logger, LogStore, JSONL writer
    ui/text/                           # textUi.ts (CLI loop), commands.ts (Milestone 3)
-   ui/graphic/                        # graphic web console (Milestone 4):
-                                      # index.html + js/ + styles/ + tools/ + tests/
+   ui/graphic/                        # thin graphic console (Milestone 4):
+                                      # index.html + js/{app,main,sceneBridge,sim,ui}
+                                      # + styles/ + tools/ + tests/
+                                      # scene layer via ui-lib/ → ../../../../npc-simulator-ui
                                       # (see src/ui/graphic/README.md)
    editor/                            # Milestone 5 placeholder
 scenarios/office.json                # golden office scenario
 tests/{unit,integration,golden}/
 logs/ saves/                         # git-ignored runtime artifacts
+../npc-simulator-ui/                 # sibling visual scene project (objects,
+                                     # characters, renderer, showcase + scene preview;
+                                     # see ../npc-simulator-ui/README.md)
 ```

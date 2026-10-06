@@ -21,7 +21,7 @@
 //     anything unrecognised falls through to the renderer's generic labelled
 //     box (sceneRenderer skips only ids it knows as assets).
 
-import { STATIC_SCENE } from "./staticScene.js";
+import { STATIC_SCENE } from "../scene/ui.js";
 import { makeMapper } from "../sim/presentation.js";
 
 export const VIEW_W = 1040;

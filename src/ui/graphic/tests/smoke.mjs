@@ -8,7 +8,7 @@ import { OFFICE_SCENARIO } from "../js/data/officeScenario.js";
 import { LiveState, deriveDir } from "../js/sim/liveState.js";
 import { extractQuoted, parseSpeechFromAction } from "../js/sim/textParse.js";
 import { resolvePresentation, deriveLook, makeMapper } from "../js/sim/presentation.js";
-import { FLOOR_BOUNDS, STATIC_SCENE } from "../js/data/staticScene.js";
+import { FLOOR_BOUNDS, STATIC_SCENE } from "../js/scene/ui.js";
 import { buildViewScene, isStaticOfficeScene } from "../js/data/scenarioScene.js";
 
 let passed = 0;

@@ -7,7 +7,7 @@
 //
 // It never mutates World objects — same rule the text UI follows.
 
-import { clamp, easeInOut } from "../core/utils.js";
+import { clamp, easeInOut } from "../scene/ui.js";
 import { makeMapper, resolvePresentation } from "./presentation.js";
 import { parseSpeechFromAction } from "./textParse.js";
 

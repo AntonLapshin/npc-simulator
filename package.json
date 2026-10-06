@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
+    "start": "bash scripts/start.sh",
     "start:text": "tsx src/ui/text/textUi.ts",
     "start:graphic": "tsx src/ui/graphic/server.ts",
     "bundle:graphic": "node src/ui/graphic/tools/bundle.mjs",
@@ -20,6 +21,8 @@
     "setup:laya": "bash scripts/setup-laya.sh",
     "serve:laya": "bash scripts/serve-laya.sh",
     "setup:ollama": "bash scripts/setup-ollama.sh",
+    "diagnose": "tsx scripts/diagnose.ts",
+    "diagnose:ui": "tsx scripts/diagnose-ui.ts",
     "diagnose:ai": "tsx scripts/diagnose-ai.ts",
     "diagnose:ai:live": "tsx scripts/diagnose-ai.ts --live",
     "clean:logs": "rm -rf logs && mkdir logs",

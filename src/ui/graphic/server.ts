@@ -24,6 +24,9 @@
 // Everything else serves the static UI from src/ui/graphic/; index.html is
 // served with window.__NPC_ENGINE__ injected so the UI auto-connects to the
 // same origin instead of falling back to the offline mock scenario.
+// The scene layer is NOT served from here directly: src/ui/graphic/ui-lib is
+// a symlink to the sibling npc-simulator-ui project, so /ui-lib/* URLs and
+// the js/scene/ui.js bridge resolve through the static file serving below.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";

@@ -1,18 +1,29 @@
-# NPC Simulator — Web UI
+# NPC Simulator — Graphic Console (thin layer)
 
-A live, playable web interface for the NPC simulator. It is a rework of the
-`prototype.html` scenario **replayer** into a simulator **console**:
+A live, playable web console for the NPC simulator:
 
-* the 2.5D office scene still renders on the main canvas exactly as before;
-* the transport bar (back / play / forward / scrubber / speeds) is **gone**;
-* a **message composer** sits at the bottom: you play one actor (`world.userActorId`),
-  everyone else is an NPC driven by the engine;
+* a **message composer** at the bottom: you play one actor
+  (`world.userActorId`), everyone else is an NPC driven by the engine;
 * after you submit an action, your turn resolves and NPCs auto-advance until
   control returns to you — the same flow as the terminal UI's
-  `runUserTurnAndNpcs()`.
+  `runUserTurnAndNpcs()`;
+* side panels: live **cast** rows, **timeline** log, **JSON** inspector.
 
-The UI never mutates world state directly: every change arrives as an
+The console never mutates world state directly: every change arrives as an
 immutable `World` snapshot through adapter turn events.
+
+The 2.5D scene itself is **not** implemented here. It is rendered by the
+sibling project [`npc-simulator-ui`](../../../npc-simulator-ui/README.md)
+(objects, characters, scene renderer, gallery + scene preview), linked as
+`ui-lib/` (`src/ui/graphic/ui-lib → ../../../../npc-simulator-ui`).
+`js/scene/ui.js` is the single bridge module: it re-exports `SceneRenderer`,
+`drawAvatar`, canvas utils and the bundled office scene for the console.
+Visuals work — polishing objects/characters/variants, adding new objects —
+happens over there (`npm start` in that project serves its showcase and
+scene preview independently, no engine needed).
+
+If `ui-lib/` dangles, the sibling checkout is missing — run `npm run
+diagnose` from the repository root (it checks graphic-UI availability).
 
 ---
 
@@ -28,8 +39,8 @@ npm run start:graphic -- scenarios/office-anton.json --provider ollama --model f
 npm run bundle:graphic       # regenerate preview.html (self-contained single file)
 npm run test:graphic         # smoke + bundle + jsdom integration
 npm run test:graphic:smoke   # headless smoke tests (engine core, no DOM)
-npm run test:graphic:dom      # integration test: boots the bundle in jsdom (needs jsdom)
-npm run test:graphic:render   # renders real canvas frames to tests/out/*.png
+npm run test:graphic:dom     # integration test: boots the bundle in jsdom (needs jsdom)
+npm run test:graphic:render  # renders real canvas frames to tests/out/*.png
                              # (needs: npm i --no-save jsdom canvas)
 ```
 
@@ -39,14 +50,13 @@ Or standalone from this directory (`src/ui/graphic`):
 npm start          # static-only dev server (offline mock scenario) → http://localhost:8123/
 npm run bundle     # regenerate preview.html (self-contained single file)
 npm test           # smoke + bundle + jsdom integration
-node tests/dom.mjs     # integration test: boots the bundle in jsdom
-node tests/render.mjs  # renders real canvas frames to tests/out/*.png
-                       # (needs: npm i --no-save jsdom canvas)
+npm run test:uilib # object-gallery tests from the sibling ui project
 ```
 
 `index.html` is the canonical entry (native ES modules). `preview.html` is a
-generated single-file build for contexts without a module server (double-click,
-sandboxed viewers).
+generated single-file build for contexts without a module server
+(double-click, sandboxed viewers) — it inlines the console plus the scene
+code pulled through `js/scene/ui.js`.
 
 Query parameters:
 
@@ -62,72 +72,25 @@ Query parameters:
 
 ```
 index.html               DOM shell: stage + composer + side panels
-showcase.html            isolated object gallery (Storybook-style, ?file=..&showcase=..)
 preview.html             generated self-contained bundle (tools/bundle.mjs)
+ui-lib/                  link → ../../../../npc-simulator-ui (the scene layer)
 styles/
   base.css               theme tokens, reset, page background, shared parts
   layout.css             app shell, topbar, main/side grid
   stage.css              canvas stage, HUD chips, toggles, caption
   panels.css             side tabs: cast list, history log, JSON inspector
   composer.css           bottom message textarea + send button + status line
-  showcase.css           gallery: sidebar, stage, N/E/S/W segmented control
 js/
   main.js                bootstrap: adapter selection, fallback, resize/fonts
   app.js                 orchestrator: adapter events → live state → render/panels
+  scene/
+    ui.js                THE bridge: re-exports SceneRenderer et al from ui-lib
   core/
-    utils.js             math/color/canvas helpers + the 2.5D projection model
     dom.js               $ / el / highlightJSON / autogrow
     emitter.js           tiny event emitter
   data/
-    staticScene.js       backwards-compat re-export (see scenes/)
-    scenes/
-      officeFloor3.js    bundled pretty-office scene DATA (no painters)
-      index.js           scene registry: getScene(id) — no hardcoded imports
     officeScenario.js    default scenario in the engine's Scenario format + presentation
     scenarioScene.js     world objects → view scene (foreign worlds stay data-driven)
-  render/
-    viewOptions.js       Names / Zones toggles
-    background.js        cached background layer (composes objects/* painters)
-    assets.js            backwards-compat re-export (see objects/)
-    objects/             ONE FILE PER OBJECT (showcase pattern — gallery source of truth)
-      direction.js       shared N/E/S/W normalizer + COMPASS_VARIANTS
-      index.js           registry: OBJECTS, ASSET_DRAW, showcaseFiles, variantProps
-      desk.js            Desk — fixed view
-      roundTable.js      RoundTable — fixed view
-      chair.js           Chair — rotatable N/E/S/W
-      stool.js           Stool — fixed view
-      laptop.js          Laptop — rotatable N/S (+E/W aliases)
-      cup.js             Mug — fixed view
-      cupRow.js          Mug Row — fixed view
-      papers.js          Papers — fixed view
-      lamp.js            Desk Lamp — fixed view
-      deskSign.js        Desk Sign — fixed view
-      counter.js         Counter — fixed view
-      coffeeMachine.js   Coffee Machine — fixed view
-      kettle.js          Kettle — fixed view
-      waterCooler.js     Water Cooler — fixed view
-      cabinet.js         Cabinet — fixed view
-      printer.js         Printer — fixed view
-      crates.js          Crates — fixed view
-      sofa.js            Sofa — rotatable N/E/S/W
-      plant.js           Plant — fixed view
-      wall.js            Wall — scenery
-      window.js          Window — City/Hills variants
-      door.js            Door — scenery
-      whiteboard.js      Whiteboard — scenery
-      clock.js           Clock — scenery
-      poster.js          Poster — scenery
-      rug.js             Rug — scenery
-      zone.js            Zone — scenery
-      character.js       Character — rotatable N/E/S/W (wraps character.js)
-    character.js         bodies, hair, emotion faces, mood FX, name plates
-    bubble.js            speech & thought bubbles with collision placement
-    avatar.js            cast-panel portraits (reuses character.js)
-    sceneRenderer.js     canvas host, resize, frame pipeline, generic object fallback
-  showcase/              gallery app (AntonLapshin/showcase pattern)
-    core.js              pure registry/select/URL codec (no DOM — unit tested)
-    files.js             showcase file registration (re-exports objects registry)
-    app.js               thin view-model: sidebar + stage + segmented control
   sim/
     textParse.js         quote/thought recovery from free-form action text
     presentation.js      look/color resolution + world→view coordinate mapping
@@ -146,28 +109,13 @@ tools/
   serve.mjs              zero-dependency static server
 tests/
   smoke.mjs              engine-core tests (mock turns, tweens, parsing)
-  showcase.mjs           gallery tests: registry, URL codec, every object·variant draws
   dom.mjs                jsdom integration: boot → submit → turns → back to user
   render.mjs             visual check: canvas frames saved as PNG
 ```
 
-## Object gallery (`showcase.html`)
-
-Storybook-style isolated view over `js/render/objects/` (pattern adapted from
-[AntonLapshin/showcase](https://github.com/AntonLapshin/showcase)):
-
-```bash
-npm start  # → http://localhost:8123/showcase.html
-```
-
-* sidebar lists every object (furniture → scenery → character);
-* the canvas shows the object in isolation with a props readout;
-* rotatable objects (chair, sofa, laptop, character) get an **N / E / S / W**
-  segmented control; fixed-view objects show a "fixed view" note instead;
-* selection deep-links via `?file=Chair&showcase=E` (shareable, back/forward
-  safe). To add an object: create `js/render/objects/<thing>.js` exporting a
-  single uniquely-named showcase object, then register it in
-  `js/render/objects/index.js` — the gallery picks it up automatically.
+Everything under `js/render/`, `js/showcase/`, `js/data/scenes/`,
+`showcase.html` and the object gallery used to live here; they were extracted
+into `npc-simulator-ui` (see its README for the object/showcase/scene docs).
 
 ## Turn / data flow
 
@@ -188,11 +136,14 @@ composer submit ──▶ adapter.sendUserAction(text)
 `LiveState` exists because engine patches are instantaneous while the scene
 should feel alive: an actor whose `x/y` changed gets an eased tween (duration
 scales with distance), speech bubbles live for `2.6–9s` depending on length and
-fade out, and the caption mirrors the latest history entry.
+fade out, and the caption mirrors the latest history entry. The `renderer`
+here is `SceneRenderer` from `npc-simulator-ui` (via `js/scene/ui.js`); the
+snapshot it receives (`{ chars, bubbles, objects }`) is the raw-input
+contract documented in that project's README.
 
 ## Backend contract (`httpAdapter.js`)
 
-The UI is backend-agnostic; the Node engine only needs three routes:
+The console is backend-agnostic; the Node engine only needs three routes:
 
 ```
 GET  /health            → 200 when up (used for the mock fallback probe)
@@ -202,12 +153,12 @@ POST /action  { text }  → { world, events? }
 
 `events` (optional) is an ordered array of per-turn events
 `{ actorId, isUser, actionText, speech?, narrative?, world? }`; when present the
-UI replays them one by one (animating each NPC turn, like the text UI's
+console replays them one by one (animating each NPC turn, like the text UI's
 per-turn output). Without it, a single turn event is synthesised from the last
 history entry and its `"Name: "` prefix. Quoted speech in action text becomes a
 bubble automatically, so even a bare world diff produces speech.
 
-If `/health` fails, the UI falls back to the offline `MockAdapter` with a
+If `/health` fails, the console falls back to the offline `MockAdapter` with a
 console warning — mirroring `buildDeps()` in `textUI.ts`.
 
 ## Scenario & presentation conventions
@@ -218,9 +169,10 @@ console warning — mirroring `buildDeps()` in `textUI.ts`.
 * `presentation` (optional, UI-only): per-actor `{ color, role, prop, look }`
   plus `scene.name`. Missing entries get deterministic looks derived from the
   actor id (`presentation.deriveLook`), so any world renders sensibly.
-* Scene object `id`s that match a static-scene asset id (`deskA1`, `counter`, …)
-  are considered already painted and skipped by the renderer; anything else is
-  drawn as a labelled generic box, so foreign scenes still show their objects.
+* The painted room comes from `npc-simulator-ui` scenes for the bundled
+  office, or from `data/scenarioScene.js` (world objects → view scene) for
+  foreign worlds; the renderer draws anything unrecognised as a labelled
+  generic box.
 * Object `x/y` are footprint **centres** in scene coordinates; the view maps
   `scene.width/height` onto the 1040×730 canvas world.
 
@@ -229,3 +181,5 @@ console warning — mirroring `buildDeps()` in `textUI.ts`.
 Drop another `Scenario` JSON next to `officeScenario.js`, import it in
 `main.js`, and pass it to `MockAdapter` (or serve it from your backend's
 `GET /world`). Everything else — renderer, panels, composer — is data-driven.
+To add or polish visuals (objects, characters, scenes), work in
+`npc-simulator-ui` instead.
