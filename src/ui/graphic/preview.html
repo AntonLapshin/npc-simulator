@@ -273,16 +273,18 @@ pre.json{margin:0;max-height:460px;overflow:auto;background:rgba(3,6,14,.55);bor
 <script>
 "use strict";
 (function(){
-/* ══ js/data/staticScene.js ══ */
-// data/staticScene.js — the static office *visual* layout (prototype §2).
+/* ══ js/data/scenes/officeFloor3.js ══ */
+// data/scenes/officeFloor3.js — the bundled pretty-office scene (DATA ONLY).
 //
-// This is presentation-only scenery: walls, windows, floor, decals and the
-// furniture asset list the canvas renderer paints. Simulation truth lives in
-// the World-format scenario (data/officeScenario.js); where a scenario scene
-// object shares an `id` with an asset below, the renderer knows it is already
-// painted here and skips the generic object box.
+// This used to live inline in data/staticScene.js. It is now one entry in the
+// scene registry (data/scenes/index.js): the renderer never imports it
+// directly, scenes are selected by id (`staticScene: "office_floor3"`).
+// No painter code lives here — just footprint/colour data composed from the
+// per-object defaults in js/render/objects/.
 
-const STATIC_SCENE = {
+const OFFICE_FLOOR3_ID = "office_floor3";
+
+const OFFICE_FLOOR3_SCENE = {
   meta: {
     name: "Northlight Studio · Floor 3",
     style: "gem-flat 2.5D",
@@ -375,15 +377,25 @@ const STATIC_SCENE = {
   ],
 };
 
-/** Walkable floor bounds used by the mock engine to keep actors on the floor.
- *  maxY extends through the entrance strip by the door (see the prototype's
- *  opening beats, where Noah walks in from y≈718). */
-const FLOOR_BOUNDS = {
+/** Walkable floor bounds for the office scene (used by the mock engine). */
+const OFFICE_FLOOR3_BOUNDS = {
   minX: 80,
   maxX: 960,
   minY: 130,
   maxY: 700,
 };
+
+;
+/* ══ js/data/staticScene.js ══ */
+// data/staticScene.js — backwards-compatible re-export (DO NOT EXTEND).
+//
+// The hardcoded office layout moved to data/scenes/officeFloor3.js and is
+// selected by id through data/scenes/index.js. This module keeps the old
+// `STATIC_SCENE` / `FLOOR_BOUNDS` names so main.js, tests and the bundle
+// keep working. New code should use the scene registry instead.
+
+const STATIC_SCENE = OFFICE_FLOOR3_SCENE;
+const FLOOR_BOUNDS = OFFICE_FLOOR3_BOUNDS;
 
 ;
 /* ══ js/data/officeScenario.js ══ */
@@ -724,14 +736,382 @@ const viewOptions = {
 };
 
 ;
-/* ══ js/render/background.js ══ */
-// render/background.js — static background layer (prototype §6).
-//
-// Painted once into an offscreen canvas by SceneRenderer and blitted every
-// frame: floor planks, light patches, rugs/zones, back walls, windows,
-// wall decor and the entrance door. `drawWall` is exported separately
-// because front-layer walls must paint AFTER characters (painters order).
+/* ══ js/render/objects/wall.js ══ */
+// render/objects/wall.js — wall segment showcase file.
 
+const Wall = {
+  name: "wall",
+  title: "Wall",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "wall", id: "wall", x: 0, y: 0, w: 220, h: 20, height: 70,
+  face: "#dfe5f2", top: "#f4f7fd", layer: "back",
+},
+
+  draw(c, w) { 
+  const y0 = w.y + w.h - w.height, y1 = w.y + w.h;
+  const g = linGrad(c, 0, y0, 0, y1, [[0, w.face], [1, shade(w.face, -0.14)]]);
+  c.fillStyle = g || w.face;
+  c.fillRect(w.x, y0, w.w, y1 - y0);
+  c.fillStyle = w.top;
+  c.fillRect(w.x, y0, w.w, 7);
+  c.fillStyle = "rgba(255,255,255,.75)";
+  c.fillRect(w.x, y0, w.w, 1.6);
+  c.save();
+  c.beginPath();
+  c.rect(w.x, y0, w.w, y1 - y0);
+  c.clip();
+  c.fillStyle = "rgba(255,255,255,.09)";
+  for (let i = -40; i < w.w; i += 90) poly(c, [[w.x + i, y1], [w.x + i + 34, y1], [w.x + i + 70, y0], [w.x + i + 36, y0]]);
+  c.fillStyle = "rgba(30,40,80,.10)";
+  c.fillRect(w.x, y1 - 5, w.w, 5);
+  c.restore();
+  c.strokeStyle = "rgba(40,50,90,.16)";
+  c.lineWidth = 1;
+  c.strokeRect(w.x + 0.5, y0 + 0.5, w.w - 1, y1 - y0 - 1);
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/window.js ══ */
+// render/objects/window.js — window showcase file.
+
+const Win = {
+  name: "window",
+  title: "Window",
+  supportsDirection: false,
+  variants: ["City", "Hills"],
+  defaultProps: {
+  asset: "window", id: "win", x: 0, y: 0, w: 180, h: 46, view: "city",
+},
+
+  draw(c, win) { 
+  const x = win.x, y = win.y, w = win.w, h = win.h;
+  c.save();
+  rrPath(c, x, y, w, h, 5);
+  c.clip();
+  const sky = linGrad(c, 0, y, 0, y + h, [[0, "#8fd3ff"], [0.55, "#cfe9ff"], [1, "#ffe9c9"]]);
+  c.fillStyle = sky || "#bfe4ff";
+  c.fillRect(x, y, w, h);
+  if (win.view === "city") {
+    const rnd = mulberry(x * 7 + y);
+    let cx = x - 10;
+    while (cx < x + w) {
+      const bw = 14 + rnd() * 22, bh = 10 + rnd() * (h - 14);
+      c.fillStyle = "rgba(96,124,180," + (0.3 + rnd() * 0.28).toFixed(2) + ")";
+      c.fillRect(cx, y + h - bh, bw, bh);
+      c.fillStyle = "rgba(255,255,255,.30)";
+      for (let wy = y + h - bh + 4; wy < y + h - 3; wy += 6)
+        for (let wx = cx + 3; wx < cx + bw - 3; wx += 6) c.fillRect(wx, wy, 2, 2);
+      cx += bw + 5 + rnd() * 9;
+    }
+  } else {
+    c.fillStyle = "rgba(90,170,150,.45)";
+    poly(c, [[x, y + h], [x + w * 0.22, y + h * 0.34], [x + w * 0.45, y + h], [x + w * 0.62, y + h * 0.5], [x + w * 0.85, y + h], [x + w, y + h * 0.62], [x + w, y + h]]);
+    c.fillStyle = "rgba(255,255,255,.5)";
+    poly(c, [[x + w * 0.22, y + h * 0.34], [x + w * 0.3, y + h * 0.52], [x + w * 0.14, y + h * 0.52]]);
+  }
+  c.fillStyle = "rgba(255,255,255,.20)";
+  poly(c, [[x, y + h], [x + w * 0.35, y], [x + w * 0.52, y], [x + w * 0.17, y + h]]);
+  c.restore();
+  c.strokeStyle = "#f7f9fe";
+  c.lineWidth = 4;
+  rrPath(c, x, y, w, h, 5);
+  c.stroke();
+  c.strokeStyle = "rgba(60,70,110,.30)";
+  c.lineWidth = 1;
+  rrPath(c, x - 2, y - 2, w + 4, h + 4, 6);
+  c.stroke();
+  c.fillStyle = "#f7f9fe";
+  c.fillRect(x + w / 2 - 1.5, y, 3, h);
+  c.fillStyle = "rgba(255,255,255,.5)";
+  c.fillRect(x, y + h * 0.34, w, 2);
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/door.js ══ */
+// render/objects/door.js — entrance door showcase file.
+
+const Door = {
+  name: "door",
+  title: "Door",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "door", id: "door", x: 0, y: 0, w: 130, h: 20,
+  frame: "#8f6b45", label: "ENTRANCE",
+},
+
+  draw(c, d) { 
+  if (d.h > d.w) {
+    c.fillStyle = d.frame || "#8f6b45";
+    c.fillRect(d.x, d.y, d.w, d.h);
+    c.strokeStyle = "rgba(40,50,90,.35)";
+    c.lineWidth = 1.5;
+    c.strokeRect(d.x + 0.5, d.y + 0.5, d.w - 1, d.h - 1);
+    return;
+  }
+  c.fillStyle = "#0a0f1c";
+  c.fillRect(d.x, d.y + 2, d.w, d.h);
+  const g = linGrad(c, 0, d.y - 46, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);
+  if (g) {
+    c.fillStyle = g;
+    c.fillRect(d.x, d.y - 46, d.w, d.h + 46);
+  }
+  c.fillStyle = d.frame;
+  c.fillRect(d.x - 9, d.y - 50, 9, d.h + 50);
+  c.fillRect(d.x + d.w, d.y - 50, 9, d.h + 50);
+  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 9);
+  c.fillStyle = shade(d.frame, 0.28);
+  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 3);
+  c.fillStyle = "rgba(255,255,255,.55)";
+  c.font = "700 9px Outfit, sans-serif";
+  c.textAlign = "center";
+  c.fillText(d.label, d.x + d.w / 2, d.y - 62);
+  c.textAlign = "left";
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/whiteboard.js ══ */
+// render/objects/whiteboard.js — whiteboard decor showcase file.
+
+const Whiteboard = {
+  name: "whiteboard",
+  title: "Whiteboard",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "whiteboard", id: "board", x: 0, y: 0, w: 132, h: 50, ink: "#4f7cff",
+},
+
+  draw(c, d) { 
+  c.fillStyle = "rgba(20,26,48,.18)";
+  rrPath(c, d.x + 3, d.y + 4, d.w, d.h, 5);
+  c.fill();
+  c.fillStyle = "#eef2fa";
+  rrPath(c, d.x, d.y, d.w, d.h, 5);
+  c.fill();
+  c.strokeStyle = "#aab6d0";
+  c.lineWidth = 2.4;
+  rrPath(c, d.x, d.y, d.w, d.h, 5);
+  c.stroke();
+  c.save();
+  rrPath(c, d.x + 4, d.y + 4, d.w - 8, d.h - 8, 3);
+  c.clip();
+  c.strokeStyle = rgba(d.ink, 0.55);
+  c.lineWidth = 1.6;
+  for (let i = 0; i < 4; i++) {
+    c.beginPath();
+    c.moveTo(d.x + 10, d.y + 11 + i * 7);
+    c.lineTo(d.x + 10 + 38 + ((i * 23) % 46), d.y + 11 + i * 7);
+    c.stroke();
+  }
+  c.strokeStyle = "rgba(255,93,122,.7)";
+  c.beginPath();
+  c.moveTo(d.x + 84, d.y + d.h - 10);
+  const pts = [10, 20, 14, 26, 20, 32];
+  for (let i = 0; i < pts.length; i++) c.lineTo(d.x + 84 + i * 9, d.y + d.h - 10 - pts[i]);
+  c.stroke();
+  c.fillStyle = "rgba(46,196,166,.55)";
+  c.fillRect(d.x + 84, d.y + d.h - 11, 58, 2);
+  c.restore();
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/clock.js ══ */
+// render/objects/clock.js — wall clock showcase file.
+
+const Clock = {
+  name: "clock",
+  title: "Clock",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "clock", id: "clock", x: 0, y: 0, r: 15 },
+
+  draw(c, d) { 
+  c.fillStyle = "rgba(20,26,48,.18)";
+  ell(c, d.x + 2, d.y + 3, d.r, d.r);
+  c.fill();
+  c.fillStyle = "#f7f9fe";
+  ell(c, d.x, d.y, d.r, d.r);
+  c.fill();
+  c.strokeStyle = "#8c99b8";
+  c.lineWidth = 2.4;
+  ell(c, d.x, d.y, d.r, d.r);
+  c.stroke();
+  c.strokeStyle = "#2b3550";
+  c.lineWidth = 2;
+  c.lineCap = "round";
+  c.beginPath();
+  c.moveTo(d.x, d.y);
+  c.lineTo(d.x, d.y - d.r * 0.6);
+  c.stroke();
+  c.beginPath();
+  c.moveTo(d.x, d.y);
+  c.lineTo(d.x + d.r * 0.55, d.y + d.r * 0.2);
+  c.stroke();
+  c.fillStyle = "#ff5d7a";
+  ell(c, d.x, d.y, 1.8, 1.8);
+  c.fill();
+  c.lineCap = "butt";
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/poster.js ══ */
+// render/objects/poster.js — poster decor showcase file.
+
+const Poster = {
+  name: "poster",
+  title: "Poster",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "poster", id: "poster", x: 0, y: 0, w: 36, h: 46, color: "#ff5d7a",
+},
+
+  draw(c, d) { 
+  c.fillStyle = "rgba(20,26,48,.16)";
+  rrPath(c, d.x + 2, d.y + 3, d.w, d.h, 4);
+  c.fill();
+  c.fillStyle = "#fbfcff";
+  rrPath(c, d.x, d.y, d.w, d.h, 4);
+  c.fill();
+  c.save();
+  rrPath(c, d.x + 3, d.y + 3, d.w - 6, d.h - 6, 2);
+  c.clip();
+  c.fillStyle = rgba(d.color, 0.85);
+  poly(c, [[d.x + 3, d.y + d.h - 3], [d.x + d.w * 0.5, d.y + 6], [d.x + d.w - 3, d.y + d.h - 3]]);
+  c.fillStyle = "rgba(255,255,255,.45)";
+  poly(c, [[d.x + 3, d.y + d.h - 3], [d.x + d.w * 0.5, d.y + 6], [d.x + d.w * 0.36, d.y + d.h - 3]]);
+  c.restore();
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/rug.js ══ */
+// render/objects/rug.js — floor rug showcase file.
+
+const Rug = {
+  name: "rug",
+  title: "Rug",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "rug", id: "rug", x: 0, y: 0, w: 290, h: 215,
+  color: "#4f7cff", trim: "#9b6cf5",
+},
+
+  draw(c, d) { 
+  const x = d.x - d.w / 2, y = d.y - d.h / 2;
+  c.fillStyle = "rgba(40,26,12,.16)";
+  rrPath(c, x + 3, y + 5, d.w, d.h, 20);
+  c.fill();
+  c.fillStyle = rgba(d.color, 0.3);
+  rrPath(c, x, y, d.w, d.h, 20);
+  c.fill();
+  c.strokeStyle = rgba(d.trim, 0.55);
+  c.lineWidth = 3;
+  rrPath(c, x + 8, y + 8, d.w - 16, d.h - 16, 14);
+  c.stroke();
+  c.save();
+  rrPath(c, x, y, d.w, d.h, 20);
+  c.clip();
+  c.fillStyle = "rgba(255,255,255,.10)";
+  for (let i = -d.h; i < d.w; i += 34) poly(c, [[x + i, y + d.h], [x + i + 14, y + d.h], [x + i + 14 + d.h, y], [x + i + d.h, y]]);
+  c.restore();
+  c.strokeStyle = "rgba(255,255,255,.20)";
+  c.lineWidth = 1.4;
+  rrPath(c, x, y, d.w, d.h, 20);
+  c.stroke();
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/objects/zone.js ══ */
+// render/objects/zone.js — dashed zone marker showcase file.
+
+const Zone = {
+  name: "zone",
+  title: "Zone",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "zone", id: "zone", x: 0, y: 0, w: 300, h: 200,
+  color: "#ffb648", label: "DESK POD · A/B",
+},
+
+  draw(c, d) { 
+  const x = d.x - d.w / 2, y = d.y - d.h / 2;
+  c.save();
+  c.setLineDash([9, 7]);
+  c.strokeStyle = rgba(d.color, 0.42);
+  c.lineWidth = 2;
+  rrPath(c, x, y, d.w, d.h, 16);
+  c.stroke();
+  c.setLineDash([]);
+  c.restore();
+  c.fillStyle = rgba(d.color, 0.75);
+  c.font = "800 10px Outfit, sans-serif";
+  c.fillText(d.label, x + 12, y + 18);
+},
+  sortY() { 
+  return -Infinity;
+}
+};
+
+;
+/* ══ js/render/background.js ══ */
+// render/background.js — static background layer (backwards-compat layer).
+//
+// Refactored: wall/window/door/decor/rug/zone painters now live in their own
+// files under `render/objects/` (showcase pattern). This module keeps the
+// original API (`paintBackground`, `drawWall`, …) and composes the cached
+// background from the object modules. No scene is hardcoded here — the scene
+// descriptor is passed in (see js/data/scenes/officeFloor3.js).
+
+
+
+
+
+
+
+
+
+
+const drawWall = Wall.draw;
+const drawWindow = Win.draw;
+const drawDoor = Door.draw;
+const drawWhiteboard = Whiteboard.draw;
+const drawClock = Clock.draw;
+const drawPoster = Poster.draw;
+const drawRug = Rug.draw;
+const drawZone = Zone.draw;
 
 function paintBackground(c, scene, dims) {
   const { w: W, h: H } = dims;
@@ -822,232 +1202,36 @@ function paintBackground(c, scene, dims) {
   if (scene.door && scene.door.w > 0 && scene.door.h > 0) drawDoor(c, scene.door);
 }
 
-function drawWall(c, w) {
-  const y0 = w.y + w.h - w.height, y1 = w.y + w.h;
-  const g = linGrad(c, 0, y0, 0, y1, [[0, w.face], [1, shade(w.face, -0.14)]]);
-  c.fillStyle = g || w.face;
-  c.fillRect(w.x, y0, w.w, y1 - y0);
-  c.fillStyle = w.top;
-  c.fillRect(w.x, y0, w.w, 7);
-  c.fillStyle = "rgba(255,255,255,.75)";
-  c.fillRect(w.x, y0, w.w, 1.6);
-  c.save();
-  c.beginPath();
-  c.rect(w.x, y0, w.w, y1 - y0);
-  c.clip();
-  c.fillStyle = "rgba(255,255,255,.09)";
-  for (let i = -40; i < w.w; i += 90) poly(c, [[w.x + i, y1], [w.x + i + 34, y1], [w.x + i + 70, y0], [w.x + i + 36, y0]]);
-  c.fillStyle = "rgba(30,40,80,.10)";
-  c.fillRect(w.x, y1 - 5, w.w, 5);
-  c.restore();
-  c.strokeStyle = "rgba(40,50,90,.16)";
-  c.lineWidth = 1;
-  c.strokeRect(w.x + 0.5, y0 + 0.5, w.w - 1, y1 - y0 - 1);
-}
-
-function drawWindow(c, win) {
-  const x = win.x, y = win.y, w = win.w, h = win.h;
-  c.save();
-  rrPath(c, x, y, w, h, 5);
-  c.clip();
-  const sky = linGrad(c, 0, y, 0, y + h, [[0, "#8fd3ff"], [0.55, "#cfe9ff"], [1, "#ffe9c9"]]);
-  c.fillStyle = sky || "#bfe4ff";
-  c.fillRect(x, y, w, h);
-  if (win.view === "city") {
-    const rnd = mulberry(x * 7 + y);
-    let cx = x - 10;
-    while (cx < x + w) {
-      const bw = 14 + rnd() * 22, bh = 10 + rnd() * (h - 14);
-      c.fillStyle = "rgba(96,124,180," + (0.3 + rnd() * 0.28).toFixed(2) + ")";
-      c.fillRect(cx, y + h - bh, bw, bh);
-      c.fillStyle = "rgba(255,255,255,.30)";
-      for (let wy = y + h - bh + 4; wy < y + h - 3; wy += 6)
-        for (let wx = cx + 3; wx < cx + bw - 3; wx += 6) c.fillRect(wx, wy, 2, 2);
-      cx += bw + 5 + rnd() * 9;
-    }
-  } else {
-    c.fillStyle = "rgba(90,170,150,.45)";
-    poly(c, [[x, y + h], [x + w * 0.22, y + h * 0.34], [x + w * 0.45, y + h], [x + w * 0.62, y + h * 0.5], [x + w * 0.85, y + h], [x + w, y + h * 0.62], [x + w, y + h]]);
-    c.fillStyle = "rgba(255,255,255,.5)";
-    poly(c, [[x + w * 0.22, y + h * 0.34], [x + w * 0.3, y + h * 0.52], [x + w * 0.14, y + h * 0.52]]);
-  }
-  c.fillStyle = "rgba(255,255,255,.20)";
-  poly(c, [[x, y + h], [x + w * 0.35, y], [x + w * 0.52, y], [x + w * 0.17, y + h]]);
-  c.restore();
-  c.strokeStyle = "#f7f9fe";
-  c.lineWidth = 4;
-  rrPath(c, x, y, w, h, 5);
-  c.stroke();
-  c.strokeStyle = "rgba(60,70,110,.30)";
-  c.lineWidth = 1;
-  rrPath(c, x - 2, y - 2, w + 4, h + 4, 6);
-  c.stroke();
-  c.fillStyle = "#f7f9fe";
-  c.fillRect(x + w / 2 - 1.5, y, 3, h);
-  c.fillStyle = "rgba(255,255,255,.5)";
-  c.fillRect(x, y + h * 0.34, w, 2);
-}
-
-function drawDoor(c, d) {
-  // Top-view: doors set into vertical (west/east) walls are seen edge-on —
-  // paint a simple vertical rectangle in the wall line.
-  // Any opening taller than it is wide is a side-wall door (a 1x2 west-wall
-  // door maps to ~52x73 view units, ratio ~1.4, so the threshold must be 1.0).
-  if (d.h > d.w) {
-    c.fillStyle = d.frame || "#8f6b45";
-    c.fillRect(d.x, d.y, d.w, d.h);
-    c.strokeStyle = "rgba(40,50,90,.35)";
-    c.lineWidth = 1.5;
-    c.strokeRect(d.x + 0.5, d.y + 0.5, d.w - 1, d.h - 1);
-    return;
-  }
-  c.fillStyle = "#0a0f1c";
-  c.fillRect(d.x, d.y + 2, d.w, d.h);
-  const g = linGrad(c, 0, d.y - 46, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);
-  if (g) {
-    c.fillStyle = g;
-    c.fillRect(d.x, d.y - 46, d.w, d.h + 46);
-  }
-  c.fillStyle = d.frame;
-  c.fillRect(d.x - 9, d.y - 50, 9, d.h + 50);
-  c.fillRect(d.x + d.w, d.y - 50, 9, d.h + 50);
-  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 9);
-  c.fillStyle = shade(d.frame, 0.28);
-  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 3);
-  c.fillStyle = "rgba(255,255,255,.55)";
-  c.font = "700 9px Outfit, sans-serif";
-  c.textAlign = "center";
-  c.fillText(d.label, d.x + d.w / 2, d.y - 62);
-  c.textAlign = "left";
-}
-
-function drawWhiteboard(c, d) {
-  c.fillStyle = "rgba(20,26,48,.18)";
-  rrPath(c, d.x + 3, d.y + 4, d.w, d.h, 5);
-  c.fill();
-  c.fillStyle = "#eef2fa";
-  rrPath(c, d.x, d.y, d.w, d.h, 5);
-  c.fill();
-  c.strokeStyle = "#aab6d0";
-  c.lineWidth = 2.4;
-  rrPath(c, d.x, d.y, d.w, d.h, 5);
-  c.stroke();
-  c.save();
-  rrPath(c, d.x + 4, d.y + 4, d.w - 8, d.h - 8, 3);
-  c.clip();
-  c.strokeStyle = rgba(d.ink, 0.55);
-  c.lineWidth = 1.6;
-  for (let i = 0; i < 4; i++) {
-    c.beginPath();
-    c.moveTo(d.x + 10, d.y + 11 + i * 7);
-    c.lineTo(d.x + 10 + 38 + ((i * 23) % 46), d.y + 11 + i * 7);
-    c.stroke();
-  }
-  c.strokeStyle = "rgba(255,93,122,.7)";
-  c.beginPath();
-  c.moveTo(d.x + 84, d.y + d.h - 10);
-  const pts = [10, 20, 14, 26, 20, 32];
-  for (let i = 0; i < pts.length; i++) c.lineTo(d.x + 84 + i * 9, d.y + d.h - 10 - pts[i]);
-  c.stroke();
-  c.fillStyle = "rgba(46,196,166,.55)";
-  c.fillRect(d.x + 84, d.y + d.h - 11, 58, 2);
-  c.restore();
-}
-
-function drawClock(c, d) {
-  c.fillStyle = "rgba(20,26,48,.18)";
-  ell(c, d.x + 2, d.y + 3, d.r, d.r);
-  c.fill();
-  c.fillStyle = "#f7f9fe";
-  ell(c, d.x, d.y, d.r, d.r);
-  c.fill();
-  c.strokeStyle = "#8c99b8";
-  c.lineWidth = 2.4;
-  ell(c, d.x, d.y, d.r, d.r);
-  c.stroke();
-  c.strokeStyle = "#2b3550";
-  c.lineWidth = 2;
-  c.lineCap = "round";
-  c.beginPath();
-  c.moveTo(d.x, d.y);
-  c.lineTo(d.x, d.y - d.r * 0.6);
-  c.stroke();
-  c.beginPath();
-  c.moveTo(d.x, d.y);
-  c.lineTo(d.x + d.r * 0.55, d.y + d.r * 0.2);
-  c.stroke();
-  c.fillStyle = "#ff5d7a";
-  ell(c, d.x, d.y, 1.8, 1.8);
-  c.fill();
-  c.lineCap = "butt";
-}
-
-function drawPoster(c, d) {
-  c.fillStyle = "rgba(20,26,48,.16)";
-  rrPath(c, d.x + 2, d.y + 3, d.w, d.h, 4);
-  c.fill();
-  c.fillStyle = "#fbfcff";
-  rrPath(c, d.x, d.y, d.w, d.h, 4);
-  c.fill();
-  c.save();
-  rrPath(c, d.x + 3, d.y + 3, d.w - 6, d.h - 6, 2);
-  c.clip();
-  c.fillStyle = rgba(d.color, 0.85);
-  poly(c, [[d.x + 3, d.y + d.h - 3], [d.x + d.w * 0.5, d.y + 6], [d.x + d.w - 3, d.y + d.h - 3]]);
-  c.fillStyle = "rgba(255,255,255,.45)";
-  poly(c, [[d.x + 3, d.y + d.h - 3], [d.x + d.w * 0.5, d.y + 6], [d.x + d.w * 0.36, d.y + d.h - 3]]);
-  c.restore();
-}
-
-function drawRug(c, d) {
-  const x = d.x - d.w / 2, y = d.y - d.h / 2;
-  c.fillStyle = "rgba(40,26,12,.16)";
-  rrPath(c, x + 3, y + 5, d.w, d.h, 20);
-  c.fill();
-  c.fillStyle = rgba(d.color, 0.3);
-  rrPath(c, x, y, d.w, d.h, 20);
-  c.fill();
-  c.strokeStyle = rgba(d.trim, 0.55);
-  c.lineWidth = 3;
-  rrPath(c, x + 8, y + 8, d.w - 16, d.h - 16, 14);
-  c.stroke();
-  c.save();
-  rrPath(c, x, y, d.w, d.h, 20);
-  c.clip();
-  c.fillStyle = "rgba(255,255,255,.10)";
-  for (let i = -d.h; i < d.w; i += 34) poly(c, [[x + i, y + d.h], [x + i + 14, y + d.h], [x + i + 14 + d.h, y], [x + i + d.h, y]]);
-  c.restore();
-  c.strokeStyle = "rgba(255,255,255,.20)";
-  c.lineWidth = 1.4;
-  rrPath(c, x, y, d.w, d.h, 20);
-  c.stroke();
-}
-
-function drawZone(c, d) {
-  const x = d.x - d.w / 2, y = d.y - d.h / 2;
-  c.save();
-  c.setLineDash([9, 7]);
-  c.strokeStyle = rgba(d.color, 0.42);
-  c.lineWidth = 2;
-  rrPath(c, x, y, d.w, d.h, 16);
-  c.stroke();
-  c.setLineDash([]);
-  c.restore();
-  c.fillStyle = rgba(d.color, 0.75);
-  c.font = "800 10px Outfit, sans-serif";
-  c.fillText(d.label, x + 12, y + 18);
-}
-
 ;
-/* ══ js/render/assets.js ══ */
-// render/assets.js — furniture/prop renderers (prototype §7).
+/* ══ js/render/objects/desk.js ══ */
+// render/objects/desk.js — desk showcase file (showcase pattern).
 //
-// Each `draw*` receives the 2D context and an asset descriptor from
-// STATIC_SCENE.assets. ASSET_DRAW maps `asset` type → renderer; unknown
-// types are silently skipped (guarded by SceneRenderer.safeDraw upstream).
+// Each object file owns its renderer + showcase metadata: `name`,
+// `supportsDirection`, `defaultProps` and the variant list the gallery uses.
+// The main scene composes these; showcase.html renders each in isolation.
 
-/* DESK — slab (t) at height h on 4 legs + under-desk drawer pedestal */
-function drawDesk(c, a) {
+/** Slab (t) at height h on 4 legs + under-desk drawer pedestal. */
+
+/** Painters-order key: southern-most floor edge of the footprint. */
+
+const Desk = {
+  name: "desk",
+  title: "Desk",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "desk",
+  x: 0,
+  y: 0,
+  w: 170,
+  d: 76,
+  h: 44,
+  t: 10,
+  color: "#f4ece0",
+  edge: "#c9b694",
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y;
   const w = a.w || 170, d = a.d || 76, h = a.h || 44, t = a.t || 10;
   const top = a.color || "#f4ece0", edge = a.edge || "#c9b694";
@@ -1088,10 +1272,29 @@ function drawDesk(c, a) {
   c.lineWidth = 1;
   rrPath(c, x0 + 8, y0 - h + 7, w - 16, d - 14, 5);
   c.stroke();
+},
+  sortY(a) { 
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-/* ROUND TABLE — top ellipse centre is exactly (x, y-h) */
-function drawRoundTable(c, a) {
+;
+/* ══ js/render/objects/roundTable.js ══ */
+// render/objects/roundTable.js — round table showcase file.
+
+/** Top ellipse centre is exactly (x, y-h). */
+
+const RoundTable = {
+  name: "roundTable",
+  title: "Round Table",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "roundTable", x: 0, y: 0, r: 74, h: 42, t: 9,
+  color: "#f7f0e4", edge: "#c9b694",
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y, r = a.r || 70, h = a.h || 42, t = a.t || 9;
   const rx = r, ry = r * SQ, topCY = y - h;
   ellShadow(c, x, y + ry * 0.5, rx * 1.02, ry, 0.24);
@@ -1132,11 +1335,22 @@ function drawRoundTable(c, a) {
   c.beginPath();
   c.ellipse(x, topCY, Math.max(1, rx - 3), Math.max(1, ry - 2), 0, Math.PI * 1.05, Math.PI * 1.75);
   c.stroke();
+},
+  sortY(a) { 
+  return a.y + (a.r || 60) * SQ * 0.9;
 }
+};
 
-/* Normalize a facing direction to N/S/E/W.
- * Accepts compass ("N","S","E","W"), long ("north","south",…),
- * and legacy plan-view ("up","down","left","right"). Defaults to `fallback`. */
+;
+/* ══ js/render/objects/direction.js ══ */
+// render/objects/direction.js — shared compass normalizer for rotatable objects.
+//
+// Showcase convention: rotatable objects accept `dir` as one of N/E/S/W
+// (the segmented control in showcase.html). Legacy plan-view aliases
+// ("up","down","left","right") and long names ("north",…) are accepted too
+// so world data and STATIC_SCENE keep working unchanged.
+
+/** Normalize any facing to N/S/E/W. Defaults to `fallback`. */
 function normDir(dir, fallback) {
   const s = String(dir || fallback || "S").toLowerCase();
   if (s === "n" || s === "north" || s === "up") return "N";
@@ -1146,57 +1360,95 @@ function normDir(dir, fallback) {
   return fallback || "S";
 }
 
-/* CHAIR — dir = the way the sitter faces (N/S/E/W); backrest on the opposite side */
-function drawChair(c, a) {
-  const x = a.x, y = a.y, dir = normDir(a.dir, "S"), col = a.color || "#4f7cff";
-  const sw = a.w || 34, sd = a.d || 32, sh = a.h || 26, st = 8, bh = a.bh || 60;
-  ellShadow(c, x, y + sd * 0.3, sw * 0.68, sd * 0.48, 0.24);
-  let bx = x, by = y, bw = sw + 3, bd = 11;
-  if (dir === "S") by = y - sd / 2 + 5;
-  else if (dir === "N") by = y + sd / 2 - 5;
-  else if (dir === "W") {
-    bx = x + sw / 2 - 5;
-    bw = 11;
-    bd = sd - 3;
-  } else {
-    bx = x - sw / 2 + 5;
-    bw = 11;
-    bd = sd - 3;
-  }
-  solidBox(c, bx, by, bw, bd, bh, shade(col, 0.14), shade(col, -0.38), 5);
-  c.fillStyle = "rgba(255,255,255,.18)";
-  if (bw > bd) {
-    rrPath(c, bx - bw / 2 + 5, by - bd / 2 - bh + 6, bw - 10, bd * 0.45, 3);
-    c.fill();
-  } else {
-    rrPath(c, bx - bw / 2 + 3, by - bd / 2 - bh + 7, bw * 0.45, bd - 14, 3);
-    c.fill();
-  }
-  const under = y + sd / 2 - sh + st, floorY = y + sd * 0.3;
-  c.fillStyle = "#6f7c99";
-  c.fillRect(x - 3, under - 6, 6, Math.max(1, floorY - under + 6));
-  c.strokeStyle = "#6f7c99";
-  c.lineWidth = 3.4;
-  c.lineCap = "round";
-  for (let i = 0; i < 4; i++) {
-    const an = Math.PI * 0.25 + (i * Math.PI) / 2;
-    c.beginPath();
-    c.moveTo(x, floorY);
-    c.lineTo(x + Math.cos(an) * 13, floorY + Math.sin(an) * 5.5);
-    c.stroke();
-    c.fillStyle = "#4c5670";
-    ell(c, x + Math.cos(an) * 13.5, floorY + Math.sin(an) * 5.8, 2.4, 2.4);
-    c.fill();
-  }
-  c.lineCap = "butt";
-  gemBox(c, x, y, sw, sd, sh, st, col, shade(col, -0.36), 7);
-  c.strokeStyle = "rgba(255,255,255,.22)";
-  c.lineWidth = 1.2;
-  rrPath(c, x - sw / 2 + 6, y - sd / 2 - sh + 5, sw - 12, sd - 10, 4);
-  c.stroke();
-}
+/** Showcase variant names for a directional object. */
+const COMPASS_VARIANTS = ["N", "E", "S", "W"];
 
-function drawStool(c, a) {
+;
+/* ══ js/render/objects/chair.js ══ */
+// render/objects/chair.js — chair showcase file. Rotatable: N/E/S/W.
+//
+// Single-export pattern: one uniquely-named object per file (bundle-safe —
+// tools/bundle.mjs concatenates modules into one scope, so generic `draw` /
+// `name` exports would collide). The registry in ./index.js composes these
+// into showcase files (AntonLapshin/showcase shape).
+
+
+const Chair = {
+  name: "chair",
+  title: "Chair",
+  supportsDirection: true,
+  variants: COMPASS_VARIANTS,
+  defaultProps: { asset: "chair", x: 0, y: 0, dir: "S", color: "#4f7cff" },
+
+  /** dir = the way the sitter faces (N/S/E/W); backrest on the opposite side. */
+  draw(c, a) {
+    const x = a.x, y = a.y, dir = normDir(a.dir, "S"), col = a.color || "#4f7cff";
+    const sw = a.w || 34, sd = a.d || 32, sh = a.h || 26, st = 8, bh = a.bh || 60;
+    ellShadow(c, x, y + sd * 0.3, sw * 0.68, sd * 0.48, 0.24);
+    let bx = x, by = y, bw = sw + 3, bd = 11;
+    if (dir === "S") by = y - sd / 2 + 5;
+    else if (dir === "N") by = y + sd / 2 - 5;
+    else if (dir === "W") {
+      bx = x + sw / 2 - 5;
+      bw = 11;
+      bd = sd - 3;
+    } else {
+      bx = x - sw / 2 + 5;
+      bw = 11;
+      bd = sd - 3;
+    }
+    solidBox(c, bx, by, bw, bd, bh, shade(col, 0.14), shade(col, -0.38), 5);
+    c.fillStyle = "rgba(255,255,255,.18)";
+    if (bw > bd) {
+      rrPath(c, bx - bw / 2 + 5, by - bd / 2 - bh + 6, bw - 10, bd * 0.45, 3);
+      c.fill();
+    } else {
+      rrPath(c, bx - bw / 2 + 3, by - bd / 2 - bh + 7, bw * 0.45, bd - 14, 3);
+      c.fill();
+    }
+    const under = y + sd / 2 - sh + st, floorY = y + sd * 0.3;
+    c.fillStyle = "#6f7c99";
+    c.fillRect(x - 3, under - 6, 6, Math.max(1, floorY - under + 6));
+    c.strokeStyle = "#6f7c99";
+    c.lineWidth = 3.4;
+    c.lineCap = "round";
+    for (let i = 0; i < 4; i++) {
+      const an = Math.PI * 0.25 + (i * Math.PI) / 2;
+      c.beginPath();
+      c.moveTo(x, floorY);
+      c.lineTo(x + Math.cos(an) * 13, floorY + Math.sin(an) * 5.5);
+      c.stroke();
+      c.fillStyle = "#4c5670";
+      ell(c, x + Math.cos(an) * 13.5, floorY + Math.sin(an) * 5.8, 2.4, 2.4);
+      c.fill();
+    }
+    c.lineCap = "butt";
+    gemBox(c, x, y, sw, sd, sh, st, col, shade(col, -0.36), 7);
+    c.strokeStyle = "rgba(255,255,255,.22)";
+    c.lineWidth = 1.2;
+    rrPath(c, x - sw / 2 + 6, y - sd / 2 - sh + 5, sw - 12, sd - 10, 4);
+    c.stroke();
+  },
+
+  sortY(a) {
+    const d = a.d || 32;
+    const dir = normDir(a.dir, "S");
+    return dir === "S" ? a.y - d / 2 : dir === "N" ? a.y + d / 2 : a.y;
+  },
+};
+
+;
+/* ══ js/render/objects/stool.js ══ */
+// render/objects/stool.js — stool showcase file.
+
+const Stool = {
+  name: "stool",
+  title: "Stool",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "stool", x: 0, y: 0, color: "#ffb648" },
+
+  draw(c, a) { 
   const x = a.x, y = a.y, col = a.color || "#ffb648";
   const sw = 30, sd = 26, sh = 24, st = 8;
   ellShadow(c, x, y + sd * 0.32, sw * 0.62, sd * 0.44, 0.22);
@@ -1215,28 +1467,21 @@ function drawStool(c, a) {
   }
   c.lineCap = "butt";
   gemBox(c, x, y, sw, sd, sh, st, col, shade(col, -0.36), 7);
+},
+  sortY(a) { 
+  return a.y + 13;
 }
+};
 
-/* LAPTOP — dir N/S = the way the screen faces.
- * S (default): lid hinged at the NORTH edge, screen faces south.
- * N: 180° rotated variant, lid hinged at the SOUTH edge, screen faces north. */
-function drawLaptop(c, a) {
-  const x = a.x, Y = a.y - (a.z || 0);
-  const dir = normDir(a.dir, "S");
-  if (dir === "N") {
-    // 180° rotated version so the screen faces the top of the viewport.
-    c.save();
-    c.translate(x, Y - 16);
-    c.rotate(Math.PI);
-    c.translate(-x, -(Y - 16));
-    drawLaptopBody(c, x, Y);
-    c.restore();
-    return;
-  }
-  drawLaptopBody(c, x, Y);
-}
+;
+/* ══ js/render/objects/laptop.js ══ */
+// render/objects/laptop.js — laptop showcase file. Rotatable: N/S.
 
-function drawLaptopBody(c, x, Y) {
+
+/** Screen faces N or S (180° rotated pair). E/W map to the nearest face. */
+
+
+function drawBody(c, x, Y) {
   c.fillStyle = "rgba(24,28,54,.20)";
   rrPath(c, x - 19, Y - 5, 38, 14, 3);
   c.fill();
@@ -1275,7 +1520,48 @@ function drawLaptopBody(c, x, Y) {
   c.fillRect(x - 19, Y - 11, 38, 1.3);
 }
 
-function drawCup(c, a) {
+const Laptop = {
+  name: "laptop",
+  title: "Laptop",
+  supportsDirection: true,
+  variants: ["N", "S", "E", "W"],
+  defaultProps: { asset: "laptop", x: 0, y: 0, z: 0, dir: "S" },
+
+  draw(c, a) { 
+  const x = a.x, Y = a.y - (a.z || 0);
+  const dir = normDir(a.dir, "S");
+  // E/W have no distinct side profile for a top-down laptop: face the
+  // nearest screen side so the showcase still demonstrates rotation.
+  const facing = dir === "E" || dir === "W" ? "S" : dir;
+  if (facing === "N") {
+    c.save();
+    c.translate(x, Y - 16);
+    c.rotate(Math.PI);
+    c.translate(-x, -(Y - 16));
+    drawBody(c, x, Y);
+    c.restore();
+    return;
+  }
+  drawBody(c, x, Y);
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 5;
+}
+};
+
+;
+/* ══ js/render/objects/cup.js ══ */
+// render/objects/cup.js — mug/cup showcase file.
+
+const Cup = {
+  name: "cup",
+  title: "Mug",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "cup", x: 0, y: 0, z: 0, color: "#ff5d7a" },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0), col = a.color || "#ffffff";
   c.fillStyle = "rgba(30,25,50,.20)";
   ell(c, x, Y + 1.5, 7.5, 3.2);
@@ -1296,14 +1582,47 @@ function drawCup(c, a) {
   c.fillStyle = "rgba(120,80,50,.55)";
   ell(c, x, Y - 11, 4, 1.6);
   c.fill();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawCupRow(c, a) {
-  const cols = ["#2ec4a6", "#ffb648", "#4f7cff"];
-  for (let i = 0; i < 3; i++) drawCup(c, { x: a.x - 16 + i * 16, y: a.y, z: a.z || 0, color: cols[i] });
+;
+/* ══ js/render/objects/cupRow.js ══ */
+// render/objects/cupRow.js — row of three mugs showcase file.
+
+const COLS = ["#2ec4a6", "#ffb648", "#4f7cff"];
+
+const CupRow = {
+  name: "cupRow",
+  title: "Mug Row",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "cupRow", x: 0, y: 0, z: 0 },
+
+  draw(c, a) { 
+  for (let i = 0; i < 3; i++) Cup.draw(c, { x: a.x - 16 + i * 16, y: a.y, z: a.z || 0, color: COLS[i] });
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawPapers(c, a) {
+;
+/* ══ js/render/objects/papers.js ══ */
+// render/objects/papers.js — scattered papers showcase file.
+
+const Papers = {
+  name: "papers",
+  title: "Papers",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "papers", x: 0, y: 0, z: 0 },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0);
   c.fillStyle = "rgba(30,25,50,.16)";
   rrPath(c, x - 13, Y - 6, 26, 15, 2);
@@ -1333,9 +1652,25 @@ function drawPapers(c, a) {
   c.fillRect(-8, -5, 10, 2);
   c.fillRect(-8, -1, 14, 2);
   c.restore();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawLamp(c, a) {
+;
+/* ══ js/render/objects/lamp.js ══ */
+// render/objects/lamp.js — desk lamp showcase file.
+
+const Lamp = {
+  name: "lamp",
+  title: "Desk Lamp",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "lamp", x: 0, y: 0, z: 0 },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0);
   c.fillStyle = "rgba(30,25,50,.18)";
   ell(c, x, Y + 2, 10, 4);
@@ -1360,9 +1695,25 @@ function drawLamp(c, a) {
   c.fillStyle = "#fff3cf";
   ell(c, x, Y - 26, 10, 3);
   c.fill();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawDeskSign(c, a) {
+;
+/* ══ js/render/objects/deskSign.js ══ */
+// render/objects/deskSign.js — desk name-plate showcase file.
+
+const DeskSign = {
+  name: "deskSign",
+  title: "Desk Sign",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "deskSign", x: 0, y: 0, z: 0, text: "NOAH" },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0);
   c.fillStyle = "rgba(30,25,50,.20)";
   rrPath(c, x - 22, Y - 2, 44, 7, 2);
@@ -1378,10 +1729,30 @@ function drawDeskSign(c, a) {
   c.textAlign = "center";
   c.fillText(a.text || "", x, Y - 5.5);
   c.textAlign = "left";
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-/* kitchen counter — solid carcass, worktop on top face, doors on front face */
-function drawCounter(c, a) {
+;
+/* ══ js/render/objects/counter.js ══ */
+// render/objects/counter.js — kitchen counter showcase file.
+
+/** Solid carcass, worktop on top face, doors on front face. */
+
+const Counter = {
+  name: "counter",
+  title: "Counter",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "counter", x: 0, y: 0, w: 242, d: 58, h: 58,
+  color: "#eaeef7", top: "#2b3550",
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y, w = a.w, d = a.d, h = a.h;
   ellShadow(c, x, y + d / 2 - 2, w * 0.52, d * 0.5, 0.22);
   solidBox(c, x, y, w, d, h, a.color, shade(a.color, -0.34), 6);
@@ -1415,9 +1786,25 @@ function drawCounter(c, a) {
   }
   c.fillStyle = "rgba(0,0,0,.14)";
   c.fillRect(x - w / 2, fy1 - 3, w, 3);
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-function drawCoffeeMachine(c, a) {
+;
+/* ══ js/render/objects/coffeeMachine.js ══ */
+// render/objects/coffeeMachine.js — coffee machine showcase file.
+
+const CoffeeMachine = {
+  name: "coffeeMachine",
+  title: "Coffee Machine",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "coffeeMachine", x: 0, y: 0, z: 0 },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0);
   c.fillStyle = "rgba(20,26,48,.22)";
   rrPath(c, x - 21, Y - 8, 42, 14, 3);
@@ -1441,9 +1828,25 @@ function drawCoffeeMachine(c, a) {
   c.fillStyle = "#6b4a2f";
   rrPath(c, x - 5, Y - 15, 12, 4, 1.5);
   c.fill();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawKettle(c, a) {
+;
+/* ══ js/render/objects/kettle.js ══ */
+// render/objects/kettle.js — kettle showcase file.
+
+const Kettle = {
+  name: "kettle",
+  title: "Kettle",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "kettle", x: 0, y: 0, z: 0, color: "#ff5d7a" },
+
+  draw(c, a) { 
   const x = a.x, Y = a.y - (a.z || 0), col = a.color || "#ff5d7a";
   c.fillStyle = "rgba(20,26,48,.2)";
   ell(c, x, Y + 1, 11, 4.4);
@@ -1468,9 +1871,27 @@ function drawKettle(c, a) {
   c.moveTo(x + 9, Y - 14);
   c.lineTo(x + 15, Y - 19);
   c.stroke();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 2;
 }
+};
 
-function drawWaterCooler(c, a) {
+;
+/* ══ js/render/objects/waterCooler.js ══ */
+// render/objects/waterCooler.js — water cooler showcase file.
+
+const WaterCooler = {
+  name: "waterCooler",
+  title: "Water Cooler",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "waterCooler", x: 0, y: 0, w: 44, d: 42, h: 48,
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y, w = a.w, d = a.d, h = a.h || 48;
   ellShadow(c, x, y + d / 2, w * 0.62, d * 0.52, 0.22);
   solidBox(c, x, y, w, d, h, "#e6ebf6", "#b6c0d6", 6);
@@ -1499,9 +1920,27 @@ function drawWaterCooler(c, a) {
   c.fillStyle = "#98a4be";
   rrPath(c, x - 13, fy0 + 26, 26, 10, 3);
   c.fill();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-function drawCabinet(c, a) {
+;
+/* ══ js/render/objects/cabinet.js ══ */
+// render/objects/cabinet.js — storage cabinet showcase file.
+
+const Cabinet = {
+  name: "cabinet",
+  title: "Cabinet",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "cabinet", x: 0, y: 0, w: 190, d: 60, h: 68, color: "#5b6b8c",
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y, w = a.w, d = a.d, h = a.h || 68;
   ellShadow(c, x, y + d / 2 - 2, w * 0.52, d * 0.5, 0.26);
   solidBox(c, x, y, w, d, h, shade(a.color, 0.26), a.color, 5);
@@ -1523,9 +1962,27 @@ function drawCabinet(c, a) {
     rrPath(c, dx + dw / 2 - 11, fy0 + 15, 22, 3.4, 1.7);
     c.fill();
   }
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-function drawPrinter(c, a) {
+;
+/* ══ js/render/objects/printer.js ══ */
+// render/objects/printer.js — office printer showcase file.
+
+const Printer = {
+  name: "printer",
+  title: "Printer",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: {
+  asset: "printer", x: 0, y: 0, w: 92, d: 64, h: 46, color: "#dfe5f0",
+},
+
+  draw(c, a) { 
   const x = a.x, y = a.y, w = a.w, d = a.d, h = a.h || 46;
   ellShadow(c, x, y + d / 2 - 2, w * 0.55, d * 0.5, 0.24);
   solidBox(c, x, y, w, d, h, a.color, "#a8b3ca", 5);
@@ -1553,9 +2010,25 @@ function drawPrinter(c, a) {
   c.fillStyle = "#39445f";
   rrPath(c, x - w / 2 + 12, fy0 + 5, 26, 7, 2);
   c.fill();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-function drawCrates(c, a) {
+;
+/* ══ js/render/objects/crates.js ══ */
+// render/objects/crates.js — stacked crates showcase file.
+
+const Crates = {
+  name: "crates",
+  title: "Crates",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "crates", x: 0, y: 0, color: "#c98a5e" },
+
+  draw(c, a) { 
   const x = a.x, y = a.y;
   ellShadow(c, x + 4, y + 20, 42, 15, 0.22);
   solidBox(c, x - 16, y + 8, 32, 28, 28, "#d9a06a", "#b07c4c", 4);
@@ -1570,11 +2043,42 @@ function drawCrates(c, a) {
   c.moveTo(x - 30, y - 6);
   c.lineTo(x - 2, y - 6);
   c.stroke();
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return (a.y || 0) + 20;
+}
+};
+
+;
+/* ══ js/render/objects/sofa.js ══ */
+// render/objects/sofa.js — sofa showcase file. Rotatable: N/E/S/W.
+//
+// dir = way the sitter faces. Backrest opposite, arms on the two ends.
+// N/S map to the horizontal (down/up) builds, E/W to vertical (left/right).
+
+
+/** Showcase N/E/S/W → legacy plan-view orientation used by the painter. */
+function toLegacy(compass) {
+  if (compass === "N") return "up";
+  if (compass === "S") return "down";
+  if (compass === "E") return "right";
+  return "left";
 }
 
-/* SOFA — dir = way the sitter faces. Backrest opposite, arms on the two ends. */
-function drawSofa(c, a) {
-  const x = a.x, y = a.y, w = a.w || 120, d = a.d || 60, dir = a.dir || "down", col = a.color || "#9b6cf5";
+const Sofa = {
+  name: "sofa",
+  title: "Sofa",
+  supportsDirection: true,
+  variants: COMPASS_VARIANTS,
+  defaultProps: {
+  asset: "sofa", x: 0, y: 0, w: 120, d: 60, dir: "S", color: "#9b6cf5",
+},
+
+  draw(c, a) { 
+  const x = a.x, y = a.y, w = a.w || 120, d = a.d || 60;
+  const dir = toLegacy(normDir(a.dir ?? a.direction, "S"));
+  const col = a.color || "#9b6cf5";
   const sh = a.sh || 22, bh = a.bh || 48, ah = a.ah || 34, bt = a.bt || 16, at = a.at || 15;
   const horiz = dir === "down" || dir === "up";
   ellShadow(c, x, y + d / 2 - 2, w * 0.62, d * 0.52, 0.26);
@@ -1627,9 +2131,25 @@ function drawSofa(c, a) {
       flatRect(c, px, y - d / 4 - 10 + i * (d / 2 - 6), 15, 22, pz, i ? "#ffb648" : "#2ec4a6", 5);
     }
   }
+},
+  sortY(a) { 
+  if (typeof a.sort === "number") return a.sort;
+  return a.y + (a.d || 0) / 2;
 }
+};
 
-function drawPlant(c, a) {
+;
+/* ══ js/render/objects/plant.js ══ */
+// render/objects/plant.js — potted plant showcase file.
+
+const Plant = {
+  name: "plant",
+  title: "Plant",
+  supportsDirection: false,
+  variants: ["Default"],
+  defaultProps: { asset: "plant", x: 0, y: 0, s: 1.0, pot: "#2ec4a6" },
+
+  draw(c, a) { 
   const x = a.x, y = a.y, s = a.s || 1;
   c.save();
   c.translate(x, y);
@@ -1667,48 +2187,12 @@ function drawPlant(c, a) {
     c.restore();
   }
   c.restore();
-}
-
-/** asset type → renderer registry. */
-const ASSET_DRAW = {
-  desk: drawDesk,
-  roundTable: drawRoundTable,
-  chair: drawChair,
-  stool: drawStool,
-  laptop: drawLaptop,
-  cup: drawCup,
-  cupRow: drawCupRow,
-  papers: drawPapers,
-  lamp: drawLamp,
-  deskSign: drawDeskSign,
-  counter: drawCounter,
-  coffeeMachine: drawCoffeeMachine,
-  kettle: drawKettle,
-  waterCooler: drawWaterCooler,
-  cabinet: drawCabinet,
-  printer: drawPrinter,
-  crates: drawCrates,
-  sofa: drawSofa,
-  plant: drawPlant,
-};
-
-function drawAsset(c, a) {
-  const fn = ASSET_DRAW[a.asset];
-  if (fn) fn(c, a);
-}
-
-/** Painters-order key: southern-most floor edge of the footprint. */
-function assetSortY(a) {
+},
+  sortY(a) { 
   if (typeof a.sort === "number") return a.sort;
-  if (a.asset === "chair") {
-    const d = a.d || 32;
-    const dir = normDir(a.dir, "S");
-    return dir === "S" ? a.y - d / 2 : dir === "N" ? a.y + d / 2 : a.y;
-  }
-  if (a.asset === "roundTable") return a.y + (a.r || 60) * SQ * 0.9;
-  if (a.asset === "plant") return a.y + 8;
-  return a.y + (a.d || 0) / 2;
+  return (a.y || 0) + 8;
 }
+};
 
 ;
 /* ══ js/render/character.js ══ */
@@ -2210,6 +2694,197 @@ function drawMoodFx(c, x, hy, emo) {
     c.textAlign = "left";
   }
 }
+
+;
+/* ══ js/render/objects/character.js ══ */
+// render/objects/character.js — character showcase file (showcase pattern).
+//
+// Wraps render/character.js so people appear in the object gallery next to
+// furniture. Rotatable via N/E/S/W (mapped to up/right/down/left).
+
+
+const TO_LEGACY = { N: "up", E: "right", S: "down", W: "left" };
+
+const Character = {
+  name: "character",
+  title: "Character",
+  supportsDirection: true,
+  variants: COMPASS_VARIANTS,
+  defaultProps: {
+  asset: "character",
+  id: "noah",
+  name: "Noah",
+  color: "#4f7cff",
+  look: {
+    skin: "#f2cba6", skin2: "#e0b189",
+    hair: "#3d2a20", hairStyle: "short",
+    shirt: "#7fb6ff", shirt2: "#5b95e8",
+    pants: "#39435c", shoes: "#1e2434",
+  },
+  prop: null,
+  x: 0,
+  y: 0,
+  dir: "S",
+  emotion: "neutral",
+  visible: true,
+  isUser: false,
+},
+
+  draw(c, a) { 
+  const dir = TO_LEGACY[a.dir] || a.planDir || "down";
+  drawCharacter(c, { ...a, dir }, { showNames: false });
+},
+  sortY(a) { 
+  return a.y || 0;
+}
+};
+
+;
+/* ══ js/render/objects/index.js ══ */
+// render/objects/index.js — object registry (showcase pattern).
+//
+// Mirrors https://github.com/AntonLapshin/showcase: every object file exports
+// one uniquely-named showcase object (single-export pattern — the bundler in
+// tools/bundle.mjs concatenates modules into one scope, so generic `draw` /
+// `name` exports would collide). This index registers them as showcase files
+// so the gallery, the scene renderer and the scenario builder all share one
+// source of truth. No hardcoded scene lives here.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/** All object modules in sidebar order (furniture → scenery → character). */
+const OBJECT_MODULES = [
+  Desk, RoundTable, Chair, Stool, Laptop, Cup, CupRow, Papers, Lamp,
+  DeskSign, Counter, CoffeeMachine, Kettle, WaterCooler, Cabinet,
+  Printer, Crates, Sofa, Plant,
+  Wall, Win, Door, Whiteboard, Clock, Poster, Rug, Zone,
+  Character,
+];
+
+/** name → module (e.g. OBJECTS.chair.draw). */
+const OBJECTS = {};
+for (const m of OBJECT_MODULES) OBJECTS[m.name] = m;
+
+/** ShowcaseFile entries in the AntonLapshin/showcase shape. */
+const showcaseFiles = OBJECT_MODULES.map((m) => ({
+  name: m.title || m.name,
+  key: m.name,
+  module: m,
+  showcases: Object.fromEntries(
+    (m.variants || ["Default"]).map((v) => [v, variantProps(m, v)]),
+  ),
+}));
+
+/** Props override for a named variant (direction or decor view). */
+function variantProps(module, variant) {
+  const base = { ...module.defaultProps };
+  if (module.supportsDirection && variant !== "Default") {
+    base.dir = variant;
+  }
+  if (module.name === "window") {
+    base.view = variant === "Hills" ? "hills" : "city";
+  }
+  return base;
+}
+
+/** asset type → draw fn, backwards-compatible with render/assets.js. */
+const ASSET_DRAW = {};
+for (const m of OBJECT_MODULES) ASSET_DRAW[m.name] = m.draw;
+
+/** Draw one asset descriptor { asset, … } via its object module. */
+function drawAsset(c, a) {
+  const fn = ASSET_DRAW[a.asset];
+  if (fn) fn(c, a);
+}
+
+/** Painters-order key, delegating to each object's sortY when present. */
+function assetSortY(a) {
+  if (typeof a.sort === "number") return a.sort;
+  const m = OBJECTS[a.asset];
+  if (m && typeof m.sortY === "function") {
+    try {
+      return m.sortY(a);
+    } catch {
+      return a.y + (a.d || 0) / 2;
+    }
+  }
+  if (a.asset === "roundTable") return a.y + (a.r || 60) * 0.5 * 0.9;
+  if (a.asset === "plant") return a.y + 8;
+  return a.y + (a.d || 0) / 2;
+}
+
+;
+/* ══ js/render/assets.js ══ */
+// render/assets.js — furniture/prop renderers (backwards-compat layer).
+//
+// Refactored: each object now lives in its own file under
+// `render/objects/` (one file per object, showcase pattern). This module
+// keeps the original API (`ASSET_DRAW`, `drawAsset`, `assetSortY`, `draw*`)
+// so the scene renderer, scenario builder and tests keep working unchanged.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const drawDesk = Desk.draw;
+const drawRoundTable = RoundTable.draw;
+const drawChair = Chair.draw;
+const drawStool = Stool.draw;
+const drawLaptop = Laptop.draw;
+const drawCup = Cup.draw;
+const drawCupRow = CupRow.draw;
+const drawPapers = Papers.draw;
+const drawLamp = Lamp.draw;
+const drawDeskSign = DeskSign.draw;
+const drawCounter = Counter.draw;
+const drawCoffeeMachine = CoffeeMachine.draw;
+const drawKettle = Kettle.draw;
+const drawWaterCooler = WaterCooler.draw;
+const drawCabinet = Cabinet.draw;
+const drawPrinter = Printer.draw;
+const drawCrates = Crates.draw;
+const drawSofa = Sofa.draw;
+const drawPlant = Plant.draw;
 
 ;
 /* ══ js/render/bubble.js ══ */

@@ -62,6 +62,7 @@ Query parameters:
 
 ```
 index.html               DOM shell: stage + composer + side panels
+showcase.html            isolated object gallery (Storybook-style, ?file=..&showcase=..)
 preview.html             generated self-contained bundle (tools/bundle.mjs)
 styles/
   base.css               theme tokens, reset, page background, shared parts
@@ -69,6 +70,7 @@ styles/
   stage.css              canvas stage, HUD chips, toggles, caption
   panels.css             side tabs: cast list, history log, JSON inspector
   composer.css           bottom message textarea + send button + status line
+  showcase.css           gallery: sidebar, stage, N/E/S/W segmented control
 js/
   main.js                bootstrap: adapter selection, fallback, resize/fonts
   app.js                 orchestrator: adapter events → live state → render/panels
@@ -77,16 +79,55 @@ js/
     dom.js               $ / el / highlightJSON / autogrow
     emitter.js           tiny event emitter
   data/
-    staticScene.js       office scenery (walls, floor, furniture assets) + floor bounds
+    staticScene.js       backwards-compat re-export (see scenes/)
+    scenes/
+      officeFloor3.js    bundled pretty-office scene DATA (no painters)
+      index.js           scene registry: getScene(id) — no hardcoded imports
     officeScenario.js    default scenario in the engine's Scenario format + presentation
+    scenarioScene.js     world objects → view scene (foreign worlds stay data-driven)
   render/
     viewOptions.js       Names / Zones toggles
-    background.js        cached background layer (floor, walls, windows, decals)
-    assets.js            furniture renderers + painters-order registry
+    background.js        cached background layer (composes objects/* painters)
+    assets.js            backwards-compat re-export (see objects/)
+    objects/             ONE FILE PER OBJECT (showcase pattern — gallery source of truth)
+      direction.js       shared N/E/S/W normalizer + COMPASS_VARIANTS
+      index.js           registry: OBJECTS, ASSET_DRAW, showcaseFiles, variantProps
+      desk.js            Desk — fixed view
+      roundTable.js      RoundTable — fixed view
+      chair.js           Chair — rotatable N/E/S/W
+      stool.js           Stool — fixed view
+      laptop.js          Laptop — rotatable N/S (+E/W aliases)
+      cup.js             Mug — fixed view
+      cupRow.js          Mug Row — fixed view
+      papers.js          Papers — fixed view
+      lamp.js            Desk Lamp — fixed view
+      deskSign.js        Desk Sign — fixed view
+      counter.js         Counter — fixed view
+      coffeeMachine.js   Coffee Machine — fixed view
+      kettle.js          Kettle — fixed view
+      waterCooler.js     Water Cooler — fixed view
+      cabinet.js         Cabinet — fixed view
+      printer.js         Printer — fixed view
+      crates.js          Crates — fixed view
+      sofa.js            Sofa — rotatable N/E/S/W
+      plant.js           Plant — fixed view
+      wall.js            Wall — scenery
+      window.js          Window — City/Hills variants
+      door.js            Door — scenery
+      whiteboard.js      Whiteboard — scenery
+      clock.js           Clock — scenery
+      poster.js          Poster — scenery
+      rug.js             Rug — scenery
+      zone.js            Zone — scenery
+      character.js       Character — rotatable N/E/S/W (wraps character.js)
     character.js         bodies, hair, emotion faces, mood FX, name plates
     bubble.js            speech & thought bubbles with collision placement
     avatar.js            cast-panel portraits (reuses character.js)
     sceneRenderer.js     canvas host, resize, frame pipeline, generic object fallback
+  showcase/              gallery app (AntonLapshin/showcase pattern)
+    core.js              pure registry/select/URL codec (no DOM — unit tested)
+    files.js             showcase file registration (re-exports objects registry)
+    app.js               thin view-model: sidebar + stage + segmented control
   sim/
     textParse.js         quote/thought recovery from free-form action text
     presentation.js      look/color resolution + world→view coordinate mapping
@@ -105,9 +146,28 @@ tools/
   serve.mjs              zero-dependency static server
 tests/
   smoke.mjs              engine-core tests (mock turns, tweens, parsing)
+  showcase.mjs           gallery tests: registry, URL codec, every object·variant draws
   dom.mjs                jsdom integration: boot → submit → turns → back to user
   render.mjs             visual check: canvas frames saved as PNG
 ```
+
+## Object gallery (`showcase.html`)
+
+Storybook-style isolated view over `js/render/objects/` (pattern adapted from
+[AntonLapshin/showcase](https://github.com/AntonLapshin/showcase)):
+
+```bash
+npm start  # → http://localhost:8123/showcase.html
+```
+
+* sidebar lists every object (furniture → scenery → character);
+* the canvas shows the object in isolation with a props readout;
+* rotatable objects (chair, sofa, laptop, character) get an **N / E / S / W**
+  segmented control; fixed-view objects show a "fixed view" note instead;
+* selection deep-links via `?file=Chair&showcase=E` (shareable, back/forward
+  safe). To add an object: create `js/render/objects/<thing>.js` exporting a
+  single uniquely-named showcase object, then register it in
+  `js/render/objects/index.js` — the gallery picks it up automatically.
 
 ## Turn / data flow
 

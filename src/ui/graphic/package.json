@@ -7,8 +7,9 @@
   "scripts": {
     "start": "node tools/serve.mjs",
     "bundle": "node tools/bundle.mjs",
-    "test": "node tests/smoke.mjs && node tools/bundle.mjs && node tests/dom.mjs",
+    "test": "node tests/smoke.mjs && node tests/showcase.mjs && node tools/bundle.mjs && node tests/dom.mjs",
     "test:smoke": "node tests/smoke.mjs",
+    "test:showcase": "node tests/showcase.mjs",
     "test:dom": "node tests/dom.mjs",
     "test:render": "node tests/render.mjs"
   }
