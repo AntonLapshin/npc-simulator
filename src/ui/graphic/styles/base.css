@@ -1,0 +1,39 @@
+/* ═══════════════════════════════════════════════════════════════════
+   base.css — theme tokens, reset, page background, shared primitives
+   ═══════════════════════════════════════════════════════════════════ */
+:root{
+  --panel:rgba(255,255,255,.045); --panel2:rgba(255,255,255,.03);
+  --line:rgba(255,255,255,.10); --line2:rgba(255,255,255,.06);
+  --txt:#e9eefb; --mut:#8fa0c0; --dim:#5f6e8c;
+  --em:#2ec4a6; --sa:#4f7cff; --am:#9b6cf5; --ru:#ff5d7a; --to:#ffb648;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 12% -10%, rgba(79,124,255,.20), transparent 60%),
+    radial-gradient(900px 600px at 100% 0%, rgba(155,108,245,.16), transparent 55%),
+    radial-gradient(800px 700px at 60% 120%, rgba(46,196,166,.12), transparent 60%),
+    linear-gradient(180deg,#0a1120,#070b14 60%);
+  color:var(--txt);font-family:'Outfit',system-ui,sans-serif;min-height:100%;padding:20px;
+}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;opacity:.35;
+  background-image:linear-gradient(115deg,rgba(255,255,255,.028) 0 2px,transparent 2px 60px),
+  linear-gradient(245deg,rgba(255,255,255,.022) 0 2px,transparent 2px 90px);}
+
+.card{background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.02));
+  border:1px solid var(--line);border-radius:20px;padding:14px;
+  box-shadow:0 22px 50px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.07)}
+
+.pill{font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;padding:7px 12px;
+  border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--mut);
+  display:flex;align-items:center;gap:7px}
+.pill b{color:var(--txt);font-weight:700}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--em);box-shadow:0 0 10px var(--em)}
+
+kbd{background:rgba(255,255,255,.07);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;
+  padding:1px 6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--mut)}
+
+/* shared thin scrollbar */
+.log::-webkit-scrollbar,pre.json::-webkit-scrollbar{width:7px;height:7px}
+.log::-webkit-scrollbar-thumb,pre.json::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:9px}

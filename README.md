@@ -21,7 +21,11 @@ See [`plan.md`](plan.md) for the full engineering plan.
 - **Milestone 3 — Text UI:** done. Playable terminal interface
   (`src/ui/text/textUi.ts` + `commands.ts`, tested in
   `tests/unit/textUi.test.ts`).
-- Milestones 4–5 (graphic UI, scenario editor): not started.
+- **Milestone 4 — Graphic UI:** done. Playable 2.5D web console adopted
+  from `prototype-ui` into `src/ui/graphic/` (canvas scene + message
+  composer + cast/timeline/JSON panels, offline mock adapter; see
+  [`src/ui/graphic/README.md`](src/ui/graphic/README.md)).
+- Milestone 5 (scenario editor): not started.
 
 ## Setup
 
@@ -146,11 +150,40 @@ Notes:
   impossible mutations are rejected and retried.
 - Session logs go to `logs/text_<session>.jsonl`; autosaves to `saves/`.
 
+## Playing (Milestone 4 — graphic interface)
+
+```bash
+npm run start:graphic        # static dev server → http://localhost:8123/
+npm run bundle:graphic       # regenerate src/ui/graphic/preview.html (self-contained single file)
+npm run test:graphic         # smoke + bundle + jsdom integration (needs jsdom for the dom step)
+npm run test:graphic:smoke   # headless engine-core checks, no DOM
+npm run test:graphic:render  # renders canvas frames to src/ui/graphic/tests/out/*.png
+                             # (needs: npm i --no-save jsdom canvas)
+```
+
+`src/ui/graphic/index.html` is the canonical entry (native ES modules).
+`src/ui/graphic/preview.html` is a generated single-file build for contexts
+without a module server (double-click, sandboxed viewers).
+
+Query parameters:
+
+| param | effect |
+|---|---|
+| `?backend=url` | use a real engine server (`GET /health`, `GET /world`, `POST /action`); probes `/health` first, falls back to the offline mock adapter |
+| `?mock=1` | force the offline mock engine |
+| `?fast=1` | mock turns resolve with zero artificial delay |
+
+Same turn flow as the text UI: you play one actor, the composer submits
+free-form action text, NPC turns auto-advance until control returns to you.
+Full details (layout, turn/data flow, backend contract, presentation
+conventions) live in [`src/ui/graphic/README.md`](src/ui/graphic/README.md).
+
 ## Development
 
 ```bash
 npm run dev            # run src/index.ts
 npm test               # vitest (88 tests: unit, integration, golden)
+npm run test:graphic   # graphic UI: smoke + bundle + jsdom dom test
 npm run typecheck      # tsc --noEmit
 npm run diagnose:ai       # offline: binary + server + model checks (JoinGonka, Laya, Ollama)
 npm run diagnose:ai:live  # + live probes against JoinGonka, laya-serve, and Ollama
@@ -168,8 +201,11 @@ src/
   llm/                               # providers + real LLM engines (Milestone 2)
   mocks/                             # deterministic engines (Milestone 1)
   logging/                           # Logger, LogStore, JSONL writer
-  ui/text/                           # textUi.ts (CLI loop), commands.ts (Milestone 3)
-  editor/ graphic/                   # Milestone 5 / 4 placeholders
+   ui/text/                           # textUi.ts (CLI loop), commands.ts (Milestone 3)
+   ui/graphic/                        # graphic web console (Milestone 4):
+                                      # index.html + js/ + styles/ + tools/ + tests/
+                                      # (see src/ui/graphic/README.md)
+   editor/                            # Milestone 5 placeholder
 scenarios/office.json                # golden office scenario
 tests/{unit,integration,golden}/
 logs/ saves/                         # git-ignored runtime artifacts

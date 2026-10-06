@@ -1,0 +1,525 @@
+// Graphic engine server — drives the web UI from the real simulation engine.
+//
+// Run: npm run start:graphic -- [scenario] [--provider <backend>] [--model <id>]
+//        [--base-url <url>] [--mock] [--debug] [--no-autosave] [--port <n>]
+//   scenario defaults to scenarios/office.json (same default as the text UI).
+//   --provider selects the LLM backend: joingonka (default), laya-local, ollama.
+//     Aliases: --backend. Overrides LLM_BACKEND (and .env) for this run.
+//   --model / --base-url override the model id / endpoint for the backend.
+//   --mock forces deterministic mock engines (no network, no API key).
+//   Without --mock the real LLM engines are used; on setup failure the
+//   server falls back to mocks with a warning so the UI stays usable.
+//   --port / -p selects the HTTP port (default 8123). A bare numeric first
+//     arg is also accepted as the port (legacy static-server usage).
+//
+// The server holds the authoritative World in memory (exactly like the text
+// UI session): the browser never simulates, it only renders World snapshots
+// and POSTs user actions. Endpoints (see js/sim/httpAdapter.js):
+//   GET  /health  -> { ok, engine, scenario, tick, userActorId }
+//   GET  /world   -> { world, presentation }
+//   POST /action  { text } -> { world, events } (user turn + auto NPC turns)
+//   GET  /events  -> SSE stream of turn progress (engine onProgress)
+//   GET  /logs?limit&module&tick -> recent log entries (debug)
+//   POST /reset   -> reload the scenario file from disk
+// Everything else serves the static UI from src/ui/graphic/; index.html is
+// served with window.__NPC_ENGINE__ injected so the UI auto-connects to the
+// same origin instead of falling back to the offline mock scenario.
+
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve, extname, normalize } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { World } from "../../types.js";
+import { loadScenario } from "../../engine/scenarioLoader.js";
+import { getCurrentActor } from "../../engine/worldStore.js";
+import { runTurn, type EngineDependencies } from "../../engine/turnOrchestrator.js";
+import { resolveConfig } from "../../config.js";
+import { Logger } from "../../logging/logger.js";
+import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
+import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
+import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
+import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const GRAPHIC_ROOT = resolve(HERE);
+const REPO_ROOT = resolve(HERE, "../../..");
+const DEFAULT_SCENARIO = join(REPO_ROOT, "scenarios/office.json");
+
+type GraphicOptions = {
+  scenarioPath?: string;
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
+  useMock?: boolean;
+  debug?: boolean;
+  autosave?: boolean;
+  port?: number;
+  help?: boolean;
+};
+
+function takeValue(argv: string[], i: number, flag: string): string | undefined {
+  const eq = flag.indexOf("=");
+  if (eq !== -1) return flag.slice(eq + 1).trim() || undefined;
+  return argv[i + 1]?.trim() || undefined;
+}
+
+function parseArgv(argv: string[]): GraphicOptions {
+  const opts: GraphicOptions = {};
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === "--mock") opts.useMock = true;
+    else if (a === "--debug") opts.debug = true;
+    else if (a === "--no-autosave") opts.autosave = false;
+    else if (a === "--help" || a === "-h") opts.help = true;
+    else if (a === "--port" || a === "-p" || a.startsWith("--port=")) {
+      const v = takeValue(argv, i, a);
+      if (!v) throw new Error("--port needs a value (e.g. --port 8123)");
+      opts.port = Number(v);
+      if (!Number.isInteger(opts.port) || opts.port <= 0) throw new Error(`--port must be a positive integer (got '${v}')`);
+      if (!a.includes("=")) i++;
+    } else if (a === "--provider" || a === "--backend" || a.startsWith("--provider=") || a.startsWith("--backend=")) {
+      const v = takeValue(argv, i, a);
+      if (!v) throw new Error(`${a.split("=")[0]} needs a value: joingonka | laya-local | ollama`);
+      opts.provider = v;
+      if (!a.includes("=")) i++;
+    } else if (a === "--model" || a.startsWith("--model=")) {
+      const v = takeValue(argv, i, a);
+      if (!v) throw new Error("--model needs a value (model id)");
+      opts.model = v;
+      if (!a.includes("=")) i++;
+    } else if (a === "--base-url" || a === "--baseUrl" || a.startsWith("--base-url=") || a.startsWith("--baseUrl=")) {
+      const v = takeValue(argv, i, a);
+      if (!v) throw new Error("--base-url needs a value (endpoint URL)");
+      opts.baseUrl = v;
+      if (!a.includes("=")) i++;
+    } else if (!a.startsWith("--")) positional.push(a);
+    else throw new Error(`unknown flag: ${a}`);
+  }
+  // Legacy static-server usage: `serve [port]` — a lone numeric arg is a port.
+  if (positional.length === 1 && /^\d+$/.test(positional[0]!) && opts.port === undefined) {
+    opts.port = Number(positional[0]);
+  } else if (positional[0]) {
+    opts.scenarioPath = positional[0];
+  }
+  if (positional.length > 1) throw new Error(`too many positional args: ${positional.join(" ")}`);
+  return opts;
+}
+
+/** Apply --provider/--model/--base-url overrides on top of process.env. */
+function resolveRuntimeEnv(opts: Pick<GraphicOptions, "provider" | "model" | "baseUrl">): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const provider = opts.provider?.trim();
+  if (provider) env["LLM_BACKEND"] = provider;
+  const backend = (env["LLM_BACKEND"] ?? "joingonka").trim();
+  if (opts.model?.trim()) {
+    if (backend === "ollama") env["OLLAMA_MODEL"] = opts.model.trim();
+    else if (backend === "laya-local") env["LAYA_MODEL"] = opts.model.trim();
+    else env["JOINGONKA_MODEL"] = opts.model.trim();
+  }
+  if (opts.baseUrl?.trim()) {
+    if (backend === "ollama") env["OLLAMA_BASE_URL"] = opts.baseUrl.trim();
+    else if (backend === "laya-local") env["LAYA_BASE_URL"] = opts.baseUrl.trim();
+    else env["JOINGONKA_BASE_URL"] = opts.baseUrl.trim();
+  }
+  return env;
+}
+
+function buildDeps(
+  logger: Logger,
+  useMock: boolean,
+  autosave: boolean,
+  llmOpts: Pick<GraphicOptions, "provider" | "model" | "baseUrl"> = {},
+): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
+  const config = resolveConfig({ autosaveEnabled: autosave });
+  if (useMock) {
+    return {
+      usingMock: true,
+      deps: {
+        proposalEngine: new MockProposalEngine(logger),
+        selectionEngine: new MockSelectionEngine(logger),
+        consequenceEngine: new MockConsequenceEngine(logger),
+        logger,
+        config,
+      },
+    };
+  }
+  try {
+    const env = resolveRuntimeEnv(llmOpts);
+    const engines = createLlmEngines(logger, { env });
+    const cfg = resolveLlmEnv(env);
+    const model =
+      cfg.backend === "ollama" ? cfg.ollama.model : cfg.backend === "laya-local" ? cfg.laya.model : cfg.joingonka.model;
+    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `${cfg.backend}/${model}` };
+  } catch (err) {
+    console.log(
+      `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,
+    );
+    return {
+      usingMock: true,
+      deps: {
+        proposalEngine: new MockProposalEngine(logger),
+        selectionEngine: new MockSelectionEngine(logger),
+        consequenceEngine: new MockConsequenceEngine(logger),
+        logger,
+        config,
+      },
+    };
+  }
+}
+
+/* ── speech recovery (mirrors js/sim/textParse.js) ─────────────────────── */
+
+function extractQuoted(text: string): string | null {
+  const m = text.match(/“([^”]+)”/) || text.match(/"([^"]+)"/) || text.match(/'([^']{2,})'/);
+  return m ? m[1]!.trim() : null;
+}
+
+function speechFromAction(text: string): { text: string; kind: string } | null {
+  const quoted = extractQuoted(text);
+  if (!quoted) return null;
+  const kind = /\b(thinks?|wonders?|muses?|reali[sz]es?)\b/i.test(text) ? "thought" : "say";
+  return { text: quoted, kind };
+}
+
+/* ── server state ──────────────────────────────────────────────────────── */
+
+type TurnEvent = {
+  actorId: string;
+  isUser: boolean;
+  actionText: string;
+  speech: { text: string; kind: string } | null;
+  narrative: string;
+  world: World;
+};
+
+async function main(): Promise<void> {
+  if (process.env["VITEST"] === undefined) {
+    const { readFileSync } = await import("node:fs");
+    const file = join(REPO_ROOT, ".env");
+    if (existsSync(file)) {
+      for (const line of readFileSync(file, "utf-8").split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+        const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
+        if (!key || process.env[key] !== undefined) continue;
+        let value = trimmed.slice(trimmed.indexOf("=") + 1).trim();
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1);
+        }
+        process.env[key] = value;
+      }
+    }
+  }
+
+  let opts: GraphicOptions;
+  try {
+    opts = parseArgv(process.argv.slice(2));
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    console.log(
+      "Usage: npm run start:graphic -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave] [--port <n>]",
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (opts.help) {
+    console.log(
+      [
+        "Usage: npm run start:graphic -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave] [--port <n>]",
+        "  backends: joingonka | laya-local | ollama (aliases: --backend)",
+        "  scenario defaults to scenarios/office.json",
+        "  Serves the graphic UI (http://localhost:8123/) driven by the real engine:",
+        "  GET /world, POST /action {text}, GET /events (SSE), GET /health, GET /logs, POST /reset.",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  const port = opts.port ?? 8123;
+  const scenarioPath = opts.scenarioPath ? resolve(process.cwd(), opts.scenarioPath) : DEFAULT_SCENARIO;
+  const logger = new Logger({
+    sessionId: `graphic_${Date.now().toString(36)}`,
+    logDir: resolveConfig().logDir,
+    writeToFile: true,
+  });
+  const { deps, usingMock, llmLabel } = buildDeps(logger, opts.useMock ?? false, opts.autosave ?? true, opts);
+  const engineLabel = usingMock ? "mock (offline)" : `REAL LLM (${llmLabel ?? "see .env"})`;
+
+  let world: World;
+  let presentation: unknown = null;
+  const loadFromDisk = async (): Promise<void> => {
+    const raw = JSON.parse(await readFile(scenarioPath, "utf-8")) as Record<string, unknown>;
+    presentation = (raw["presentation"] as unknown) ?? null;
+    const { presentation: _drop, ...scenarioRaw } = raw;
+    world = loadScenario(scenarioRaw, logger);
+  };
+  try {
+    await loadFromDisk();
+  } catch (err) {
+    console.error(`Could not load scenario '${scenarioPath}': ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let busy = false;
+  const sseClients = new Set<ServerResponse>();
+  const broadcast = (payload: { actorId?: string; stage: string; message: string }): void => {
+    const line = `data: ${JSON.stringify(payload)}\n\n`;
+    for (const res of sseClients) {
+      try {
+        res.write(line);
+      } catch {
+        // Drop broken SSE connections lazily on socket close.
+      }
+    }
+  };
+  deps.onProgress = (event) => {
+    broadcast({ actorId: event.actorId, stage: event.stage, message: event.message });
+  };
+
+  const sendJson = (res: ServerResponse, status: number, payload: unknown): void => {
+    const body = JSON.stringify(payload);
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.end(body);
+  };
+
+  const readBody = (req: IncomingMessage, limit = 1_000_000): Promise<string> =>
+    new Promise((resolveBody, rejectBody) => {
+      let size = 0;
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > limit) {
+          rejectBody(new Error("request body too large"));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on("end", () => resolveBody(Buffer.concat(chunks).toString("utf-8")));
+      req.on("error", rejectBody);
+    });
+
+  /** Run one user round: drain leading NPCs, resolve the user action, then
+   *  auto-advance trailing NPCs until control returns to the user — the same
+   *  flow as the text UI's runUserTurnAndNpcs(). */
+  const runUserRound = async (userText: string): Promise<TurnEvent[]> => {
+    const events: TurnEvent[] = [];
+    const collect = async (forcedUserText?: string): Promise<void> => {
+      const actor = getCurrentActor(world);
+      deps.getUserAction =
+        actor.id === world.userActorId && forcedUserText !== undefined
+          ? async () => forcedUserText
+          : async () => {
+              throw new Error("getUserAction called outside the user turn");
+            };
+      world = await runTurn(world, deps);
+      const actionText = world.history.at(-1) ?? `${actor.name}: ${forcedUserText ?? ""}`;
+      events.push({
+        actorId: actor.id,
+        isUser: actor.id === world.userActorId,
+        actionText,
+        speech: speechFromAction(actionText),
+        narrative: actionText,
+        world: structuredClone(world),
+      });
+    };
+    const guard = Math.max(1, world.order.length);
+    for (let i = 0; i < guard; i++) {
+      if (getCurrentActor(world).id === world.userActorId) break;
+      await collect();
+    }
+    await collect(userText);
+    for (let i = 0; i < Math.max(0, world.order.length - 1); i++) {
+      if (getCurrentActor(world).id === world.userActorId) break;
+      await collect();
+    }
+    return events;
+  };
+
+  const MIME: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".ico": "image/x-icon",
+  };
+
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const path = decodeURIComponent(url.pathname);
+
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        });
+        res.end();
+        return;
+      }
+
+      if (req.method === "GET" && path === "/health") {
+        sendJson(res, 200, {
+          ok: true,
+          engine: engineLabel,
+          mock: usingMock,
+          debug: opts.debug ?? false,
+          scenario: { id: world.id, title: world.title, path: scenarioPath },
+          tick: world.tick,
+          userActorId: world.userActorId,
+          actors: world.actors.map((a) => a.id),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && path === "/world") {
+        sendJson(res, 200, { world, presentation: presentation ?? null });
+        return;
+      }
+
+      if (req.method === "GET" && path === "/events") {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "Access-Control-Allow-Origin": "*",
+        });
+        res.write(`: npc-simulator stream\n\n`);
+        sseClients.add(res);
+        req.on("close", () => sseClients.delete(res));
+        return;
+      }
+
+      if (req.method === "GET" && path === "/logs") {
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 50), 1), 500);
+        const module = url.searchParams.get("module") ?? undefined;
+        const tickParam = url.searchParams.get("tick");
+        let entries = logger.store.all();
+        if (module) entries = entries.filter((e) => e.module === module);
+        if (tickParam !== null && tickParam !== "") {
+          const tick = Number(tickParam);
+          if (Number.isInteger(tick)) entries = entries.filter((e) => e.tick === tick);
+        }
+        sendJson(res, 200, { entries: entries.slice(-limit), total: entries.length });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/reset") {
+        if (busy) {
+          sendJson(res, 409, { error: "A turn is already running" });
+          return;
+        }
+        try {
+          await loadFromDisk();
+        } catch (err) {
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        sendJson(res, 200, { world, presentation: presentation ?? null });
+        return;
+      }
+
+      if (req.method === "POST" && path === "/action") {
+        if (busy) {
+          sendJson(res, 409, { error: "A turn is already running" });
+          return;
+        }
+        let text = "";
+        try {
+          const body = JSON.parse((await readBody(req)) || "{}") as { text?: unknown };
+          text = String(body.text ?? "").trim();
+        } catch {
+          sendJson(res, 400, { error: "Invalid JSON body (expected { text })" });
+          return;
+        }
+        if (!text) {
+          sendJson(res, 400, { error: "Empty action" });
+          return;
+        }
+        busy = true;
+        try {
+          const t0 = Date.now();
+          const events = await runUserRound(text);
+          if (opts.debug) {
+            console.log(`[graphic] action resolved in ${((Date.now() - t0) / 1000).toFixed(1)}s (${events.length} turn(s))`);
+          }
+          sendJson(res, 200, { world, events });
+        } catch (err) {
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        } finally {
+          busy = false;
+        }
+        return;
+      }
+
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+
+      // Static UI files.
+      let filePath = path === "/" ? "/index.html" : path;
+      const file = join(GRAPHIC_ROOT, normalize(filePath));
+      if (!file.startsWith(GRAPHIC_ROOT)) {
+        res.writeHead(403).end("Forbidden");
+        return;
+      }
+      let data = await readFile(file);
+      const type = MIME[extname(file)] || "application/octet-stream";
+      if (file.endsWith("index.html")) {
+        // Tell the UI it was served by the engine (same-origin backend with
+        // the requested scenario/engines) so it connects back here instead
+        // of booting the offline mock scenario.
+        const inject =
+          `<script>window.__NPC_ENGINE__=${JSON.stringify({ backend: "same-origin", engine: engineLabel, mock: usingMock, scenario: world.title, scenarioId: world.id })};</script>\n`;
+        const html = data.toString("utf-8").replace(`<script type="module" src="js/main.js">`, `${inject}<script type="module" src="js/main.js">`);
+        data = Buffer.from(html, "utf-8");
+      }
+      res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+      res.end(data);
+    } catch {
+      if (!res.headersSent) {
+        try {
+          if ((req.url ?? "").startsWith("/world") || (req.url ?? "").startsWith("/action") || (req.url ?? "").startsWith("/health")) {
+            sendJson(res, 404, { error: "Not found" });
+          } else {
+            res.writeHead(404, { "Content-Type": "text/plain" }).end("Not found");
+          }
+        } catch {
+          // Socket already gone.
+        }
+      }
+    }
+  });
+
+  server.listen(port, () => {
+    console.log(`NPC Simulator UI → http://localhost:${port}/`);
+    console.log(`Scenario: ${world.title} (${scenarioPath}, you play ${world.userActorId})`);
+    console.log(`Engines: ${engineLabel}.`);
+    if (opts.debug) console.log("Debug mode ON.");
+  });
+  await logger.flush().catch(() => {});
+}
+
+const isMain = process.argv[1] !== undefined && /server(\.ts|\.js)$/.test(process.argv[1]);
+if (isMain) {
+  main().catch((err) => {
+    console.error(`graphic server crashed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+  });
+}

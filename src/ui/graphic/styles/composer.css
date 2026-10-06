@@ -1,0 +1,31 @@
+/* ═══════════════════════════════════════════════════════════════════
+   composer.css — bottom message input (the user's turn interface)
+   ═══════════════════════════════════════════════════════════════════ */
+.composer{display:flex;flex-direction:column;gap:10px}
+
+.composer-status{display:flex;align-items:center;gap:9px;font-size:11.5px;color:var(--mut);min-height:18px}
+.composer-status .spin{width:9px;height:9px;border-radius:50%;flex:0 0 auto;
+  border:2px solid rgba(255,182,72,.25);border-top-color:var(--to);animation:spin .8s linear infinite;display:none}
+.composer-status.busy .spin{display:block}
+.composer-status.busy{color:var(--to)}
+.composer-status.error{color:var(--ru)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.composer-row{display:flex;gap:10px;align-items:flex-end}
+
+.composer textarea{flex:1;resize:none;min-height:52px;max-height:140px;
+  background:rgba(3,6,14,.55);border:1px solid var(--line);border-radius:14px;
+  color:var(--txt);font-family:inherit;font-size:13.5px;font-weight:500;line-height:1.45;
+  padding:14px 16px;outline:none;transition:.16s}
+.composer textarea::placeholder{color:var(--dim)}
+.composer textarea:focus{border-color:rgba(79,124,255,.55);box-shadow:0 0 0 3px rgba(79,124,255,.14)}
+.composer textarea:disabled{opacity:.55;cursor:not-allowed}
+
+.send{width:52px;height:52px;flex:0 0 auto;border-radius:15px;border:none;cursor:pointer;
+  display:grid;place-items:center;color:#04121a;transition:.16s;
+  background:linear-gradient(140deg,#3fe0bd,var(--em) 35%,var(--sa));
+  box-shadow:0 12px 30px rgba(46,196,166,.35),inset 0 2px 0 rgba(255,255,255,.55)}
+.send svg{width:22px;height:22px;fill:currentColor}
+.send:hover:not(:disabled){transform:translateY(-2px)}
+.send:active:not(:disabled){transform:translateY(0) scale(.96)}
+.send:disabled{filter:grayscale(.7);opacity:.45;cursor:not-allowed;box-shadow:none}

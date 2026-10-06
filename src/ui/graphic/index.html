@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NPC Simulator — Northlight Studio</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/outfit/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/outfit/600.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/outfit/800.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono/400.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/layout.css">
+<link rel="stylesheet" href="styles/stage.css">
+<link rel="stylesheet" href="styles/panels.css">
+<link rel="stylesheet" href="styles/composer.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ── topbar ─────────────────────────────────────────────────── -->
+  <div class="topbar">
+    <div class="logo"></div>
+    <div class="titles">
+      <h1>NPC Simulator</h1>
+      <p>Live 2.5D office · you play one character — everyone else is engine-driven</p>
+    </div>
+    <div class="pills">
+      <div class="pill">Scenario <b id="pillTitle">—</b></div>
+      <div class="pill">Tick <b id="pillTick">0</b></div>
+      <div class="pill">Cast <b id="pillCast">0</b></div>
+      <div class="pill"><span class="dot" id="engineDot"></span> Engines <b id="pillEngine">—</b></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- ── main column: stage + composer ────────────────────────── -->
+    <div class="main">
+      <div class="card">
+        <div class="stage" id="stage">
+          <canvas id="scene"></canvas>
+          <div class="hud">
+            <div class="chip"><span class="rec" id="recDot"></span><span id="hudState">STARTING…</span></div>
+            <div class="chip" id="hudScene">Northlight Studio · Floor 3</div>
+          </div>
+          <div class="hud-right">
+            <div class="toggle on" id="tgNames">Names</div>
+            <div class="toggle on" id="tgGrid">Zones</div>
+          </div>
+          <div class="caption"><span class="ic">◆</span><span id="captionText">—</span></div>
+        </div>
+      </div>
+
+      <div class="card composer">
+        <div class="composer-status" id="composerStatus">
+          <span class="spin"></span><span id="composerStatusText"></span>
+        </div>
+        <div class="composer-row">
+          <textarea id="composerInput" rows="1" spellcheck="false"
+            placeholder="Type what Noah does or says… (Enter to send · Shift+Enter for a new line)"></textarea>
+          <button class="send" id="composerSend" title="Send (Enter)" disabled>
+            <svg viewBox="0 0 24 24"><path d="M2.5 21.5l19-9.5-19-9.5v7.4l13 2.1-13 2.1z"/></svg>
+          </button>
+        </div>
+        <div class="hint" id="bootError">
+          Your action resolves first, then every NPC takes a turn automatically until it's your turn again —
+          just like <kbd>action:</kbd> in the text interface.
+        </div>
+      </div>
+    </div>
+
+    <!-- ── side column: cast / timeline / json ──────────────────── -->
+    <div class="side">
+      <div class="card">
+        <div class="tabs">
+          <button class="on" data-pane="cast">Cast</button>
+          <button data-pane="log">Timeline</button>
+          <button data-pane="data">JSON</button>
+        </div>
+        <div class="pane on" id="pane-cast" style="margin-top:14px">
+          <div class="pane-h">Live scene · character state</div>
+          <div class="cast" id="castList"></div>
+        </div>
+        <div class="pane" id="pane-log" style="margin-top:14px">
+          <div class="pane-h">World history · <span id="logCount">0 entries</span></div>
+          <div class="log" id="logList"></div>
+        </div>
+        <div class="pane" id="pane-data" style="margin-top:14px">
+          <div class="subtabs" id="subtabs">
+            <button class="on" data-j="world">world</button>
+            <button data-j="live">live</button>
+            <button data-j="scene">scene</button>
+          </div>
+          <pre class="json" id="jsonOut"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

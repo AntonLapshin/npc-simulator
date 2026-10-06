@@ -1,0 +1,22 @@
+/* ═══════════════════════════════════════════════════════════════════
+   layout.css — app shell: topbar, main/side grid, hint line
+   ═══════════════════════════════════════════════════════════════════ */
+.app{max-width:1560px;margin:0 auto;position:relative;z-index:1}
+
+.topbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+.logo{width:44px;height:44px;border-radius:13px;flex:0 0 auto;
+  background:linear-gradient(140deg,var(--em),var(--sa) 48%,var(--am));
+  box-shadow:0 8px 26px rgba(79,124,255,.35),inset 0 1px 0 rgba(255,255,255,.5);position:relative}
+.logo::after{content:'';position:absolute;inset:0;border-radius:13px;
+  background:linear-gradient(150deg,rgba(255,255,255,.55),transparent 42%);mix-blend-mode:overlay}
+.titles h1{margin:0;font-size:20px;font-weight:800;letter-spacing:-.3px}
+.titles p{margin:3px 0 0;font-size:12.5px;color:var(--mut)}
+.pills{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
+
+/* main column (stage + composer) and side column (panels) */
+.grid{display:grid;grid-template-columns:minmax(0,1fr) 372px;gap:16px;align-items:start}
+@media(max-width:1180px){.grid{grid-template-columns:minmax(0,1fr)}}
+.main{display:flex;flex-direction:column;gap:14px;min-width:0}
+.side{display:flex;flex-direction:column;gap:14px}
+
+.hint{font-size:11px;color:var(--dim);text-align:center;margin-top:2px;line-height:1.7}

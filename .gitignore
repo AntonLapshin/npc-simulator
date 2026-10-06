@@ -11,3 +11,4 @@ coverage/
 .laya-venv/
 models/
 scenarios/office-anton.json
+src/ui/graphic/tests/out/
