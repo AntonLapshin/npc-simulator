@@ -10,6 +10,7 @@
 // The app never mutates World objects; adapters own simulation truth.
 
 import { LiveState } from "./sim/liveState.js";
+import { buildViewScene } from "./data/scenarioScene.js";
 import { $ } from "./core/dom.js";
 
 export class App {
@@ -40,6 +41,10 @@ export class App {
     /* ── load the initial world ─────────────────────────────────── */
     const { world, presentation } = await this.adapter.load();
     this.world = world;
+    // The painted room is driven by the scenario's own scene objects
+    // (walls/door/desks/…); only the bundled office keeps its pretty set.
+    this.staticScene = buildViewScene(world, presentation);
+    if (typeof this.renderer.setScene === "function") this.renderer.setScene(this.staticScene);
     this.live.init(world, presentation);
 
     this._colorOf = (actorId) => this.live.visualActor(actorId)?.color || "#8fa0c0";
@@ -50,7 +55,7 @@ export class App {
     this.topbar.setTick(world.tick);
     this.topbar.setCast(world.actors.length);
     this.topbar.setEngine(this.adapter.label, { mock: this.adapter.kind !== "http" });
-    this.hud.setSceneName(presentation?.scene?.name || world.title);
+    this.hud.setSceneName(presentation?.scene?.name || this.staticScene?.meta?.name || world.title);
 
     const me = world.actors.find((a) => a.id === world.userActorId);
     this.composer.setActorName(me?.name);

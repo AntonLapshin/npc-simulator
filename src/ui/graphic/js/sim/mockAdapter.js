@@ -156,6 +156,9 @@ export class MockAdapter extends Emitter {
   /** @returns {Promise<{world, presentation}>} */
   async load() {
     this.world = scenarioToWorld(this.scenario);
+    // Small-grid engine scenarios (e.g. 20×20 office-anton) use scene
+    // units, not 1040×730 view pixels — movement must clamp to the scene.
+    this._smallScene = (this.world.scene.width || 1040) <= 100 || (this.world.scene.height || 730) <= 100;
     return { world: clone(this.world), presentation: this.scenario.presentation || null };
   }
 
@@ -187,7 +190,16 @@ export class MockAdapter extends Emitter {
   }
 
   _movePointTo(x, y) {
+    if (this._smallScene && this.world) {
+      const W = this.world.scene.width, H = this.world.scene.height;
+      return [clamp(x, 0.5, W - 0.5), clamp(y, 0.5, H - 0.5)];
+    }
     return [clamp(x, FLOOR_BOUNDS.minX, FLOOR_BOUNDS.maxX), clamp(y, FLOOR_BOUNDS.minY, FLOOR_BOUNDS.maxY)];
+  }
+
+  /** Approach distance in the world's own units (view px vs grid cells). */
+  _approachDist() {
+    return this._smallScene ? 1.5 : 95;
   }
 
   /** A point `dist` px from `to`, approached from `from`. */
@@ -231,13 +243,23 @@ export class MockAdapter extends Emitter {
       if (moveMatch) {
         const target = moveMatch[1].trim().toLowerCase();
         const named = this.world.actors.find((a) => a.id !== user.id && a.name.toLowerCase() === target);
-        const spot = SPOTS[target.split(/\s+/)[0]];
+        // Named view-pixel spots only exist for the bundled 1040×730 office;
+        // small-grid scenarios move toward actors/objects instead.
+        const spot = this._smallScene ? null : SPOTS[target.split(/\s+/)[0]];
         if (named) {
-          [user.x, user.y] = this._nearPoint([user.x, user.y], [named.x, named.y], 85);
+          [user.x, user.y] = this._nearPoint([user.x, user.y], [named.x, named.y], this._approachDist());
           userMoved = true;
         } else if (spot) {
           [user.x, user.y] = this._movePointTo(spot[0], spot[1]);
           userMoved = true;
+        } else if (this._smallScene) {
+          const obj = this.world.scene.objects.find(
+            (o) => o.id.toLowerCase() === target || (o.name || "").toLowerCase() === target,
+          );
+          if (obj) {
+            [user.x, user.y] = this._movePointTo(obj.x + obj.w / 2, obj.y + obj.h / 2);
+            userMoved = true;
+          }
         }
       }
       user.emotion = speechText ? "happy" : userMoved ? "neutral" : user.emotion;
@@ -279,8 +301,9 @@ export class MockAdapter extends Emitter {
       const line = this._fill(tpl.text, user, npc);
       const dist = Math.hypot(user.x - npc.x, user.y - npc.y);
       let approach = "";
-      if (dist > 190) {
-        const p = this._nearPoint([npc.x, npc.y], [user.x, user.y], 95);
+      const approachAt = this._smallScene ? 4 : 190;
+      if (dist > approachAt) {
+        const p = this._nearPoint([npc.x, npc.y], [user.x, user.y], this._approachDist());
         npc.x = p[0];
         npc.y = p[1];
         approach = `walks over to ${user.name} and `;
@@ -297,7 +320,9 @@ export class MockAdapter extends Emitter {
     } else {
       const amb = this._pick(AMBIENT);
       if (amb.move) {
-        const p = this._movePointTo(npc.x + (this.rng() - 0.5) * 160, npc.y + (this.rng() - 0.5) * 130);
+        const step = this._smallScene ? 3 : 160;
+        const stepY = this._smallScene ? 2.5 : 130;
+        const p = this._movePointTo(npc.x + (this.rng() - 0.5) * step, npc.y + (this.rng() - 0.5) * stepY);
         npc.dir = facing(npc, { x: p[0], y: p[1] });
         npc.x = p[0];
         npc.y = p[1];

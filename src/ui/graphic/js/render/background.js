@@ -20,12 +20,14 @@ export function paintBackground(c, scene, dims) {
   c.fill();
 
   const cor = scene.corridor;
-  c.fillStyle = cor.color;
-  c.fillRect(cor.x, cor.y, cor.w, cor.h);
-  c.fillStyle = "rgba(255,255,255,.05)";
-  for (let i = 0; i < 4; i++) c.fillRect(cor.x + 8 + i * 30, cor.y + 6, 18, cor.h - 12);
-  c.fillStyle = "rgba(0,0,0,.5)";
-  c.fillRect(cor.x, cor.y, cor.w, 4);
+  if (cor && cor.w > 0 && cor.h > 0) {
+    c.fillStyle = cor.color;
+    c.fillRect(cor.x, cor.y, cor.w, cor.h);
+    c.fillStyle = "rgba(255,255,255,.05)";
+    for (let i = 0; i < 4; i++) c.fillRect(cor.x + 8 + i * 30, cor.y + 6, 18, cor.h - 12);
+    c.fillStyle = "rgba(0,0,0,.5)";
+    c.fillRect(cor.x, cor.y, cor.w, 4);
+  }
 
   c.save();
   rrPath(c, F.x, F.y, F.w, F.h, 6);
@@ -44,7 +46,7 @@ export function paintBackground(c, scene, dims) {
       c.strokeRect(x + 0.5, y + 0.5, 149, F.plank - 1);
     }
   }
-  scene.lightPatches.forEach((lp) => {
+  (scene.lightPatches || []).forEach((lp) => {
     const gr = linGrad(c, 0, F.y, 0, F.y + 230, [
       [0, "rgba(255,244,205,.34)"],
       [0.55, "rgba(255,240,200,.13)"],
@@ -63,7 +65,7 @@ export function paintBackground(c, scene, dims) {
       c.stroke();
     }
   });
-  scene.floorDecals.forEach((d) => {
+  (scene.floorDecals || []).forEach((d) => {
     if (d.asset === "rug") drawRug(c, d);
     else if (d.asset === "zone" && viewOptions.showZones) drawZone(c, d);
   });
@@ -85,14 +87,14 @@ export function paintBackground(c, scene, dims) {
   }
   c.restore();
 
-  scene.walls.filter((w) => w.layer === "back").forEach((w) => drawWall(c, w));
-  scene.windows.forEach((win) => drawWindow(c, win));
-  scene.wallDecor.forEach((d) => {
+  (scene.walls || []).filter((w) => w.layer === "back").forEach((w) => drawWall(c, w));
+  (scene.windows || []).forEach((win) => drawWindow(c, win));
+  (scene.wallDecor || []).forEach((d) => {
     if (d.asset === "whiteboard") drawWhiteboard(c, d);
     else if (d.asset === "clock") drawClock(c, d);
     else if (d.asset === "poster") drawPoster(c, d);
   });
-  drawDoor(c, scene.door);
+  if (scene.door && scene.door.w > 0 && scene.door.h > 0) drawDoor(c, scene.door);
 }
 
 export function drawWall(c, w) {
@@ -162,6 +164,23 @@ export function drawWindow(c, win) {
 }
 
 export function drawDoor(c, d) {
+  // Top-view: doors set into vertical (west/east) walls are seen edge-on —
+  // paint a simple vertical slab in the wall line, no camera-facing frame.
+  if (d.h > d.w * 1.5) {
+    c.fillStyle = "#0a0f1c";
+    c.fillRect(d.x, d.y, d.w, d.h);
+    c.fillStyle = d.frame || "#8f6b45";
+    c.fillRect(d.x + 2, d.y + 1, Math.max(4, d.w - 4), Math.max(2, d.h - 2));
+    c.fillStyle = "rgba(255,255,255,.28)";
+    c.fillRect(d.x + 2, d.y + 1, Math.max(2, d.w - 4), 2);
+    c.strokeStyle = "rgba(40,50,90,.35)";
+    c.lineWidth = 1.5;
+    c.strokeRect(d.x + 1, d.y + 0.5, d.w - 1, d.h - 1);
+    // centre leaf seam to read as a door, still flat top-view
+    c.fillStyle = "rgba(20,26,44,.5)";
+    c.fillRect(d.x + d.w / 2 - 0.75, d.y + 3, 1.5, Math.max(1, d.h - 6));
+    return;
+  }
   c.fillStyle = "#0a0f1c";
   c.fillRect(d.x, d.y + 2, d.w, d.h);
   const g = linGrad(c, 0, d.y - 46, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);

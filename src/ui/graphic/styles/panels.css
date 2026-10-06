@@ -28,6 +28,8 @@
 
 /* ── history log ──────────────────────────────────────────────────── */
 .log{max-height:470px;overflow:auto;display:flex;flex-direction:column;gap:3px;padding-right:4px}
+.log.timeline{max-height:320px;margin-top:2px}
+.timeline-section{margin-top:16px;padding-top:14px;border-top:1px solid var(--line2)}
 .ev{display:flex;gap:9px;align-items:flex-start;padding:7px 9px;border-radius:10px;border:1px solid transparent;transition:.13s}
 .ev:hover{background:rgba(255,255,255,.05)}
 .ev.is-user{background:linear-gradient(90deg,rgba(46,196,166,.12),rgba(79,124,255,.04));border-color:rgba(46,196,166,.25)}

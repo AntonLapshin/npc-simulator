@@ -25,19 +25,31 @@ export class SceneRenderer {
    */
   constructor(canvas, staticScene) {
     this.canvas = canvas;
-    this.scene = staticScene;
-    this.dims = staticScene.meta.world; // {w,h} canvas world units
+    this.scale = 1;
     this.ctx = canvas.getContext("2d");
     this.bg = document.createElement("canvas");
     this.bgx = this.bg.getContext("2d");
-    this.scale = 1;
-    /** ids of static assets — world objects with these ids are already painted */
-    this.knownObjectIds = new Set(staticScene.assets.map((a) => a.id));
-    if (staticScene.door?.id) this.knownObjectIds.add(staticScene.door.id);
-    staticScene.walls.forEach((w) => w.id && this.knownObjectIds.add(w.id));
     this._failed = new Set();
     this._ready = Boolean(this.ctx && this.bgx);
     if (!this._ready) console.warn("[SceneRenderer] 2D context unavailable — rendering disabled");
+    this.setScene(staticScene);
+  }
+
+  /**
+   * Swap the painted scenery (e.g. after loading a scenario whose objects
+   * define their own room). Recomputes the already-painted id set and
+   * repaints the cached background.
+   */
+  setScene(staticScene) {
+    this.scene = staticScene;
+    this.dims = staticScene.meta.world; // {w,h} canvas world units
+    this.knownObjectIds = new Set((staticScene.assets || []).map((a) => a.id));
+    if (staticScene.door?.id) this.knownObjectIds.add(staticScene.door.id);
+    (staticScene.walls || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.windows || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.wallDecor || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.floorDecals || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    if (this._ready && this.canvas.width) this.repaintBackground();
   }
 
   get ready() {
@@ -105,8 +117,8 @@ export class SceneRenderer {
 
       /* painters order: southern-most floor edge wins */
       const list = [];
-      this.scene.assets.forEach((a) => list.push({ k: assetSortY(a), t: "a", o: a }));
-      this.scene.walls.filter((w) => w.layer === "front").forEach((w) => list.push({ k: w.y + w.h, t: "w", o: w }));
+      (this.scene.assets || []).forEach((a) => list.push({ k: assetSortY(a), t: "a", o: a }));
+      (this.scene.walls || []).filter((w) => w.layer === "front").forEach((w) => list.push({ k: w.y + w.h, t: "w", o: w }));
       (state.objects || []).forEach((o) => {
         if (!this.knownObjectIds.has(o.id)) list.push({ k: o.y + (o.h || 0) / 2, t: "o", o });
       });

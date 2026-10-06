@@ -8,7 +8,8 @@ import { OFFICE_SCENARIO } from "../js/data/officeScenario.js";
 import { LiveState, deriveDir } from "../js/sim/liveState.js";
 import { extractQuoted, parseSpeechFromAction } from "../js/sim/textParse.js";
 import { resolvePresentation, deriveLook, makeMapper } from "../js/sim/presentation.js";
-import { FLOOR_BOUNDS } from "../js/data/staticScene.js";
+import { FLOOR_BOUNDS, STATIC_SCENE } from "../js/data/staticScene.js";
+import { buildViewScene, isStaticOfficeScene } from "../js/data/scenarioScene.js";
 
 let passed = 0;
 async function test(name, fn) {
@@ -156,6 +157,53 @@ await test("mapper scales arbitrary scene sizes onto the 1040×730 view", () => 
   assert.equal(m.toViewX(260), 520);
   assert.equal(m.toViewY(365), 730);
   assert.equal(m.toWorldX(1040), 520);
+});
+
+await test("scenarioScene: bundled office keeps STATIC_SCENE", () => {
+  const view = buildViewScene(
+    { id: OFFICE_SCENARIO.id, title: OFFICE_SCENARIO.title, scene: OFFICE_SCENARIO.scene },
+    OFFICE_SCENARIO.presentation,
+  );
+  assert.equal(view, STATIC_SCENE, "office must keep its pretty static scenery");
+  assert.equal(isStaticOfficeScene({ id: "office_first_day" }, OFFICE_SCENARIO.presentation), true);
+});
+
+await test("scenarioScene: foreign scenario is driven by its own objects", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { dirname, join, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const anton = JSON.parse(await readFile(join(root, "scenarios/office-anton.json"), "utf-8"));
+  assert.equal(isStaticOfficeScene(anton, null), false);
+  const view = buildViewScene(anton, null);
+  // no trace of the static office: walls/door come from the scenario
+  assert.deepEqual(
+    view.walls.map((w) => w.id).sort(),
+    ["wall_east", "wall_north", "wall_south", "wall_west_lower", "wall_west_upper"],
+  );
+  assert.equal(view.door?.id, "door");
+  const byId = new Map(view.assets.map((a) => [a.id, a.asset]));
+  assert.equal(byId.get("tanya_desk"), "desk");
+  assert.equal(byId.get("dana_desk"), "desk");
+  assert.equal(byId.get("anton_desk"), "desk");
+  assert.equal(byId.get("coffee_machine"), "coffeeMachine");
+  assert.equal(byId.get("tanya_chair"), "chair");
+  assert.equal(byId.get("sofa"), "sofa");
+  assert.equal(byId.get("tanya_laptop"), "laptop");
+  assert.equal(byId.get("tanya_mug"), "cup");
+  assert.equal(byId.get("tanya_papers"), "papers");
+  assert.deepEqual(
+    view.windows.map((w) => w.id).sort(),
+    ["window_north_1", "window_north_2", "window_north_3"],
+  );
+  // every scenario object is painted (no silent drops)
+  const painted = new Set([
+    ...view.walls.map((w) => w.id),
+    ...(view.door ? [view.door.id] : []),
+    ...view.windows.map((w) => w.id),
+    ...view.assets.map((a) => a.id),
+  ]);
+  for (const o of anton.scene.objects) assert.ok(painted.has(o.id), `${o.id} must be painted`);
 });
 
 console.log(`\n${passed} test group(s) passed`);

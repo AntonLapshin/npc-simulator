@@ -73,16 +73,11 @@
       <div class="card">
         <div class="tabs">
           <button class="on" data-pane="cast">Cast</button>
-          <button data-pane="log">Timeline</button>
           <button data-pane="data">JSON</button>
         </div>
         <div class="pane on" id="pane-cast" style="margin-top:14px">
           <div class="pane-h">Live scene · character state</div>
           <div class="cast" id="castList"></div>
-        </div>
-        <div class="pane" id="pane-log" style="margin-top:14px">
-          <div class="pane-h">World history · <span id="logCount">0 entries</span></div>
-          <div class="log" id="logList"></div>
         </div>
         <div class="pane" id="pane-data" style="margin-top:14px">
           <div class="subtabs" id="subtabs">
@@ -91,6 +86,10 @@
             <button data-j="scene">scene</button>
           </div>
           <pre class="json" id="jsonOut"></pre>
+        </div>
+        <div class="timeline-section">
+          <div class="pane-h">Timeline · <span id="logCount">0 entries</span></div>
+          <div class="log timeline" id="logList"></div>
         </div>
       </div>
     </div>

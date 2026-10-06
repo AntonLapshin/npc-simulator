@@ -133,6 +133,8 @@ kbd{background:rgba(255,255,255,.07);border:1px solid var(--line);border-bottom-
 
 /* ── history log ──────────────────────────────────────────────────── */
 .log{max-height:470px;overflow:auto;display:flex;flex-direction:column;gap:3px;padding-right:4px}
+.log.timeline{max-height:320px;margin-top:2px}
+.timeline-section{margin-top:16px;padding-top:14px;border-top:1px solid var(--line2)}
 .ev{display:flex;gap:9px;align-items:flex-start;padding:7px 9px;border-radius:10px;border:1px solid transparent;transition:.13s}
 .ev:hover{background:rgba(255,255,255,.05)}
 .ev.is-user{background:linear-gradient(90deg,rgba(46,196,166,.12),rgba(79,124,255,.04));border-color:rgba(46,196,166,.25)}
@@ -246,16 +248,11 @@ pre.json{margin:0;max-height:460px;overflow:auto;background:rgba(3,6,14,.55);bor
       <div class="card">
         <div class="tabs">
           <button class="on" data-pane="cast">Cast</button>
-          <button data-pane="log">Timeline</button>
           <button data-pane="data">JSON</button>
         </div>
         <div class="pane on" id="pane-cast" style="margin-top:14px">
           <div class="pane-h">Live scene · character state</div>
           <div class="cast" id="castList"></div>
-        </div>
-        <div class="pane" id="pane-log" style="margin-top:14px">
-          <div class="pane-h">World history · <span id="logCount">0 entries</span></div>
-          <div class="log" id="logList"></div>
         </div>
         <div class="pane" id="pane-data" style="margin-top:14px">
           <div class="subtabs" id="subtabs">
@@ -264,6 +261,10 @@ pre.json{margin:0;max-height:460px;overflow:auto;background:rgba(3,6,14,.55);bor
             <button data-j="scene">scene</button>
           </div>
           <pre class="json" id="jsonOut"></pre>
+        </div>
+        <div class="timeline-section">
+          <div class="pane-h">Timeline · <span id="logCount">0 entries</span></div>
+          <div class="log timeline" id="logList"></div>
         </div>
       </div>
     </div>
@@ -744,12 +745,14 @@ function paintBackground(c, scene, dims) {
   c.fill();
 
   const cor = scene.corridor;
-  c.fillStyle = cor.color;
-  c.fillRect(cor.x, cor.y, cor.w, cor.h);
-  c.fillStyle = "rgba(255,255,255,.05)";
-  for (let i = 0; i < 4; i++) c.fillRect(cor.x + 8 + i * 30, cor.y + 6, 18, cor.h - 12);
-  c.fillStyle = "rgba(0,0,0,.5)";
-  c.fillRect(cor.x, cor.y, cor.w, 4);
+  if (cor && cor.w > 0 && cor.h > 0) {
+    c.fillStyle = cor.color;
+    c.fillRect(cor.x, cor.y, cor.w, cor.h);
+    c.fillStyle = "rgba(255,255,255,.05)";
+    for (let i = 0; i < 4; i++) c.fillRect(cor.x + 8 + i * 30, cor.y + 6, 18, cor.h - 12);
+    c.fillStyle = "rgba(0,0,0,.5)";
+    c.fillRect(cor.x, cor.y, cor.w, 4);
+  }
 
   c.save();
   rrPath(c, F.x, F.y, F.w, F.h, 6);
@@ -768,7 +771,7 @@ function paintBackground(c, scene, dims) {
       c.strokeRect(x + 0.5, y + 0.5, 149, F.plank - 1);
     }
   }
-  scene.lightPatches.forEach((lp) => {
+  (scene.lightPatches || []).forEach((lp) => {
     const gr = linGrad(c, 0, F.y, 0, F.y + 230, [
       [0, "rgba(255,244,205,.34)"],
       [0.55, "rgba(255,240,200,.13)"],
@@ -787,7 +790,7 @@ function paintBackground(c, scene, dims) {
       c.stroke();
     }
   });
-  scene.floorDecals.forEach((d) => {
+  (scene.floorDecals || []).forEach((d) => {
     if (d.asset === "rug") drawRug(c, d);
     else if (d.asset === "zone" && viewOptions.showZones) drawZone(c, d);
   });
@@ -809,14 +812,14 @@ function paintBackground(c, scene, dims) {
   }
   c.restore();
 
-  scene.walls.filter((w) => w.layer === "back").forEach((w) => drawWall(c, w));
-  scene.windows.forEach((win) => drawWindow(c, win));
-  scene.wallDecor.forEach((d) => {
+  (scene.walls || []).filter((w) => w.layer === "back").forEach((w) => drawWall(c, w));
+  (scene.windows || []).forEach((win) => drawWindow(c, win));
+  (scene.wallDecor || []).forEach((d) => {
     if (d.asset === "whiteboard") drawWhiteboard(c, d);
     else if (d.asset === "clock") drawClock(c, d);
     else if (d.asset === "poster") drawPoster(c, d);
   });
-  drawDoor(c, scene.door);
+  if (scene.door && scene.door.w > 0 && scene.door.h > 0) drawDoor(c, scene.door);
 }
 
 function drawWall(c, w) {
@@ -886,6 +889,23 @@ function drawWindow(c, win) {
 }
 
 function drawDoor(c, d) {
+  // Top-view: doors set into vertical (west/east) walls are seen edge-on —
+  // paint a simple vertical slab in the wall line, no camera-facing frame.
+  if (d.h > d.w * 1.5) {
+    c.fillStyle = "#0a0f1c";
+    c.fillRect(d.x, d.y, d.w, d.h);
+    c.fillStyle = d.frame || "#8f6b45";
+    c.fillRect(d.x + 2, d.y + 1, Math.max(4, d.w - 4), Math.max(2, d.h - 2));
+    c.fillStyle = "rgba(255,255,255,.28)";
+    c.fillRect(d.x + 2, d.y + 1, Math.max(2, d.w - 4), 2);
+    c.strokeStyle = "rgba(40,50,90,.35)";
+    c.lineWidth = 1.5;
+    c.strokeRect(d.x + 1, d.y + 0.5, d.w - 1, d.h - 1);
+    // centre leaf seam to read as a door, still flat top-view
+    c.fillStyle = "rgba(20,26,44,.5)";
+    c.fillRect(d.x + d.w / 2 - 0.75, d.y + 3, 1.5, Math.max(1, d.h - 6));
+    return;
+  }
   c.fillStyle = "#0a0f1c";
   c.fillRect(d.x, d.y + 2, d.w, d.h);
   const g = linGrad(c, 0, d.y - 46, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);
@@ -2315,19 +2335,31 @@ class SceneRenderer {
    */
   constructor(canvas, staticScene) {
     this.canvas = canvas;
-    this.scene = staticScene;
-    this.dims = staticScene.meta.world; // {w,h} canvas world units
+    this.scale = 1;
     this.ctx = canvas.getContext("2d");
     this.bg = document.createElement("canvas");
     this.bgx = this.bg.getContext("2d");
-    this.scale = 1;
-    /** ids of static assets — world objects with these ids are already painted */
-    this.knownObjectIds = new Set(staticScene.assets.map((a) => a.id));
-    if (staticScene.door?.id) this.knownObjectIds.add(staticScene.door.id);
-    staticScene.walls.forEach((w) => w.id && this.knownObjectIds.add(w.id));
     this._failed = new Set();
     this._ready = Boolean(this.ctx && this.bgx);
     if (!this._ready) console.warn("[SceneRenderer] 2D context unavailable — rendering disabled");
+    this.setScene(staticScene);
+  }
+
+  /**
+   * Swap the painted scenery (e.g. after loading a scenario whose objects
+   * define their own room). Recomputes the already-painted id set and
+   * repaints the cached background.
+   */
+  setScene(staticScene) {
+    this.scene = staticScene;
+    this.dims = staticScene.meta.world; // {w,h} canvas world units
+    this.knownObjectIds = new Set((staticScene.assets || []).map((a) => a.id));
+    if (staticScene.door?.id) this.knownObjectIds.add(staticScene.door.id);
+    (staticScene.walls || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.windows || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.wallDecor || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    (staticScene.floorDecals || []).forEach((w) => w.id && this.knownObjectIds.add(w.id));
+    if (this._ready && this.canvas.width) this.repaintBackground();
   }
 
   get ready() {
@@ -2395,8 +2427,8 @@ class SceneRenderer {
 
       /* painters order: southern-most floor edge wins */
       const list = [];
-      this.scene.assets.forEach((a) => list.push({ k: assetSortY(a), t: "a", o: a }));
-      this.scene.walls.filter((w) => w.layer === "front").forEach((w) => list.push({ k: w.y + w.h, t: "w", o: w }));
+      (this.scene.assets || []).forEach((a) => list.push({ k: assetSortY(a), t: "a", o: a }));
+      (this.scene.walls || []).filter((w) => w.layer === "front").forEach((w) => list.push({ k: w.y + w.h, t: "w", o: w }));
       (state.objects || []).forEach((o) => {
         if (!this.knownObjectIds.has(o.id)) list.push({ k: o.y + (o.h || 0) / 2, t: "o", o });
       });
@@ -2688,6 +2720,9 @@ class MockAdapter extends Emitter {
   /** @returns {Promise<{world, presentation}>} */
   async load() {
     this.world = scenarioToWorld(this.scenario);
+    // Small-grid engine scenarios (e.g. 20×20 office-anton) use scene
+    // units, not 1040×730 view pixels — movement must clamp to the scene.
+    this._smallScene = (this.world.scene.width || 1040) <= 100 || (this.world.scene.height || 730) <= 100;
     return { world: clone(this.world), presentation: this.scenario.presentation || null };
   }
 
@@ -2719,7 +2754,16 @@ class MockAdapter extends Emitter {
   }
 
   _movePointTo(x, y) {
+    if (this._smallScene && this.world) {
+      const W = this.world.scene.width, H = this.world.scene.height;
+      return [clamp(x, 0.5, W - 0.5), clamp(y, 0.5, H - 0.5)];
+    }
     return [clamp(x, FLOOR_BOUNDS.minX, FLOOR_BOUNDS.maxX), clamp(y, FLOOR_BOUNDS.minY, FLOOR_BOUNDS.maxY)];
+  }
+
+  /** Approach distance in the world's own units (view px vs grid cells). */
+  _approachDist() {
+    return this._smallScene ? 1.5 : 95;
   }
 
   /** A point `dist` px from `to`, approached from `from`. */
@@ -2763,13 +2807,23 @@ class MockAdapter extends Emitter {
       if (moveMatch) {
         const target = moveMatch[1].trim().toLowerCase();
         const named = this.world.actors.find((a) => a.id !== user.id && a.name.toLowerCase() === target);
-        const spot = SPOTS[target.split(/\s+/)[0]];
+        // Named view-pixel spots only exist for the bundled 1040×730 office;
+        // small-grid scenarios move toward actors/objects instead.
+        const spot = this._smallScene ? null : SPOTS[target.split(/\s+/)[0]];
         if (named) {
-          [user.x, user.y] = this._nearPoint([user.x, user.y], [named.x, named.y], 85);
+          [user.x, user.y] = this._nearPoint([user.x, user.y], [named.x, named.y], this._approachDist());
           userMoved = true;
         } else if (spot) {
           [user.x, user.y] = this._movePointTo(spot[0], spot[1]);
           userMoved = true;
+        } else if (this._smallScene) {
+          const obj = this.world.scene.objects.find(
+            (o) => o.id.toLowerCase() === target || (o.name || "").toLowerCase() === target,
+          );
+          if (obj) {
+            [user.x, user.y] = this._movePointTo(obj.x + obj.w / 2, obj.y + obj.h / 2);
+            userMoved = true;
+          }
         }
       }
       user.emotion = speechText ? "happy" : userMoved ? "neutral" : user.emotion;
@@ -2811,8 +2865,9 @@ class MockAdapter extends Emitter {
       const line = this._fill(tpl.text, user, npc);
       const dist = Math.hypot(user.x - npc.x, user.y - npc.y);
       let approach = "";
-      if (dist > 190) {
-        const p = this._nearPoint([npc.x, npc.y], [user.x, user.y], 95);
+      const approachAt = this._smallScene ? 4 : 190;
+      if (dist > approachAt) {
+        const p = this._nearPoint([npc.x, npc.y], [user.x, user.y], this._approachDist());
         npc.x = p[0];
         npc.y = p[1];
         approach = `walks over to ${user.name} and `;
@@ -2829,7 +2884,9 @@ class MockAdapter extends Emitter {
     } else {
       const amb = this._pick(AMBIENT);
       if (amb.move) {
-        const p = this._movePointTo(npc.x + (this.rng() - 0.5) * 160, npc.y + (this.rng() - 0.5) * 130);
+        const step = this._smallScene ? 3 : 160;
+        const stepY = this._smallScene ? 2.5 : 130;
+        const p = this._movePointTo(npc.x + (this.rng() - 0.5) * step, npc.y + (this.rng() - 0.5) * stepY);
         npc.dir = facing(npc, { x: p[0], y: p[1] });
         npc.x = p[0];
         npc.y = p[1];
@@ -3389,6 +3446,258 @@ function deriveDir(dx, dy) {
 }
 
 ;
+/* ══ js/data/scenarioScene.js ══ */
+// data/scenarioScene.js — build the *view* scene from the loaded World.
+//
+// The renderer used to always paint STATIC_SCENE (Northlight Studio: sofa,
+// 4 desk pods, lounge, kitchen…). That is only correct for the bundled
+// office scenario. Any other scenario (e.g. scenarios/office-anton.json, a
+// 20×20 grid with walls/door/desks) must drive the visuals instead:
+//
+//   world.scene.objects → floor / walls / door / furniture assets
+//
+// Convention note: engine worlds use top-left x/y + w/h rects in scene
+// units (see src/engine/geometry.ts). The canvas renderer paints in
+// 1040×730 view units with x/y as the footprint CENTER, so this module maps
+// one to the other with the same stretch mapper liveState.js uses for
+// actors (makeMapper), keeping furniture and characters aligned.
+//
+// Selection rule (see sim/presentation.js for the actor-side equivalent):
+//   • presentation?.scene?.staticScene === "office_floor3" (or the world id
+//     is "office_first_day") → return STATIC_SCENE verbatim (pretty office).
+//   • otherwise → derive a scene from world.scene.objects. Recognised
+//     furniture gets a pretty asset renderer (desk, coffee machine, …);
+//     anything unrecognised falls through to the renderer's generic labelled
+//     box (sceneRenderer skips only ids it knows as assets).
+
+
+const VIEW_W = 1040;
+const VIEW_H = 730;
+
+/** True when the world is the bundled pretty office (keep STATIC_SCENE). */
+function isStaticOfficeScene(world, presentation) {
+  if (!world) return false;
+  if (presentation?.scene?.staticScene === "office_floor3") return true;
+  return world.id === "office_first_day";
+}
+
+/**
+ * Build a STATIC_SCENE-shaped view scene for any world.
+ * @param {object} world engine World ({ id, title, scene: { width, height, objects } })
+ * @param {object|null} presentation scenario presentation block (or null)
+ * @returns {object} view scene (STATIC_SCENE for the bundled office)
+ */
+function buildViewScene(world, presentation) {
+  if (isStaticOfficeScene(world, presentation)) return STATIC_SCENE;
+
+  const sceneW = Math.max(1, world?.scene?.width || 20);
+  const sceneH = Math.max(1, world?.scene?.height || 20);
+  const mapper = makeMapper(sceneW, sceneH, VIEW_W, VIEW_H);
+  const toVX = (x) => x * mapper.kx;
+  const toVY = (y) => y * mapper.ky;
+
+  const objects = Array.isArray(world?.scene?.objects) ? world.scene.objects : [];
+
+  // Floor covers nearly the whole view so stretched small-grid scenes always
+  // land on planks (actors map with the same mapper in liveState.js).
+  const floor = { x: 40, y: 90, w: 960, h: 570, plank: 56, base: "#efe3cf", tone: "#e6d8bf" };
+  // No corridor strip for generic rooms; kept zero-sized because
+  // paintBackground expects the key to exist.
+  const corridor = { x: 0, y: VIEW_H, w: 0, h: 0, color: "#1b2438" };
+
+  const walls = [];
+  const windows = [];
+  const wallDecor = [];
+  const floorDecals = [];
+  const lightPatches = [];
+  let door = null;
+  const assets = [];
+
+  for (const o of objects) {
+    const kind = classifyObject(o);
+    const vx = toVX(o.x || 0);
+    const vy = toVY(o.y || 0);
+    const vw = Math.max(8, (o.w || 1) * mapper.kx);
+    const vh = Math.max(8, (o.h || 1) * mapper.ky);
+    const cx = toVX((o.x || 0) + (o.w || 0) / 2);
+    const cy = toVY((o.y || 0) + (o.h || 0) / 2);
+
+    if (kind === "wall") {
+      const front = vy + vh >= 640;
+      walls.push({
+        id: o.id,
+        x: vx,
+        y: vy,
+        w: vw,
+        h: vh,
+        height: front ? 16 : 70,
+        face: front ? "#c4cde0" : "#dfe5f2",
+        top: front ? "#e6ebf6" : "#f4f7fd",
+        layer: front ? "front" : "back",
+      });
+    } else if (kind === "window") {
+      // North-wall windows paint on the wall face (like STATIC_SCENE:
+      // wall top ≈ y40, floor starts at y90) so they read as top-view
+      // glazing; the scenario x/width drives the horizontal placement.
+      const win = {
+        id: o.id,
+        wall: "wall_north",
+        x: vx + 2,
+        y: 48,
+        w: Math.max(60, vw - 4),
+        h: 42,
+        view: "city",
+      };
+      windows.push(win);
+      lightPatches.push({ x: win.x, w: win.w });
+    } else if (kind === "door") {
+      door = {
+        id: o.id,
+        x: vx,
+        y: vy,
+        w: Math.max(40, vw),
+        h: Math.max(14, vh),
+        frame: "#8f6b45",
+        label: String(o.name || "DOOR").toUpperCase().slice(0, 18),
+      };
+    } else {
+      const asset = assetForObject(o, cx, cy, vw, vh);
+      if (asset) assets.push(asset);
+      // Unrecognised objects get no asset entry: sceneRenderer draws them
+      // as labelled generic boxes from liveState's mapped `objects` list.
+    }
+  }
+
+  // Lounge rug under the first sofa so the corner reads as a zone.
+  const sofaAsset = assets.find((a) => a.asset === "sofa");
+  if (sofaAsset) {
+    floorDecals.push({
+      id: "rugLounge", asset: "rug",
+      x: sofaAsset.x + 40, y: sofaAsset.y,
+      w: 290, h: 215, color: "#4f7cff", trim: "#9b6cf5",
+    });
+  }
+
+  return {
+    meta: {
+      name: world?.title || "Scenario room",
+      style: "gem-flat 2.5D",
+      projection: "plan + vertical extrusion",
+      world: { w: VIEW_W, h: VIEW_H },
+    },
+    floor,
+    corridor,
+    walls,
+    windows,
+    door,
+    wallDecor,
+    floorDecals,
+    lightPatches,
+    assets,
+  };
+}
+
+/** wall / window / door / furniture — matched on id + name + description. */
+function classifyObject(o) {
+  const hay = `${o.id || ""} ${o.name || ""}`.toLowerCase();
+  if (/window|glazing/.test(hay)) return "window";
+  if (/(^|[^a-z])walls?([^a-z]|$)|(^|[^a-z])wall([^a-z]|$)/.test(hay)) return "wall";
+  if (/door|entrance|gate|exit/.test(hay)) return "door";
+  return "furniture";
+}
+
+/**
+ * Pretty asset descriptor for a furniture object (view units, CENTER x/y),
+ * or null when no asset renderer fits (generic fallback box takes over).
+ */
+function assetForObject(o, cx, cy, vw, vh) {
+  // Match on id + name only: descriptions mention contents ("a desk with a
+  // laptop", "a mug on the lounge table") and would misclassify furniture.
+  const hay = `${o.id || ""} ${o.name || ""}`.toLowerCase();
+  const base = { id: o.id };
+  const palette = ["#4f7cff", "#2ec4a6", "#9b6cf5", "#ffb648", "#ff5d7a"];
+  const pick = palette[hashId(o.id) % palette.length];
+  if (/round table|lounge table|coffee table/.test(hay)) {
+    const r = Math.max(40, Math.min(vw, vh) / 2);
+    return { ...base, asset: "roundTable", x: cx, y: cy, r, h: 42, t: 9, color: "#f7f0e4", edge: "#c9b694" };
+  }
+  if (/laptop|notebook|macbook/.test(hay)) {
+    return { ...base, asset: "laptop", x: cx, y: cy, z: 44, sort: cy + 10 };
+  }
+  if (/\bmugs?\b|\bcups?\b|glass|bottle/.test(hay)) {
+    return { ...base, asset: "cup", x: cx, y: cy, z: 44, color: pick, sort: cy + 11 };
+  }
+  if (/papers?|documents?|notes?|books?|files?|folder/.test(hay)) {
+    return { ...base, asset: "papers", x: cx, y: cy, z: 44, sort: cy + 12 };
+  }
+  if (/lamp/.test(hay)) {
+    return { ...base, asset: "lamp", x: cx, y: cy, z: 44, sort: cy + 13 };
+  }
+  if (/chair|stool|seat|bench/.test(hay)) {
+    return { ...base, asset: "chair", x: cx, y: cy, dir: "down", color: pick };
+  }
+  if (/desk|table|workstation|cubicle/.test(hay)) {
+    return {
+      ...base, asset: "desk", x: cx, y: cy,
+      w: Math.max(70, vw), d: Math.max(34, vh), h: 44, t: 10,
+      color: "#f4ece0", edge: "#c9b694",
+    };
+  }
+  if (/sofa|couch|lounge|settee/.test(hay)) {
+    return {
+      ...base, asset: "sofa", x: cx, y: cy,
+      w: Math.max(50, vw), d: Math.max(60, vh), dir: "right", color: "#9b6cf5",
+    };
+  }
+  if (/coffee|espresso/.test(hay)) {
+    return { ...base, asset: "coffeeMachine", x: cx, y: cy };
+  }
+  if (/counter|kitchen|kettle|sink/.test(hay) || /cupboard/.test(hay)) {
+    return {
+      ...base, asset: "counter", x: cx, y: cy,
+      w: Math.max(80, vw), d: Math.max(30, vh), h: 58, color: "#eaeef7", top: "#2b3550",
+    };
+  }
+  if (/cooler|water/.test(hay)) {
+    return {
+      ...base, asset: "waterCooler", x: cx, y: cy,
+      w: Math.max(36, vw), d: Math.max(30, vh), h: 48,
+    };
+  }
+  if (/cabinet|shelf|storage|wardrobe|locker|drawer/.test(hay)) {
+    return {
+      ...base, asset: "cabinet", x: cx, y: cy,
+      w: Math.max(70, vw), d: Math.max(30, vh), h: 68, color: "#5b6b8c",
+    };
+  }
+  if (/printer|copier|scanner/.test(hay)) {
+    return {
+      ...base, asset: "printer", x: cx, y: cy,
+      w: Math.max(50, vw), d: Math.max(30, vh), h: 46, color: "#dfe5f0",
+    };
+  }
+  if (/crate|box|parcel/.test(hay)) {
+    return { ...base, asset: "crates", x: cx, y: cy };
+  }
+  if (/plant|fern|flower|pot/.test(hay)) {
+    return { ...base, asset: "plant", x: cx, y: cy, s: 1.0, pot: "#2ec4a6" };
+  }
+  if (/whiteboard|board|flipchart/.test(hay)) {
+    // Wall-mounted: no floor asset fits; generic box labels it instead.
+    return null;
+  }
+  // Anything unknown → generic box.
+  return null;
+}
+
+function hashId(id) {
+  const s = String(id || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+;
 /* ══ js/core/dom.js ══ */
 // core/dom.js — tiny DOM helpers shared by the UI modules.
 
@@ -3454,6 +3763,7 @@ function autogrow(textarea, maxH = 140) {
 // The app never mutates World objects; adapters own simulation truth.
 
 
+
 class App {
   /**
    * @param {object} parts
@@ -3482,6 +3792,10 @@ class App {
     /* ── load the initial world ─────────────────────────────────── */
     const { world, presentation } = await this.adapter.load();
     this.world = world;
+    // The painted room is driven by the scenario's own scene objects
+    // (walls/door/desks/…); only the bundled office keeps its pretty set.
+    this.staticScene = buildViewScene(world, presentation);
+    if (typeof this.renderer.setScene === "function") this.renderer.setScene(this.staticScene);
     this.live.init(world, presentation);
 
     this._colorOf = (actorId) => this.live.visualActor(actorId)?.color || "#8fa0c0";
@@ -3492,7 +3806,7 @@ class App {
     this.topbar.setTick(world.tick);
     this.topbar.setCast(world.actors.length);
     this.topbar.setEngine(this.adapter.label, { mock: this.adapter.kind !== "http" });
-    this.hud.setSceneName(presentation?.scene?.name || world.title);
+    this.hud.setSceneName(presentation?.scene?.name || this.staticScene?.meta?.name || world.title);
 
     const me = world.actors.find((a) => a.id === world.userActorId);
     this.composer.setActorName(me?.name);
