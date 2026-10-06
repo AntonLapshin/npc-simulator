@@ -121,6 +121,28 @@ export function buildViewScene(world, presentation) {
     }
   }
 
+  // North-row furniture (cabinet/counter + coffee/cooler) and the NE corner
+  // plant map almost into the wall band (view y < floor top) where tall
+  // extrusions clip out of the viewport. Nudge them down onto the floor so
+  // the whole block fits and the plant sits on the floor, not in the air.
+  clampNorthRowToFloor(assets);
+
+  // Chairs face the nearest desk / round table (sitter faces the surface).
+  // Default was always "down", which left south-side chairs with their backs
+  // to the desks and lounge chairs facing away from the table.
+  orientChairsToTables(assets);
+
+  // Laptops face the nearest chair (screen toward the sitter): chairs north
+  // of the desk → screen faces north (N, 180° variant), and vice versa.
+  orientLaptopsToChairs(assets);
+  for (const a of assets) delete a._explicitDir;
+
+  // Small props fully inside a desk / table / cabinet / counter footprint
+  // rest ON that surface: lift by the parent height and sort just above it.
+  // This keeps laptops/cups/papers visible on top instead of hidden behind
+  // the slab, and lets a coffee machine sit on a cabinet/counter.
+  stackPropsOnFurniture(assets);
+
   // Lounge rug under the first sofa so the corner reads as a zone.
   const sofaAsset = assets.find((a) => a.asset === "sofa");
   if (sofaAsset) {
@@ -175,19 +197,26 @@ function assetForObject(o, cx, cy, vw, vh) {
     return { ...base, asset: "roundTable", x: cx, y: cy, r, h: 42, t: 9, color: "#f7f0e4", edge: "#c9b694" };
   }
   if (/laptop|notebook|macbook/.test(hay)) {
-    return { ...base, asset: "laptop", x: cx, y: cy, z: 44, sort: cy + 10 };
+    // Props sit ON desk tops (h=44): lift by z and paint after the desk slab.
+    // +55 guarantees the prop sorts above its desk even from the north edge
+    // (desk sort = cy+d/2 ≈ cy+36, north-edge prop cy is ~18px smaller).
+    // dir (N/S) = the way the screen faces; oriented to the nearest chair
+    // below when the world object carries no explicit direction.
+    const explicitLap = o.dir ?? o.direction;
+    return { ...base, asset: "laptop", x: cx, y: cy, z: 44, sort: cy + 55, dir: normCompass(explicitLap, "S"), _explicitDir: Boolean(explicitLap) };
   }
   if (/\bmugs?\b|\bcups?\b|glass|bottle/.test(hay)) {
-    return { ...base, asset: "cup", x: cx, y: cy, z: 44, color: pick, sort: cy + 11 };
+    return { ...base, asset: "cup", x: cx, y: cy, z: 44, color: pick, sort: cy + 56 };
   }
   if (/papers?|documents?|notes?|books?|files?|folder/.test(hay)) {
-    return { ...base, asset: "papers", x: cx, y: cy, z: 44, sort: cy + 12 };
+    return { ...base, asset: "papers", x: cx, y: cy, z: 44, sort: cy + 57 };
   }
   if (/lamp/.test(hay)) {
-    return { ...base, asset: "lamp", x: cx, y: cy, z: 44, sort: cy + 13 };
+    return { ...base, asset: "lamp", x: cx, y: cy, z: 44, sort: cy + 58 };
   }
   if (/chair|stool|seat|bench/.test(hay)) {
-    return { ...base, asset: "chair", x: cx, y: cy, dir: "down", color: pick };
+    const explicitCh = o.dir ?? o.direction;
+    return { ...base, asset: "chair", x: cx, y: cy, dir: normCompass(explicitCh, "S"), _explicitDir: Boolean(explicitCh), color: pick };
   }
   if (/desk|table|workstation|cubicle/.test(hay)) {
     return {
@@ -241,6 +270,131 @@ function assetForObject(o, cx, cy, vw, vh) {
   }
   // Anything unknown → generic box.
   return null;
+}
+
+function orientChairsToTables(assets) {
+  const tables = assets.filter((a) => a.asset === "desk" || a.asset === "roundTable");
+  if (!tables.length) return;
+  for (const ch of assets) {
+    if (ch.asset !== "chair") continue;
+    if (ch._explicitDir) continue;
+    let best = null;
+    let bestD = Infinity;
+    for (const t of tables) {
+      const dx = ch.x - t.x;
+      const dy = ch.y - t.y;
+      const d = Math.hypot(dx, dy);
+      if (d < bestD) {
+        bestD = d;
+        best = t;
+      }
+    }
+    // Only snap chairs plausibly pulled up to a table (~4 world units).
+    if (!best || bestD > 230) continue;
+    const dx = ch.x - best.x;
+    const dy = ch.y - best.y;
+    if (Math.abs(dx) > Math.abs(dy)) ch.dir = dx > 0 ? "W" : "E";
+    else ch.dir = dy > 0 ? "N" : "S";
+  }
+}
+
+function orientLaptopsToChairs(assets) {
+  const chairs = assets.filter((a) => a.asset === "chair");
+  if (!chairs.length) return;
+  for (const lap of assets) {
+    if (lap.asset !== "laptop") continue;
+    if (lap._explicitDir) continue;
+    let best = null;
+    let bestD = Infinity;
+    for (const ch of chairs) {
+      const d = Math.hypot(lap.x - ch.x, lap.y - ch.y);
+      if (d < bestD) {
+        bestD = d;
+        best = ch;
+      }
+    }
+    if (!best || bestD > 230) continue;
+    // Screen faces the sitter: chair north of laptop → face north (N).
+    lap.dir = best.y < lap.y ? "N" : "S";
+  }
+}
+
+/* Keep tall north-wall furniture inside the viewport and corner plants on
+ * the floor: anything in the wall band (view y < FLOOR_TOP) is nudged down
+ * onto the floor so extrusions (bottles, leaves, machine tops) fit. */
+function clampNorthRowToFloor(assets) {
+  const FLOOR_TOP = 90;
+  const MIN_Y = 152;
+  for (const a of assets) {
+    if (a.y >= MIN_Y) continue;
+    if (
+      a.asset === "cabinet" || a.asset === "counter" ||
+      a.asset === "waterCooler" || a.asset === "coffeeMachine" ||
+      a.asset === "kettle" || a.asset === "cupRow" ||
+      a.asset === "plant" || a.asset === "crates"
+    ) {
+      a.y = Math.max(a.y, MIN_Y);
+      // Keep an explicit floor minimum even for assets already below the
+      // wall band but still floating above the planks (e.g. NE corner
+      // plant mapped to y≈55 while the floor starts at y=90).
+      if (a.y < FLOOR_TOP + 40) a.y = FLOOR_TOP + 40;
+    }
+  }
+}
+
+/** Compass normalizer for world-object directions (N/S/E/W + legacy names). */
+function normCompass(dir, fallback) {
+  const s = String(dir || fallback || "S").toLowerCase();
+  if (s === "n" || s === "north" || s === "up") return "N";
+  if (s === "s" || s === "south" || s === "down") return "S";
+  if (s === "e" || s === "east" || s === "right") return "E";
+  if (s === "w" || s === "west" || s === "left") return "W";
+  return fallback || "S";
+}
+
+/** Painters-order key mirroring render/assets.js assetSortY (sans chair tweak). */
+function furnitureSortY(a) {
+  if (typeof a.sort === "number") return a.sort;
+  if (a.asset === "roundTable") return a.y + (a.r || 60) * 0.5 * 0.9;
+  return a.y + (a.d || 0) / 2;
+}
+
+function stackPropsOnFurniture(assets) {
+  const surfaces = assets.filter((a) =>
+    a.asset === "desk" || a.asset === "roundTable" || a.asset === "cabinet" || a.asset === "counter",
+  );
+  if (!surfaces.length) return;
+  const props = assets.filter((a) =>
+    a.asset === "laptop" || a.asset === "cup" || a.asset === "papers" ||
+    a.asset === "lamp" || a.asset === "coffeeMachine" || a.asset === "kettle" || a.asset === "cupRow",
+  );
+  for (const p of props) {
+    let best = null;
+    for (const s of surfaces) {
+      let inside = false;
+      if (s.asset === "roundTable") {
+        const r = s.r || 60;
+        const dx = (p.x - s.x) / r;
+        const dy = (p.y - s.y) / (r * 0.5);
+        inside = dx * dx + dy * dy <= 1.35;
+      } else {
+        const hw = (s.w || 80) / 2 + 8;
+        const hd = (s.d || 40) / 2 + 8;
+        inside = Math.abs(p.x - s.x) <= hw && Math.abs(p.y - s.y) <= hd;
+      }
+      if (inside) {
+        // Prefer the smallest containing surface (desk over room-size slab).
+        if (!best || (best.w || 9999) * (best.d || 9999) > (s.w || 9999) * (s.d || 9999)) best = s;
+      }
+    }
+    if (!best) continue;
+    p.z = best.h || 44;
+    p.sort = furnitureSortY(best) + 5;
+    // Keep laptop/cup/papers/lamp stacking distinct when several share a desk.
+    if (p.asset === "cup") p.sort += 1;
+    else if (p.asset === "papers") p.sort += 2;
+    else if (p.asset === "lamp") p.sort += 3;
+  }
 }
 
 function hashId(id) {

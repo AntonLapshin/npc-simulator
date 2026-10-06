@@ -165,20 +165,15 @@ export function drawWindow(c, win) {
 
 export function drawDoor(c, d) {
   // Top-view: doors set into vertical (west/east) walls are seen edge-on —
-  // paint a simple vertical slab in the wall line, no camera-facing frame.
-  if (d.h > d.w * 1.5) {
-    c.fillStyle = "#0a0f1c";
-    c.fillRect(d.x, d.y, d.w, d.h);
+  // paint a simple vertical rectangle in the wall line.
+  // Any opening taller than it is wide is a side-wall door (a 1x2 west-wall
+  // door maps to ~52x73 view units, ratio ~1.4, so the threshold must be 1.0).
+  if (d.h > d.w) {
     c.fillStyle = d.frame || "#8f6b45";
-    c.fillRect(d.x + 2, d.y + 1, Math.max(4, d.w - 4), Math.max(2, d.h - 2));
-    c.fillStyle = "rgba(255,255,255,.28)";
-    c.fillRect(d.x + 2, d.y + 1, Math.max(2, d.w - 4), 2);
+    c.fillRect(d.x, d.y, d.w, d.h);
     c.strokeStyle = "rgba(40,50,90,.35)";
     c.lineWidth = 1.5;
-    c.strokeRect(d.x + 1, d.y + 0.5, d.w - 1, d.h - 1);
-    // centre leaf seam to read as a door, still flat top-view
-    c.fillStyle = "rgba(20,26,44,.5)";
-    c.fillRect(d.x + d.w / 2 - 0.75, d.y + 3, 1.5, Math.max(1, d.h - 6));
+    c.strokeRect(d.x + 0.5, d.y + 0.5, d.w - 1, d.h - 1);
     return;
   }
   c.fillStyle = "#0a0f1c";

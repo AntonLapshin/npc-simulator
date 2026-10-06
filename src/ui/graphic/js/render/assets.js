@@ -94,15 +94,27 @@ export function drawRoundTable(c, a) {
   c.stroke();
 }
 
-/* CHAIR — dir = the way the sitter faces; backrest on the opposite side */
+/* Normalize a facing direction to N/S/E/W.
+ * Accepts compass ("N","S","E","W"), long ("north","south",…),
+ * and legacy plan-view ("up","down","left","right"). Defaults to `fallback`. */
+function normDir(dir, fallback) {
+  const s = String(dir || fallback || "S").toLowerCase();
+  if (s === "n" || s === "north" || s === "up") return "N";
+  if (s === "s" || s === "south" || s === "down") return "S";
+  if (s === "e" || s === "east" || s === "right") return "E";
+  if (s === "w" || s === "west" || s === "left") return "W";
+  return fallback || "S";
+}
+
+/* CHAIR — dir = the way the sitter faces (N/S/E/W); backrest on the opposite side */
 export function drawChair(c, a) {
-  const x = a.x, y = a.y, dir = a.dir || "down", col = a.color || "#4f7cff";
+  const x = a.x, y = a.y, dir = normDir(a.dir, "S"), col = a.color || "#4f7cff";
   const sw = a.w || 34, sd = a.d || 32, sh = a.h || 26, st = 8, bh = a.bh || 60;
   ellShadow(c, x, y + sd * 0.3, sw * 0.68, sd * 0.48, 0.24);
   let bx = x, by = y, bw = sw + 3, bd = 11;
-  if (dir === "down") by = y - sd / 2 + 5;
-  else if (dir === "up") by = y + sd / 2 - 5;
-  else if (dir === "left") {
+  if (dir === "S") by = y - sd / 2 + 5;
+  else if (dir === "N") by = y + sd / 2 - 5;
+  else if (dir === "W") {
     bx = x + sw / 2 - 5;
     bw = 11;
     bd = sd - 3;
@@ -165,9 +177,26 @@ export function drawStool(c, a) {
   gemBox(c, x, y, sw, sd, sh, st, col, shade(col, -0.36), 7);
 }
 
-/* LAPTOP — base flat on the surface, lid hinged at the NORTH edge */
+/* LAPTOP — dir N/S = the way the screen faces.
+ * S (default): lid hinged at the NORTH edge, screen faces south.
+ * N: 180° rotated variant, lid hinged at the SOUTH edge, screen faces north. */
 export function drawLaptop(c, a) {
   const x = a.x, Y = a.y - (a.z || 0);
+  const dir = normDir(a.dir, "S");
+  if (dir === "N") {
+    // 180° rotated version so the screen faces the top of the viewport.
+    c.save();
+    c.translate(x, Y - 16);
+    c.rotate(Math.PI);
+    c.translate(-x, -(Y - 16));
+    drawLaptopBody(c, x, Y);
+    c.restore();
+    return;
+  }
+  drawLaptopBody(c, x, Y);
+}
+
+function drawLaptopBody(c, x, Y) {
   c.fillStyle = "rgba(24,28,54,.20)";
   rrPath(c, x - 19, Y - 5, 38, 14, 3);
   c.fill();
@@ -454,8 +483,6 @@ export function drawCabinet(c, a) {
     rrPath(c, dx + dw / 2 - 11, fy0 + 15, 22, 3.4, 1.7);
     c.fill();
   }
-  solidBox(c, x - w / 4, y - 6, 52, d - 16, 20, "#e0b483", "#b98d5f", 3);
-  solidBox(c, x + w / 4 - 6, y - 2, 46, d - 18, 15, "#d9a06a", "#b07c4c", 3);
 }
 
 export function drawPrinter(c, a) {
@@ -635,7 +662,8 @@ export function assetSortY(a) {
   if (typeof a.sort === "number") return a.sort;
   if (a.asset === "chair") {
     const d = a.d || 32;
-    return a.dir === "down" ? a.y - d / 2 : a.dir === "up" ? a.y + d / 2 : a.y;
+    const dir = normDir(a.dir, "S");
+    return dir === "S" ? a.y - d / 2 : dir === "N" ? a.y + d / 2 : a.y;
   }
   if (a.asset === "roundTable") return a.y + (a.r || 60) * SQ * 0.9;
   if (a.asset === "plant") return a.y + 8;
