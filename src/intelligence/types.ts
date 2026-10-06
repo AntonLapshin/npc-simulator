@@ -1,5 +1,6 @@
 import type {
   Action,
+  ActionSemantics,
   ConsequenceResult,
   ProposalResult,
   SelectionResult,
@@ -16,4 +17,14 @@ export interface SelectionEngine {
 
 export interface ConsequenceEngine {
   resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult>;
+}
+
+/**
+ * Decision-AI judge for free-form action meaning (refactor plan §A).
+ * Answers "what did this English sentence *mean*?" — movement intent,
+ * addressee resolution, speech intent — so the validator only enforces
+ * physics (geometry, schema, turn structure) against the answer.
+ */
+export interface SemanticJudge {
+  classify(world: World, action: Action): Promise<ActionSemantics>;
 }

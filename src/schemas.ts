@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ActorPatch, ConsequenceResult, ObjectPatch } from "./types.js";
+import type { ActionSemantics, ActorPatch, ConsequenceEffects, ConsequenceResult, ObjectPatch } from "./types.js";
 
 const nonEmptyString = z.string().min(1, "must be a non-empty string");
 
@@ -182,6 +182,19 @@ function normalizeConsequenceResult(value: unknown): unknown {
   v["actorPatches"] = actorPatches;
   v["objectPatches"] = objectPatches;
   if (typeof v["reasoning"] !== "string") v["reasoning"] = "";
+  // Lenient: small models sometimes stringify the effects object.
+  if (typeof v["effects"] === "string") {
+    const trimmed = (v["effects"] as string).trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        v["effects"] = JSON.parse(trimmed);
+      } catch {
+        delete v["effects"];
+      }
+    } else {
+      delete v["effects"];
+    }
+  }
   return v;
 }
 
@@ -227,8 +240,30 @@ export const consequenceResultSchema: z.ZodType<ConsequenceResult> = z.preproces
     actorPatches: z.array(lenientActorPatchSchema),
     objectPatches: z.array(lenientObjectPatchSchema),
     reasoning: z.string().default(""),
+    effects: z
+      .object({
+        moved: z.boolean(),
+        spoke: z.boolean(),
+        quotedSpeech: z.array(z.string()).optional(),
+        destinationActorId: z.string().min(1).optional(),
+      })
+      .optional(),
   }),
 ) as z.ZodType<ConsequenceResult>;
+
+export const actionSemanticsSchema: z.ZodType<ActionSemantics> = z.object({
+  moves: z.boolean(),
+  destinationActorId: z.string().min(1).optional(),
+  speaks: z.boolean(),
+  quotedSpeech: z.array(z.string()),
+}) as z.ZodType<ActionSemantics>;
+
+export const consequenceEffectsSchema: z.ZodType<ConsequenceEffects> = z.object({
+  moved: z.boolean(),
+  spoke: z.boolean(),
+  quotedSpeech: z.array(z.string()).optional(),
+  destinationActorId: z.string().min(1).optional(),
+}) as z.ZodType<ConsequenceEffects>;
 
 export const engineConfigSchema = z
   .object({

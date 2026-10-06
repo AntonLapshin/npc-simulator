@@ -11,7 +11,7 @@ import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { formatRepairPrompt, parseJsonObject } from "./json.js";
 
-export type LlmModule = "proposal" | "selection" | "consequence";
+export type LlmModule = "proposal" | "selection" | "consequence" | "semantic";
 
 export type CompleteJsonOptions<T> = {
   logger: Logger;

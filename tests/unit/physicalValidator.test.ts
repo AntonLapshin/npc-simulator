@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeMovementIntent, validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
 import { makeTinyWorld } from "../helpers.js";
-import type { ConsequenceResult } from "../../src/types.js";
+import type { ActionSemantics, ConsequenceResult } from "../../src/types.js";
 
 function baseResult(): ConsequenceResult {
   return { narrative: "Something happens.", actorPatches: [], objectPatches: [], reasoning: "r" };
+}
+
+function stillSemantics(): ActionSemantics {
+  return { moves: false, speaks: false, quotedSpeech: [] };
 }
 
 describe("physicalValidator", () => {
@@ -99,9 +104,10 @@ describe("physicalValidator", () => {
     expect(v.valid).toBe(false);
   });
 
-  it("rejects invented dialogue not present in the action", () => {
+  it("rejects invented dialogue not present in the judged utterances", () => {
     const world = makeTinyWorld();
     const action = { actorId: "u", text: '"Greeting all!"' };
+    const semantics: ActionSemantics = { moves: false, speaks: true, quotedSpeech: ["Greeting all!"] };
     const invented: ConsequenceResult = {
       narrative:
         "Anton stands up straight and greets all, his nervous expression softening slightly as he says, 'Hello, everyone! I'm Anton, and I'll be working here from now on.'",
@@ -109,91 +115,283 @@ describe("physicalValidator", () => {
       objectPatches: [],
       reasoning: "r",
     };
-    const v = validateConsequence(world, invented, action);
+    const v = validateConsequence(world, invented, action, semantics);
     expect(v.valid).toBe(false);
     expect(v.errors.join(" ")).toMatch(/invent/);
   });
 
-  it("accepts narratives that preserve the action's exact words", () => {
+  it("accepts narratives that preserve the judged utterances", () => {
     const world = makeTinyWorld();
     const action = { actorId: "u", text: '"Greeting all!"' };
+    const semantics: ActionSemantics = { moves: false, speaks: true, quotedSpeech: ["Greeting all!"] };
     const faithful: ConsequenceResult = {
       narrative: 'U straightens up and says "Greeting all!" to the room.',
       actorPatches: [],
       objectPatches: [],
       reasoning: "r",
     };
-    expect(validateConsequence(world, faithful, action)).toEqual({ valid: true, errors: [] });
+    expect(validateConsequence(world, faithful, action, semantics)).toEqual({ valid: true, errors: [] });
   });
 
-  it("does not treat in-place gestures as movement (log regression)", () => {
-    expect(
-      looksLikeMovementIntent(
-        "Shake his head and let out a frustrated grunt, before reaching for his coffee mug and taking a long swig to collect himself, his gaze fixed intensely on his computer screen.",
-      ),
-    ).toBe(false);
-    expect(
-      looksLikeMovementIntent(
-        "Turn to look at Anton as he enters, smiling in his direction and raising a hand in a casual wave, before focusing back on her task with a slight rustle of papers.",
-      ),
-    ).toBe(false);
-    expect(looksLikeMovementIntent("Shake his head")).toBe(false);
-    expect(looksLikeMovementIntent("Nod her head and wave")).toBe(false);
+  it("allows short greeting renders when the judge reports speech without quotes", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Say hello to the room." };
+    const semantics: ActionSemantics = { moves: false, speaks: true, quotedSpeech: [] };
+    const rendered: ConsequenceResult = {
+      narrative: "U looks up and says 'Hi!' to the room.",
+      actorPatches: [],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, rendered, action, semantics)).toEqual({ valid: true, errors: [] });
   });
 
-  it("still detects real locomotion", () => {
-    expect(looksLikeMovementIntent("Come closer to Tanya")).toBe(true);
-    expect(looksLikeMovementIntent("Walk to the coffee machine")).toBe(true);
-    expect(looksLikeMovementIntent("Head to the door")).toBe(true);
-    expect(looksLikeMovementIntent("Return to the door")).toBe(true);
-    expect(looksLikeMovementIntent("Return to her desk")).toBe(true);
+  it("requires x/y when semantics report movement, never otherwise", () => {
+    const world = makeTinyWorld();
+    const moving: ActionSemantics = { moves: true, speaks: false, quotedSpeech: [] };
+
+    // No position change at all.
+    const missing: ConsequenceResult = {
+      narrative: "U walks across the room.",
+      actorPatches: [{ actorId: "u", thoughts: "Going." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const vMissing = validateConsequence(world, missing, { actorId: "u", text: "Walk." }, moving);
+    expect(vMissing.valid).toBe(false);
+    expect(vMissing.errors.join(" ")).toMatch(/no position change/);
+
+    // Unchanged position.
+    const same: ConsequenceResult = {
+      narrative: "U walks across the room.",
+      actorPatches: [{ actorId: "u", x: 1, y: 1 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, same, { actorId: "u", text: "Walk." }, moving).valid).toBe(false);
+
+    // Real position change passes.
+    const moved: ConsequenceResult = {
+      narrative: "U walks across the room.",
+      actorPatches: [{ actorId: "u", x: 2, y: 1 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, moved, { actorId: "u", text: "Walk." }, moving)).toEqual({
+      valid: true,
+      errors: [],
+    });
   });
 
-  it("does not treat resuming a task as movement (office-anton log regression)", () => {
-    // Tick 1: "then return to typing" is resuming work, not locomotion.
+  it("enforces strictly-closer via resolved id (pronouns need no substring match)", () => {
+    const world = makeTinyWorld();
+    // "Walk toward him" names no one by substring — the judge resolves the id.
+    const towardN: ActionSemantics = {
+      moves: true,
+      destinationActorId: "n",
+      speaks: false,
+      quotedSpeech: [],
+    };
+    const action = { actorId: "u", text: "Walk toward him." };
+
+    const closer: ConsequenceResult = {
+      narrative: "U walks toward N.",
+      actorPatches: [{ actorId: "u", x: 2, y: 2 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, closer, action, towardN)).toEqual({ valid: true, errors: [] });
+
+    const away: ConsequenceResult = {
+      narrative: "U walks toward N.",
+      actorPatches: [{ actorId: "u", x: 0, y: 0 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const vAway = validateConsequence(world, away, action, towardN);
+    expect(vAway.valid).toBe(false);
+    expect(vAway.errors.join(" ")).toMatch(/not closer/);
+  });
+
+  it("skips the closer-to check for unknown destination ids", () => {
+    const world = makeTinyWorld();
+    const semantics: ActionSemantics = {
+      moves: true,
+      destinationActorId: "ghost",
+      speaks: false,
+      quotedSpeech: [],
+    };
+    const result: ConsequenceResult = {
+      narrative: "U walks somewhere.",
+      actorPatches: [{ actorId: "u", x: 2, y: 1 }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(validateConsequence(world, result, { actorId: "u", text: "Walk." }, semantics)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
+  it("derives semantics from self-declared effects when none are injected", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Saunter over to N." };
+
+    const declaredStill: ConsequenceResult = {
+      narrative: "U stays put.",
+      actorPatches: [{ actorId: "u", thoughts: "Idle." }],
+      objectPatches: [],
+      reasoning: "r",
+      effects: { moved: false, spoke: false },
+    };
+    expect(validateConsequence(world, declaredStill, action)).toEqual({ valid: true, errors: [] });
+
+    const declaredMoved: ConsequenceResult = {
+      narrative: "U saunters over.",
+      actorPatches: [{ actorId: "u", thoughts: "Strolling." }],
+      objectPatches: [],
+      reasoning: "r",
+      effects: { moved: true, spoke: false },
+    };
+    const v = validateConsequence(world, declaredMoved, action);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/no position change/);
+  });
+
+  it("fails open to physics-only without effects or injected semantics", () => {
+    const world = makeTinyWorld();
+    // Movement-sounding prose with no position change: no judge, no
+    // declaration — physics (bounds/reachability) still applies, but no
+    // semantic "must emit x/y" error is raised.
+    const result: ConsequenceResult = {
+      narrative: "U stays put.",
+      actorPatches: [{ actorId: "u", thoughts: "Idle." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
     expect(
-      looksLikeMovementIntent(
-        "3. Call out a friendly 'Hey!' as she sees Anton, then return to typing, an open and welcoming demeanor still present even with full focus on the task at hand.",
-      ),
+      validateConsequence(world, result, { actorId: "u", text: "Walk to the door." }),
+    ).toEqual({ valid: true, errors: [] });
+  });
+
+  it("honors judge paraphrase probes (locomotion and non-locomotion)", () => {
+    const world = makeTinyWorld();
+    // "saunters over" IS locomotion (an LLM judge resolves this; the
+    // validator only enforces the verdict).
+    const saunter: ActionSemantics = { moves: true, speaks: false, quotedSpeech: [] };
+    const saunterResult: ConsequenceResult = {
+      narrative: "U saunters over.",
+      actorPatches: [{ actorId: "u", thoughts: "Strolling." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(
+      validateConsequence(world, saunterResult, { actorId: "u", text: "Saunter over." }, saunter).valid,
     ).toBe(false);
-    // Tick 2: "returning to staring at the monitor" is resuming work.
+
+    // "rolls her chair closer" IS locomotion.
+    const chair: ActionSemantics = { moves: true, speaks: false, quotedSpeech: [] };
     expect(
-      looksLikeMovementIntent(
+      validateConsequence(world, saunterResult, { actorId: "u", text: "Roll her chair closer." }, chair)
+        .valid,
+    ).toBe(false);
+
+    // "go the extra mile" is metaphor — NOT movement.
+    const mile: ActionSemantics = { moves: false, speaks: false, quotedSpeech: [] };
+    expect(
+      validateConsequence(world, saunterResult, { actorId: "u", text: "Go the extra mile." }, mile),
+    ).toEqual({ valid: true, errors: [] });
+  });
+
+  it("accepts task-resuming consequences without x/y (office-anton regression)", () => {
+    const world = makeTinyWorld();
+    const judge = new MockSemanticJudge();
+    const cases: Array<[string, string]> = [
+      [
+        "Call out a friendly 'Hey!' as she sees N, then return to typing.",
+        "U calls out a friendly 'Hey!' then returns to typing.",
+      ],
+      [
         "Sighs, rubs temples, and mutters 'Just a few more minutes...' before returning to staring at the monitor, trying to refocus.",
-      ),
-    ).toBe(false);
-    expect(looksLikeMovementIntent("Return to work")).toBe(false);
-    expect(looksLikeMovementIntent("Go back to typing")).toBe(false);
+        "U mutters 'Just a few more minutes...' before returning to staring at the monitor.",
+      ],
+    ];
+    return (async () => {
+      for (const [text, narrative] of cases) {
+        const action = { actorId: "u", text };
+        const semantics = await judge.classify(world, action);
+        expect(semantics.moves).toBe(false);
+        const result: ConsequenceResult = {
+          narrative,
+          actorPatches: [{ actorId: "u", thoughts: "Focused." }],
+          objectPatches: [],
+          reasoning: "r",
+        };
+        expect(validateConsequence(world, result, action, semantics)).toEqual({
+          valid: true,
+          errors: [],
+        });
+      }
+    })();
   });
 
-  it("accepts task-resuming consequences without x/y position change", () => {
+  it("accepts in-place gestures without x/y (log regression)", () => {
     const world = makeTinyWorld();
-    const action = {
-      actorId: "u",
-      text: "Call out a friendly 'Hey!' as she sees N, then return to typing.",
-    };
-    const result: ConsequenceResult = {
-      narrative: "U calls out a friendly 'Hey!' then returns to typing.",
-      actorPatches: [{ actorId: "u", thoughts: "Focused." }],
+    const judge = new MockSemanticJudge();
+    const cases = [
+      "Shake his head and let out a frustrated grunt, before reaching for his coffee mug and taking a long swig to collect himself, his gaze fixed intensely on his computer screen.",
+      "Turn to look at N as he enters, smiling in his direction and raising a hand in a casual wave, before focusing back on her task with a slight rustle of papers.",
+    ];
+    return (async () => {
+      for (const text of cases) {
+        const action = { actorId: "u", text };
+        const semantics = await judge.classify(world, action);
+        expect(semantics.moves).toBe(false);
+        const result: ConsequenceResult = {
+          narrative: "U gestures in place.",
+          actorPatches: [{ actorId: "u", thoughts: "Focus." }],
+          objectPatches: [],
+          reasoning: "r",
+        };
+        expect(validateConsequence(world, result, action, semantics)).toEqual({
+          valid: true,
+          errors: [],
+        });
+      }
+    })();
+  });
+
+  it("mock judge still detects real locomotion", async () => {
+    const world = makeTinyWorld();
+    // Single-letter ids/names never substring-match (false-positive guard),
+    // so give the target a full name for the destination check.
+    world.actors.find((a) => a.id === "n")!.name = "Nadia";
+    const judge = new MockSemanticJudge();
+    for (const [text, destinationActorId] of [
+      ["Come closer to Nadia", "n"],
+      ["Walk to the coffee machine", undefined],
+      ["Head to the door", undefined],
+      ["Return to the door", undefined],
+    ] as Array<[string, string | undefined]>) {
+      const semantics = await judge.classify(world, { actorId: "u", text });
+      expect(semantics.moves).toBe(true);
+      expect(semantics.destinationActorId).toBe(destinationActorId);
+    }
+  });
+
+  it("murmurs-a-greeting speech is preserved via judged quotes", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Murmur a greeting to the room." };
+    const semantics: ActionSemantics = { moves: false, speaks: true, quotedSpeech: ["hello there"] };
+    const invented: ConsequenceResult = {
+      narrative: "U steps forward and declares 'I am the king of this office!'",
+      actorPatches: [],
       objectPatches: [],
       reasoning: "r",
     };
-    expect(validateConsequence(world, result, action)).toEqual({ valid: true, errors: [] });
-  });
-
-  it("accepts gesture consequences without x/y position change", () => {
-    const world = makeTinyWorld();
-    const action = {
-      actorId: "u",
-      text: "Shake his head and take a long swig of coffee, gazing at the screen.",
-    };
-    const result: ConsequenceResult = {
-      narrative: "U shakes his head and takes a long swig of coffee, gazing at the screen.",
-      actorPatches: [{ actorId: "u", thoughts: "Focus." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    expect(validateConsequence(world, result, action)).toEqual({ valid: true, errors: [] });
+    const v = validateConsequence(world, invented, action, semantics);
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/invent/);
   });
 
   it("names the blocking object when coordinates land inside furniture", () => {
@@ -207,9 +405,28 @@ describe("physicalValidator", () => {
       actorPatches: [{ actorId: "u", x: 2, y: 1 }],
       objectPatches: [],
       reasoning: "r",
+      effects: { moved: true, spoke: false },
     };
     const v = validateConsequence(world, result, { actorId: "u", text: "Walk to the desk" });
     expect(v.valid).toBe(false);
     expect(v.errors.join(" ")).toMatch(/desk/);
+  });
+
+  it("still reports stillness without semantics (fail-open physics check)", () => {
+    const world = makeTinyWorld();
+    const result: ConsequenceResult = {
+      narrative: "U shakes his head and takes a long swig of coffee, gazing at the screen.",
+      actorPatches: [{ actorId: "u", thoughts: "Focus." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    expect(
+      validateConsequence(
+        world,
+        result,
+        { actorId: "u", text: "Shake his head and take a long swig of coffee, gazing at the screen." },
+        stillSemantics(),
+      ),
+    ).toEqual({ valid: true, errors: [] });
   });
 });

@@ -110,6 +110,43 @@ export type ConsequenceResult = {
   actorPatches: ActorPatch[];
   objectPatches: ObjectPatch[];
   reasoning: string;
+  /**
+   * Machine-readable self-declaration by the consequence LLM about what the
+   * action did (see refactor plan §B). The validator checks patches against
+   * this declaration deterministically; the independent SemanticJudge is
+   * only consulted when `effects` is absent (or for dispute spot-checks).
+   * Optional for backward compatibility — missing effects falls back to
+   * the SemanticJudge, then to fail-open physics-only validation.
+   */
+  effects?: ConsequenceEffects;
+};
+
+/** Machine-readable declaration of what an action did (emitted with the narrative). */
+export type ConsequenceEffects = {
+  /** Whole-body locomotion by the acting actor occurred. */
+  moved: boolean;
+  /** The acting actor uttered words / performed explicit speech. */
+  spoke: boolean;
+  /** Canonical uttered segments (ground truth for speech preservation). */
+  quotedSpeech?: string[];
+  /** Resolved movement-target actor id, when the action names one. */
+  destinationActorId?: string;
+};
+
+/**
+ * Meaning of a free-form action sentence, as judged by Decision AI
+ * (refactor plan §A). Produced by the SemanticJudge — never by regex on
+ * the production validation path.
+ */
+export type ActionSemantics = {
+  /** Whole-body locomotion by the acting actor? */
+  moves: boolean;
+  /** Named movement target, resolved to an actor id (via id comparison). */
+  destinationActorId?: string;
+  /** Uttered words / explicit speech intent? */
+  speaks: boolean;
+  /** Canonical uttered segments (ground truth for speech preservation). */
+  quotedSpeech: string[];
 };
 
 export type EngineConfig = {

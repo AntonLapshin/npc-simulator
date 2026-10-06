@@ -34,6 +34,7 @@ export {
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
 export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
 export { LLMSelectionEngine, FALLBACK_SELECTION } from "./llmSelectionEngine.js";
+export { LLMSemanticJudge, buildSemanticJudgePrompt } from "./llmSemanticJudge.js";
 export { LLM_SYSTEM_PROMPT } from "./prompts.js";
 export { extractJsonPayload, parseJsonObject, formatRepairPrompt } from "./json.js";
 

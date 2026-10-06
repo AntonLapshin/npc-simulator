@@ -42,6 +42,21 @@ function flat(s: unknown, max: number): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
+/**
+ * Normalized action comparison for the verbatim/new-wording display hint.
+ * Strips echoed candidate numbering ("3. ..." — presentation, not action),
+ * collapses whitespace, and ignores case, so trivial rewording and prefix
+ * stripping no longer flip the verdict the way `===` did.
+ */
+function normActionText(s: unknown): string {
+  const str = typeof s === "string" ? s : JSON.stringify(s ?? "");
+  return str
+    .replace(/^\s*\d+\s*[.)]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
 function asRecord(v: unknown): Record<string, unknown> | undefined {
   return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
 }
@@ -188,7 +203,7 @@ export function renderTurnStory(
     const n = startedSuggestions?.length ?? " ?";
     lines.push(ok(`selection: in${typeof n === "number" ? ` ${n} option(s)` : ""} | out "${flat(out?.action ?? "", 200)}"`));
     if (startedSuggestions && startedSuggestions.length > 0 && typeof out?.action === "string") {
-      const idx = startedSuggestions.findIndex((s) => s === out.action);
+      const idx = startedSuggestions.findIndex((s) => normActionText(s) === normActionText(out.action));
       lines.push(ok(idx >= 0 ? `  picked: option [${idx + 1}] (verbatim)` : `  picked: new wording (not verbatim from options)`));
     }
     const why = typeof selectionDone.reasoning === "string" ? selectionDone.reasoning : out?.reasoning;

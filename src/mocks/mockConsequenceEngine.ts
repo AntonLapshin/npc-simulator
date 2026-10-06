@@ -1,6 +1,7 @@
 import type { ConsequenceEngine } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
+import { mockClassifyAction } from "./mockSemanticJudge.js";
 import type { Logger } from "../logging/logger.js";
 
 export type MockConsequenceScript = Record<string, ConsequenceResult>;
@@ -55,6 +56,20 @@ export class MockConsequenceEngine implements ConsequenceEngine {
             reasoning: `Mock consequence fallback for ${action.actorId}.`,
           };
 
+      // Model the self-declared `effects` block the real consequence LLM
+      // emits: synthesize it from the mock judge when the script omits it,
+      // so mock runs exercise the effects-first validation path.
+      if (!result.effects) {
+        const semantics = mockClassifyAction(world, action);
+        result.effects = {
+          moved: semantics.moves,
+          spoke: semantics.speaks,
+          ...(semantics.quotedSpeech.length > 0 ? { quotedSpeech: semantics.quotedSpeech } : {}),
+          ...(semantics.destinationActorId !== undefined
+            ? { destinationActorId: semantics.destinationActorId }
+            : {}),
+        };
+      }
       const rawResponse = JSON.stringify(result);
       this.logger.log({
         module: "consequence",

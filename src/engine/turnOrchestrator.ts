@@ -9,9 +9,12 @@ import type {
   ConsequenceEngine,
   ProposalEngine,
   SelectionEngine,
+  SemanticJudge,
 } from "../intelligence/types.js";
 import { applyConsequence } from "./patchApplier.js";
 import { validateConsequence } from "./physicalValidator.js";
+import { resolveActionSemantics } from "./actionSemantics.js";
+import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import type { Logger } from "../logging/logger.js";
@@ -43,6 +46,13 @@ export type EngineDependencies = {
   consequenceEngine: ConsequenceEngine;
   logger: Logger;
   config?: EngineConfig;
+  /**
+   * Decision-AI judge for free-form action meaning. Consumed only when a
+   * consequence omits its self-declared `effects`; defaults to the
+   * offline MockSemanticJudge (zero network calls). Real runs may inject
+   * LLMSemanticJudge. Judge failure fails open to physics-only validation.
+   */
+  semanticJudge?: SemanticJudge;
   /** Resolve free-form user action text (UI layer). Required for user turns. */
   getUserAction?: (actorId: string, suggestions: string[]) => Promise<string>;
   /** Optional save hook (defaults to file persistence when autosave is on). */
@@ -83,6 +93,9 @@ function errorMessage(err: unknown): string {
 export function stripSelectionPrefix(text: string): string {
   return text.replace(/^\s*\d+\s*[.)]\s*/, "").trimStart();
 }
+
+/** Offline default: keyword-based mock judge (zero network calls). */
+const defaultSemanticJudge: SemanticJudge = new MockSemanticJudge();
 
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
 export async function resolveWithValidation(
@@ -136,7 +149,19 @@ export async function resolveWithValidation(
       actorId: action.actorId,
       message: `validating consequence (attempt ${attempt})…`,
     });
-    const validation = validateConsequence(world, result, action);
+    // Effects-first: the consequence's self-declaration wins when present
+    // (no extra LLM call); otherwise the SemanticJudge classifies the
+    // action text; otherwise physics-only (fail-open). Judge output is
+    // logged per turn (semantic_resolved/semantic_completed) for
+    // observability, like selection_completed.
+    const resolved = await resolveActionSemantics(
+      world,
+      action,
+      result,
+      deps.semanticJudge ?? defaultSemanticJudge,
+      logger,
+    );
+    const validation = validateConsequence(world, result, action, resolved.semantics);
     if (validation.valid) {
       logger.log({
         module: "validator",
@@ -144,7 +169,7 @@ export async function resolveWithValidation(
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result, attempt },
+        input: { action, result, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
         output: validation,
       });
       return result;
@@ -156,7 +181,7 @@ export async function resolveWithValidation(
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId: action.actorId,
-      input: { action, result, attempt },
+      input: { action, result, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
       validationErrors: validation.errors,
     });
 

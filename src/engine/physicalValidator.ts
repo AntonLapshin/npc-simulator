@@ -1,7 +1,8 @@
-import type { Action, ConsequenceResult, ValidationResult, World } from "../types.js";
+import type { Action, ActionSemantics, ConsequenceResult, ValidationResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
 import { isInsideScene, isPointBlocked, pointInRect } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
+import { effectsToSemantics } from "./actionSemantics.js";
 
 /**
  * Validate ConsequenceResult output. Checks schema, referenced ids,
@@ -11,11 +12,20 @@ import { canMoveBetween } from "./pathfinding.js";
  * memories, beliefs, relationships), and speech preservation (the
  * narrative must not invent dialogue the acting actor never said).
  * Never judges tone, morality, or social realism.
+ *
+ * Semantic gates (movement intent, speech preservation) run on an
+ * injected ActionSemantics produced by Decision AI — never on regex over
+ * raw prose. Resolution order: explicit `semantics` argument first, then
+ * the consequence's self-declared `effects`, otherwise fail-open to
+ * physics-only checks (no semantic errors). Async callers (the turn
+ * orchestrator) resolve judge-backed semantics via
+ * resolveActionSemantics() and pass them in.
  */
 export function validateConsequence(
   world: World,
   result: ConsequenceResult,
   action?: Action,
+  semantics?: ActionSemantics,
 ): ValidationResult {
   const errors: string[] = [];
 
@@ -147,96 +157,39 @@ export function validateConsequence(
     }
   }
 
-  // Speech preservation: the narrative must be grounded strictly in the
-  // action text. If the user/NPC said specific words, the narrative must
-  // keep them — never invent different quoted dialogue. Conversely, quoted
-  // dialogue in the narrative must come from the action text (unless the
-  // action clearly implies speech without quoting it, e.g. "introduce
-  // yourself", where a short greeting quote is a reasonable rendering).
+  // Speech preservation: the narrative must be grounded in the judged
+  // meaning of the action. semantics.quotedSpeech is the ground truth for
+  // uttered words (from the effects declaration or the SemanticJudge) —
+  // the narrative is compared against it, never against regex-extracted
+  // action quotes. Movement intent likewise comes from semantics.moves,
+  // with the destination resolved by actor id (never substring search).
+  // Without semantics (no effects, no judge) these gates fail open:
+  // schema, geometry, and turn structure still guard coherence.
   if (action) {
-    errors.push(...validateSpeechPreservation(action.text, normalized.narrative));
-    errors.push(...validateMovementIntent(world, normalized, action));
+    const resolved = semantics ?? effectsToSemantics(normalized);
+    if (resolved) {
+      errors.push(...validateSpeechPreservation(resolved, normalized.narrative));
+      errors.push(...validateMovementIntent(world, normalized, action, resolved));
+    }
   }
 
   return { valid: errors.length === 0, errors };
 }
 
-/** True when the action text explicitly describes whole-body locomotion by the acting actor. */
-export function looksLikeMovementIntent(text: string): boolean {
-  let t = text;
-  // Body-part noun ("shake his head", "nod her head") is an in-place
-  // gesture, never locomotion — mask it before matching.
-  t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
-  // "return to <activity>" resumes a task, it is not locomotion
-  // ("return to typing", "returning to staring at the monitor",
-  // "return to work"). Mask those so only "return to <place>"
-  // ("return to the door/desk") still counts. Gerunds (-ing) after
-  // "return to" are activities, never destinations; bare activity nouns
-  // (work/task/focus/...) are likewise not places.
-  t = t.replace(
-    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  // Same for "go/back to <activity>" ("go back to typing").
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  t = t.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
-  // Subordinate "as/while/when ..." clauses typically describe someone
-  // ELSE's motion ("Turn to look at Anton as he enters") — the acting
-  // actor itself stays put. Drop those clauses so only the acting
-  // actor's own main-clause motion counts.
-  t = t.replace(/\b(as|while|when)\b[^,.;]*/gi, " ");
-  // "head" is locomotion only with a directional complement
-  // ("head to/toward/into/out ..."); bare "head" was already masked above.
-  if (
-    /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(walk|walks|walking|go|goes|going|move|moves|moving|moved|run|runs|running|step|steps|stepping|come|comes|coming|came|approach|approaches|approaching|enter|enters|entering|leave|leaves|leaving|follow|follows|following|join|joins|joining|return|returns|returning|advance|advances|proceed|shift|slide|stroll|hurry|rush|rushing)\b/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  return /\b(closer|close to|nearer|toward|towards|up to|next to|beside|over to)\b/i.test(t);
-}
-
-/** Find an actor referenced by name or id inside free-form action text. */
-function findMentionedActor(world: World, actingActorId: string, actionText: string): { id: string; x: number; y: number } | undefined {
-  const lowered = actionText.toLowerCase();
-  for (const a of world.actors) {
-    if (a.id === actingActorId) continue;
-    if (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) return a;
-    if (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase())) return a;
-  }
-  return undefined;
-}
-
+/**
+ * Movement gate on judged semantics: semantics.moves === false never
+ * requires x/y; semantics.moves === true requires a changed, reachable
+ * position, and — when the judge resolved a destinationActorId — one
+ * strictly closer to that actor (by id comparison).
+ */
 function validateMovementIntent(
   world: World,
   normalized: { actorPatches: { actorId: string; x?: number; y?: number }[] },
   action: Action,
+  semantics: ActionSemantics,
 ): string[] {
   const errors: string[] = [];
-  if (!looksLikeMovementIntent(action.text)) return errors;
+  if (!semantics.moves) return errors;
   const actor = world.actors.find((a) => a.id === action.actorId);
   if (!actor) return errors;
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
@@ -252,16 +205,19 @@ function validateMovementIntent(
     );
     return errors;
   }
-  // When the action names another actor ("toward Tanya"), the new
-  // position must actually get closer to that actor.
-  const target = findMentionedActor(world, action.actorId, action.text);
-  if (target) {
-    const oldDist = Math.hypot(actor.x - target.x, actor.y - target.y);
-    const newDist = Math.hypot(patch.x - target.x, patch.y - target.y);
-    if (!(newDist < oldDist)) {
-      errors.push(
-        `action says to move toward ${target.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${target.id} at (${target.x}, ${target.y})`,
-      );
+  // When the judge resolved a movement target, the new position must
+  // actually get closer to that actor (id comparison — never substring
+  // search on raw text, so pronouns and descriptions resolve correctly).
+  if (semantics.destinationActorId !== undefined) {
+    const target = world.actors.find((a) => a.id === semantics.destinationActorId);
+    if (target && target.id !== action.actorId) {
+      const oldDist = Math.hypot(actor.x - target.x, actor.y - target.y);
+      const newDist = Math.hypot(patch.x - target.x, patch.y - target.y);
+      if (!(newDist < oldDist)) {
+        errors.push(
+          `action says to move toward ${target.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${target.id} at (${target.x}, ${target.y})`,
+        );
+      }
     }
   }
   return errors;
@@ -293,19 +249,15 @@ function sameStem(a: string, b: string): boolean {
   return a.slice(0, 4) === b.slice(0, 4);
 }
 
-/** Action implies speech even without quotes ("introduce yourself", ...). */
-function looksLikeSpeechIntent(text: string): boolean {
-  return /\b(say|says|said|speak|speaks|talk|talks|tell|tells|ask|asks|greet|greets|greeting|hello|hi\b|hey|introduce|speech|shout|whisper|reply|replies|answer|answers|exclaim|announce)\b/i.test(
-    text,
-  );
-}
-
-function validateSpeechPreservation(actionText: string, narrative: string): string[] {
+/** Action implies speech even without quotes — judged by Decision AI, never regex. */
+function validateSpeechPreservation(semantics: ActionSemantics, narrative: string): string[] {
   const errors: string[] = [];
-  const actionQuotes = quotedSegments(actionText);
+  // Ground truth for uttered words comes from the judge/declaration —
+  // never from regex-extracting quotes out of the raw action text.
+  // Narrative-side quote parsing stays: it reads structured output
+  // (what the model emitted), it does not interpret English meaning.
+  const actionQuotes = semantics.quotedSpeech;
   const narrativeQuotes = quotedSegments(narrative);
-  const narrativeNorm = normLower(narrative);
-  const actionNorm = normLower(actionText);
 
   // 1. Quoted action words must survive into the narrative (stem overlap —
   // close paraphrase like "Greeting all!" -> "greets all" passes, but a
@@ -321,19 +273,20 @@ function validateSpeechPreservation(actionText: string, narrative: string): stri
     }
   }
 
-  // 2. Quoted dialogue in the narrative must be grounded in the action.
+  // 2. Quoted dialogue in the narrative must be grounded in the judged
+  // utterances.
   for (const q of narrativeQuotes) {
     const words = contentWords(q);
     if (words.length === 0) continue;
     // Skip tiny interjections ("Hi!", "Oh.") — too short to judge.
     if (normLower(q).length < 8 && words.length <= 1) continue;
-    const actionWords = contentWords(actionNorm);
-    const grounded = words.filter((w) => actionWords.some((aw) => sameStem(w, aw)));
-    // Allow short greeting renders when the action implies speech without
-    // quoting it ("Say hello" -> "says 'Hi!'").
-    if (grounded.length === 0 && actionQuotes.length === 0 && looksLikeSpeechIntent(actionText)) continue;
+    const judgedWords = contentWords(actionQuotes.join(" "));
+    const grounded = words.filter((w) => judgedWords.some((aw) => sameStem(w, aw)));
+    // Allow short greeting renders when the judge says speech happened
+    // but records no exact quote ("Say hello" -> "says 'Hi!'").
+    if (grounded.length === 0 && actionQuotes.length === 0 && semantics.speaks) continue;
     // Require at least half the narrative quote's content words to appear
-    // in the action (single-word quotes require the one word).
+    // in the judged utterances (single-word quotes require the one word).
     const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);
     if (grounded.length < need) {
       errors.push(
@@ -343,6 +296,5 @@ function validateSpeechPreservation(actionText: string, narrative: string): stri
     }
   }
 
-  void narrativeNorm;
   return errors;
 }
