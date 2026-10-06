@@ -104,7 +104,12 @@ export class TextSession {
     if (!this.world) return "No scenario loaded. Use: start [path]";
     const id = idOrEmpty ?? this.world.userActorId;
     const actor = getActorById(this.world, id);
-    return actor ? renderActorPanel(actor) : `Unknown actor: ${id} (actors: ${this.world.actors.map((a) => a.id).join(", ")})`;
+    if (!actor) return `Unknown actor: ${id} (actors: ${this.world.actors.map((a) => a.id).join(", ")})`;
+    // Thoughts are private: only the viewer's own thoughts are shown unless
+    // GM debug view is on. Proposal/selection prompts likewise only ever
+    // carry the acting actor's own thoughts.
+    const includeThoughts = this.debug || id === this.world.userActorId;
+    return renderActorPanel(actor, { includeThoughts });
   }
 
   showObject(id: string): string {
@@ -490,8 +495,15 @@ export async function handleLine(
       return { output: session.showObject(parsed.objectId), quit: false };
     case "thoughts": {
       if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
-      const actor = getActorById(session.world, parsed.actorId ?? session.world.userActorId);
+      const targetId = parsed.actorId ?? session.world.userActorId;
+      const actor = getActorById(session.world, targetId);
       if (!actor) return { output: `Unknown actor: ${parsed.actorId}`, quit: false };
+      // Thoughts are private to the acting character (they only enter that
+      // character's own proposal/selection prompt). Other actors' thoughts
+      // are GM-only: require `debug on`.
+      if (targetId !== session.world.userActorId && !session.debug) {
+        return { output: `${actor.name} (${actor.id}) thoughts are private (enable \`debug on\` for GM view).`, quit: false };
+      }
       return { output: `${actor.name} (${actor.id}) thoughts:\n  ${actor.thoughts || "(none)"}`, quit: false };
     }
     case "memories":

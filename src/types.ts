@@ -21,6 +21,21 @@ export type Scene = {
   objects: SceneObject[];
 };
 
+export type ActorLook = {
+  skin?: string;
+  skin2?: string;
+  hair?: string;
+  hairStyle?: string;
+  shirt?: string;
+  shirt2?: string;
+  pants?: string;
+  shoes?: string;
+};
+
+export type ActorPose = "stand" | "sit" | "kneel" | "doggy" | "prone";
+
+export type ActorProp = "cup" | "laptop" | null;
+
 export type Actor = {
   id: string;
   name: string;
@@ -37,6 +52,16 @@ export type Actor = {
   memories: string[];
   beliefs: string[];
   relationships: string[];
+  /** Visual appearance (data-driven, see npc-simulator-ui README raw input
+   *  contract: chars [{ id, name, color, look, prop, x, y, pose, emotion }]).
+   *  `color` is the accent/name-plate color, `look` holds the painter
+   *  colors + hair style, `prop` is the held item, `pose` the body pose.
+   *  All optional for backward compatibility — the UI derives deterministic
+   *  fallbacks from the actor id when absent. */
+  color?: string;
+  pose?: ActorPose;
+  prop?: ActorProp;
+  look?: ActorLook;
 };
 
 export type Scenario = {
@@ -91,6 +116,10 @@ export type ActorPatch = {
   memoriesAppend?: string[];
   beliefsAppend?: string[];
   relationshipsAppend?: string[];
+  /** Body pose change (e.g. sitting down / standing up). */
+  pose?: ActorPose;
+  /** Held-prop change (e.g. picking up a cup). */
+  prop?: ActorProp;
 };
 
 export type ObjectPatch = {
@@ -157,6 +186,10 @@ export type EngineConfig = {
   logDir: string;
   saveDir: string;
   autosaveEnabled: boolean;
+  /** Recent-history entries included in proposal/selection prompts. */
+  proposalHistoryLimit: number;
+  /** Max suggestions requested from the Proposal Engine per turn. */
+  maxProposalSuggestions: number;
 };
 
 export type ValidationResult = {

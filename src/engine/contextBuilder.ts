@@ -1,4 +1,5 @@
-import type { Action, World } from "../types.js";
+import type { Action, Actor, SceneObject, World } from "../types.js";
+import { defaultConfig } from "../config.js";
 import {
   getVisibleActors,
   getAudibleActors,
@@ -10,15 +11,114 @@ function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
 }
 
+export type SubjectiveContextOptions = {
+  /** Recent-history entries to include. Defaults to proposalHistoryLimit (20). */
+  historyLimit?: number;
+  /** Max suggestions requested. Defaults to maxProposalSuggestions (10). */
+  maxSuggestions?: number;
+};
+
+function resolveHistoryLimit(opts?: SubjectiveContextOptions): number {
+  return opts?.historyLimit ?? defaultConfig.proposalHistoryLimit;
+}
+
+function resolveMaxSuggestions(opts?: SubjectiveContextOptions): number {
+  return opts?.maxSuggestions ?? defaultConfig.maxProposalSuggestions;
+}
+
+function formatVisibleActors(visible: Actor[]): string {
+  if (visible.length === 0) return "(none)";
+  return visible
+    .map((a) => {
+      const cues = [`emotion=${a.emotion || "unknown"}`];
+      if (a.pose) cues.push(`pose=${a.pose}`);
+      if (a.prop) cues.push(`prop=${a.prop}`);
+      return `${a.name} (${a.id}) at (${a.x}, ${a.y}): ${a.state}; ${cues.join(", ")}`;
+    })
+    .join(" | ");
+}
+
+function formatVisibleObjects(objects: SceneObject[]): string {
+  if (objects.length === 0) return "(none)";
+  return objects
+    .map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}) [${o.passable ? "passable" : "blocked"}]: ${o.description}`)
+    .join(" | ");
+}
+
+const THOUGHTS_GUIDANCE =
+  "Thoughts (your immediate inner reaction to the last event — HIGH PRIORITY, this guides what you do next; private, never spoken aloud, never narrated; be blunt, candid, profane/explicit when in-character)";
+
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
 // private memories, beliefs, hidden goals, or unperceived events.
-export function buildProposalContext(world: World, actorId: string): string {
+//
+// Proposal is a slim affordance brainstorm (position + high-priority
+// thoughts + state + goal + perceivables + narrative/history + beliefs +
+// memories + constraints). Persona, emotion, and relationships are
+// deliberately dropped here — Selection (the Laya personality gate) owns
+// personalization. Selection uses the full subjective context instead.
+export function buildProposalContext(
+  world: World,
+  actorId: string,
+  opts?: SubjectiveContextOptions,
+): string {
   const actor = getActorById(world, actorId);
   if (!actor) throw new Error(`unknown actor: ${actorId}`);
   const visible = getVisibleActors(world, actorId);
   const objects = getVisibleObjects(world, actorId);
-  const recentHistory = world.history.slice(-6).join("\n") || "(no history yet)";
+  const historyLimit = resolveHistoryLimit(opts);
+  const maxSuggestions = resolveMaxSuggestions(opts);
+  const recentHistory = world.history.slice(-historyLimit).join("\n") || "(no history yet)";
+
+  return [
+    "Current Actor",
+    "",
+    `ID: ${actor.id}`,
+    `Name: ${actor.name}`,
+    `State: ${actor.state}`,
+    `Goal: ${actor.goal}`,
+    `${THOUGHTS_GUIDANCE}: ${actor.thoughts || "(none yet)"}`,
+    "",
+    "Memories",
+    "",
+    formatList(actor.memories),
+    "",
+    "Beliefs",
+    "",
+    formatList(actor.beliefs),
+    "",
+    "Perceived Environment",
+    "",
+    `Position: ${actor.x}, ${actor.y}`,
+    `Visible actors: ${formatVisibleActors(visible)}`,
+    `Visible objects: ${formatVisibleObjects(objects)}`,
+    `Current narrative: ${world.narrative}`,
+    `Recent history: ${recentHistory}`,
+    `Tick: ${world.tick}`,
+    "",
+    "Physical constraints: actors are points; non-passable objects block movement; movement must be reachable; stay inside scene bounds.",
+    "",
+    "Task",
+    "",
+    `Generate up to ${maxSuggestions} possible actions this actor could take right now.`,
+    "Actions may be physical, verbal, emotional, social, object-related, or any combination.",
+    "Do not use fixed action categories.",
+    "Each suggestion must be one free-form action sentence or short paragraph.",
+    "Return JSON only.",
+  ].join("\n");
+}
+
+function buildFullActorContext(
+  world: World,
+  actorId: string,
+  opts?: SubjectiveContextOptions,
+): string {
+  const actor = getActorById(world, actorId);
+  if (!actor) throw new Error(`unknown actor: ${actorId}`);
+  const visible = getVisibleActors(world, actorId);
+  const objects = getVisibleObjects(world, actorId);
+  const historyLimit = resolveHistoryLimit(opts);
+  const recentHistory = world.history.slice(-historyLimit).join("\n") || "(no history yet)";
 
   return [
     "Current Actor",
@@ -29,7 +129,7 @@ export function buildProposalContext(world: World, actorId: string): string {
     `State: ${actor.state}`,
     `Emotion: ${actor.emotion}`,
     `Goal: ${actor.goal}`,
-    `Thoughts (your immediate inner reaction to the last event — this guides what you do next): ${actor.thoughts || "(none yet)"}`,
+    `${THOUGHTS_GUIDANCE}: ${actor.thoughts || "(none yet)"}`,
     "",
     "Memories",
     "",
@@ -46,8 +146,8 @@ export function buildProposalContext(world: World, actorId: string): string {
     "Perceived Environment",
     "",
     `Position: ${actor.x}, ${actor.y}`,
-    `Visible actors: ${visible.length > 0 ? visible.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y}): ${a.state}`).join(" | ") : "(none)"}`,
-    `Visible objects: ${objects.length > 0 ? objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}): ${o.description}`).join(" | ") : "(none)"}`,
+    `Visible actors: ${formatVisibleActors(visible)}`,
+    `Visible objects: ${formatVisibleObjects(objects)}`,
     `Current narrative: ${world.narrative}`,
     `Recent history: ${recentHistory}`,
     `Tick: ${world.tick}`,
@@ -68,14 +168,15 @@ export function buildSelectionContext(
   world: World,
   actorId: string,
   suggestions: string[],
+  opts?: SubjectiveContextOptions,
 ): string {
-  const proposalContext = buildProposalContext(world, actorId);
+  const fullContext = buildFullActorContext(world, actorId, opts);
   const candidates =
     suggestions.length > 0
       ? suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")
       : "(no candidates)";
   return [
-    proposalContext,
+    fullContext,
     "",
     "Candidate Actions",
     "",
@@ -154,7 +255,7 @@ export function buildConsequenceContext(
     "",
     `Acting actor this turn: ${action.actorId}. ONLY this actor may speak, move, change physical state, or perform any observable action.`,
     "All other actors are observers of this event. They MUST NOT speak (no dialogue, no quoted replies, no 'calls back' / 'says' / 'nods welcome'), MUST NOT move (no x/y changes), and MUST NOT change state.",
-    "Observers may only react INTERNALLY: set their one-time 'thoughts' field (immediate inner reaction to this event, e.g. surprise, recognition, annoyance), and optionally adjust emotion, goal, memoriesAppend, beliefsAppend, relationshipsAppend.",
+    "Observers may only react INTERNALLY: set their one-time 'thoughts' field (private immediate inner reaction to this event — never spoken aloud, never narrated; be blunt, candid, profane/explicit when in-character, e.g. surprise, recognition, annoyance), and optionally adjust emotion, goal, memoriesAppend, beliefsAppend, relationshipsAppend.",
     "Set 'thoughts' for EVERY perceiving actor listed above (including the acting actor — its take on what just happened). Thoughts are one-time and will guide that actor's next turn. An event with no observer patch means that observer recorded no reaction.",
     `Narrative rule: describe ONLY what ${action.actorId} observably does, grounded strictly in the given action text.`,
     "If the action is speech, preserve its wording — quote or closely paraphrase it, never invent different dialogue lines. If the action contains quoted words, the narrative MUST contain those same words.",

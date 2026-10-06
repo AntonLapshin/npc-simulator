@@ -74,7 +74,7 @@ export class CastPanel {
           : "(not on scene)";
 
       // avatar re-render only when something visual changed
-      const sig = [v.emotion, v.dir, v.visible, v.prop].join("|");
+      const sig = [v.emotion, v.dir, v.visible, v.prop, v.pose].join("|");
       if (sig !== r.sig) {
         r.sig = sig;
         drawAvatar(r.avatar, v);

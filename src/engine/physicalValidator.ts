@@ -9,7 +9,7 @@ import { effectsToSemantics } from "./actionSemantics.js";
  * coordinates, collisions, movement paths, object rectangles, turn
  * discipline (only the acting actor may move/speak/act — other
  * actors may only change internal state: thoughts, emotion, goal,
- * memories, beliefs, relationships), and speech preservation (the
+ * memories, beliefs, relationships; pose/prop count as observable acts), and speech preservation (the
  * narrative must not invent dialogue the acting actor never said).
  * Never judges tone, morality, or social realism.
  *
@@ -95,7 +95,9 @@ export function validateConsequence(
     // Turn discipline: a character only acts on its own turn. Observers
     // of someone else's action must not move (x/y) or change physical
     // state — they may only react internally (thoughts, emotion, goal,
-    // memories, beliefs, relationships). Any observable reply, approach,
+    // memories, beliefs, relationships). Pose/prop changes (sitting down,
+    // picking something up) are observable physical acts, so they are
+    // restricted like state. Any observable reply, approach,
     // or gesture belongs to their own future turn.
     if (action && patch.actorId !== action.actorId) {
       if (patch.x !== undefined || patch.y !== undefined) {
@@ -103,9 +105,9 @@ export function validateConsequence(
           `actor ${patch.actorId}: only the acting actor (${action.actorId}) may move; observers must not change position`,
         );
       }
-      if (patch.state !== undefined) {
+      if (patch.state !== undefined || patch.pose !== undefined || patch.prop !== undefined) {
         errors.push(
-          `actor ${patch.actorId}: only the acting actor (${action.actorId}) may change state; observers may only update thoughts/emotion/goal/memories/beliefs/relationships`,
+          `actor ${patch.actorId}: only the acting actor (${action.actorId}) may change state/pose/prop; observers may only update thoughts/emotion/goal/memories/beliefs/relationships`,
         );
       }
     }

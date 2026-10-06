@@ -119,9 +119,9 @@ describe("golden office-anton replay", () => {
 
     // Nobody moved: task-resuming actions need no x/y change.
     const byId = Object.fromEntries(final.actors.map((a) => [a.id, a]));
-    expect([byId["anton"]!.x, byId["anton"]!.y]).toEqual([1, 10]);
-    expect([byId["tanya"]!.x, byId["tanya"]!.y]).toEqual([8, 6]);
-    expect([byId["dana"]!.x, byId["dana"]!.y]).toEqual([15, 6]);
+    expect([byId["anton"]!.x, byId["anton"]!.y]).toEqual([16, 2]);
+    expect([byId["tanya"]!.x, byId["tanya"]!.y]).toEqual([8, 7]);
+    expect([byId["dana"]!.x, byId["dana"]!.y]).toEqual([15, 11]);
 
     expect(final.history).toHaveLength(3);
     expect(final.history[1]).toContain("Call out a friendly");

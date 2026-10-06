@@ -22,6 +22,10 @@ export const FALLBACK_PROPOSAL: ProposalResult = {
 export type LlmProposalEngineOptions = {
   /** Parse-retry budget (§16.3). Defaults to 3 (matches default EngineConfig). */
   maxRetries?: number;
+  /** Recent-history entries in the proposal prompt. Defaults to proposalHistoryLimit (20). */
+  historyLimit?: number;
+  /** Max suggestions requested. Defaults to maxProposalSuggestions (10). */
+  maxSuggestions?: number;
 };
 
 export class LLMProposalEngine implements ProposalEngine {
@@ -37,7 +41,7 @@ export class LLMProposalEngine implements ProposalEngine {
 
     let userPrompt: string;
     try {
-      userPrompt = `${buildProposalContext(world, actorId)}\n\n${proposalSuffix()}`;
+      userPrompt = `${buildProposalContext(world, actorId, { historyLimit: this.options.historyLimit, maxSuggestions: this.options.maxSuggestions })}\n\n${proposalSuffix()}`;
     } catch (err) {
       this.logger.log({
         module: "proposal",
@@ -82,13 +86,16 @@ export class LLMProposalEngine implements ProposalEngine {
       return structuredClone(FALLBACK_PROPOSAL);
     }
 
+    const fullPrompt = `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`;
     this.logger.log({
       module: "proposal",
       event: "proposal_completed",
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId,
-      prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
+      prompt: fullPrompt,
+      promptChars: fullPrompt.length,
+      promptTokensEstimate: Math.ceil(fullPrompt.length / 4),
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,

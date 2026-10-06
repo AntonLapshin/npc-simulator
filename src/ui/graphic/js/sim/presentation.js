@@ -1,9 +1,13 @@
 // sim/presentation.js — visual metadata resolution and coordinate mapping.
 //
-// The engine's Actor type carries no looks/colors (semantic content is
-// free-form). Scenarios may ship a UI-only `presentation` block; anything
-// missing gets a deterministic fallback derived from the actor id, so the UI
-// renders sensibly for *any* world the engine hands it.
+// The engine's Actor carries its own data-driven appearance (color, pose,
+// prop, look — see npc-simulator-ui README raw input contract:
+// chars [{ id, name, color, look, prop, x, y, pose, emotion }]).
+// Older scenarios may still ship a UI-only `presentation` block; anything
+// still missing gets a deterministic fallback derived from the actor id,
+// so the UI renders sensibly for *any* world the engine hands it.
+//
+// Precedence per actor: actor fields → presentation block → derived fallback.
 
 import { hashStr, mulberry } from "../scene/ui.js";
 
@@ -51,6 +55,7 @@ export function deriveLook(actorId) {
     color: ACCENTS[Math.floor(rnd() * ACCENTS.length)],
     role: "",
     prop: null,
+    pose: "stand",
     look: {
       skin: skin[0],
       skin2: skin[1],
@@ -67,8 +72,8 @@ export function deriveLook(actorId) {
 /**
  * Resolve presentation metadata for every actor of a world.
  * @param {object|null} presentation scenario.presentation ({actors:{id:{…}}})
- * @param {Array} actors world.actors
- * @returns {Map<string,{color:string,role:string,prop:string|null,look:object}>}
+ * @param {Array} actors world.actors (each may carry color/pose/prop/look)
+ * @returns {Map<string,{color:string,role:string,prop:string|null,pose:string,look:object}>}
  */
 export function resolvePresentation(presentation, actors) {
   const byId = (presentation && presentation.actors) || {};
@@ -77,10 +82,12 @@ export function resolvePresentation(presentation, actors) {
     const p = byId[a.id] || {};
     const derived = deriveLook(a.id);
     map.set(a.id, {
-      color: p.color || derived.color,
+      color: a.color || p.color || derived.color,
       role: p.role || "",
-      prop: p.prop ?? derived.prop,
-      look: Object.assign({}, derived.look, p.look || {}),
+      // null is an explicit "holds nothing" — only fall through on undefined.
+      prop: a.prop !== undefined ? a.prop : (p.prop ?? derived.prop),
+      pose: a.pose || p.pose || "stand",
+      look: Object.assign({}, derived.look, p.look || {}, a.look || {}),
     });
   }
   return map;

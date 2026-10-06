@@ -24,6 +24,8 @@ export const FALLBACK_SELECTION: SelectionResult = {
 export type LlmSelectionEngineOptions = {
   /** Parse-retry budget (§16.3). Defaults to 3 (matches default EngineConfig). */
   maxRetries?: number;
+  /** Recent-history entries in the selection prompt. Defaults to proposalHistoryLimit (20). */
+  historyLimit?: number;
 };
 
 export class LLMSelectionEngine implements SelectionEngine {
@@ -39,7 +41,7 @@ export class LLMSelectionEngine implements SelectionEngine {
 
     let userPrompt: string;
     try {
-      userPrompt = `${buildSelectionContext(world, actorId, suggestions)}\n\n${selectionSuffix()}`;
+      userPrompt = `${buildSelectionContext(world, actorId, suggestions, { historyLimit: this.options.historyLimit })}\n\n${selectionSuffix()}`;
     } catch (err) {
       this.logger.log({
         module: "selection",
@@ -86,13 +88,16 @@ export class LLMSelectionEngine implements SelectionEngine {
       return structuredClone(FALLBACK_SELECTION);
     }
 
+    const fullPrompt = `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`;
     this.logger.log({
       module: "selection",
       event: "selection_completed",
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId,
-      prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
+      prompt: fullPrompt,
+      promptChars: fullPrompt.length,
+      promptTokensEstimate: Math.ceil(fullPrompt.length / 4),
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,

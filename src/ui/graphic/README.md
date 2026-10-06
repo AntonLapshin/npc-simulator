@@ -166,9 +166,11 @@ console warning — mirroring `buildDeps()` in `textUI.ts`.
 * `data/officeScenario.js` is a plain engine `Scenario` (version, id, title,
   narrative, userActorId, order, scene, actors) — the engine's `loadScenario`
   accepts the same JSON.
-* `presentation` (optional, UI-only): per-actor `{ color, role, prop, look }`
-  plus `scene.name`. Missing entries get deterministic looks derived from the
-  actor id (`presentation.deriveLook`), so any world renders sensibly.
+* `presentation` (optional, UI-only legacy): per-actor `{ color, role, prop, pose, look }`
+  plus `scene.name`. Actor appearance now lives on the actor itself
+  (`color, pose, prop, look` — the npc-simulator-ui raw `chars` contract);
+  precedence is actor fields → `presentation` block → deterministic looks
+  derived from the actor id (`presentation.deriveLook`), so any world renders sensibly.
 * The painted room comes from `npc-simulator-ui` scenes for the bundled
   office, or from `data/scenarioScene.js` (world objects → view scene) for
   foreign worlds; the renderer draws anything unrecognised as a labelled

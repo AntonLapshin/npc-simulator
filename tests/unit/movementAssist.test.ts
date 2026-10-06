@@ -53,9 +53,10 @@ describe("movementAssist", () => {
     const patch = result.actorPatches.find((p) => p.actorId === "anton");
     expect(patch?.x).toBeDefined();
     expect(patch?.y).toBeDefined();
-    // Must be strictly closer to Tanya than Anton's start (1,10 -> Tanya 8,8).
+    // Must be strictly closer to Tanya than Anton's start.
+    const anton = world.actors.find((a) => a.id === "anton")!;
     const tanya = world.actors.find((a) => a.id === "tanya")!;
-    const oldDist = Math.hypot(1 - tanya.x, 10 - tanya.y);
+    const oldDist = Math.hypot(anton.x - tanya.x, anton.y - tanya.y);
     const newDist = Math.hypot(patch!.x! - tanya.x, patch!.y! - tanya.y);
     expect(newDist).toBeLessThan(oldDist);
     expect(result.narrative).not.toBe("Nothing changes.");

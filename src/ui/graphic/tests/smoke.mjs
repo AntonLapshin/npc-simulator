@@ -152,6 +152,39 @@ await test("presentation: explicit metadata wins, fallbacks are deterministic", 
   assert.deepEqual(bare.get("stranger-42"), deriveLook("stranger-42"));
 });
 
+await test("presentation: actor appearance fields win over the presentation block", () => {
+  const actors = [
+    {
+      id: "anton", name: "Anton", color: "#4f7cff", pose: "stand", prop: null,
+      look: { hairStyle: "short", shirt: "#7fb6ff" },
+    },
+    { id: "tanya", name: "Tanya" },
+  ];
+  const presentation = { actors: { anton: { color: "#000000", prop: "cup", look: { shirt: "#000000" } } } };
+  const pres = resolvePresentation(presentation, actors);
+  assert.equal(pres.get("anton").color, "#4f7cff");
+  assert.equal(pres.get("anton").pose, "stand");
+  assert.equal(pres.get("anton").prop, null);
+  assert.equal(pres.get("anton").look.hairStyle, "short");
+  assert.equal(pres.get("anton").look.shirt, "#7fb6ff");
+  // tanya has no appearance fields → presentation/derived fallback still works
+  assert.equal(typeof pres.get("tanya").color, "string");
+  assert.equal(pres.get("tanya").pose, "stand");
+});
+
+await test("scenarioScene: desk signs paint with derived plate text", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { dirname, join, resolve } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const anton = JSON.parse(await readFile(join(root, "scenarios/office-anton.json"), "utf-8"));
+  const view = buildViewScene(anton, null);
+  const signs = new Map(view.assets.filter((a) => a.asset === "deskSign").map((a) => [a.id, a.text]));
+  assert.equal(signs.get("anton_sign"), "ANTON");
+  assert.equal(signs.get("tanya_sign"), "TANYA");
+  assert.equal(signs.get("dana_sign"), "DANA");
+});
+
 await test("mapper scales arbitrary scene sizes onto the 1040×730 view", () => {
   const m = makeMapper(520, 365, 1040, 730);
   assert.equal(m.toViewX(260), 520);
@@ -179,7 +212,7 @@ await test("scenarioScene: foreign scenario is driven by its own objects", async
   // no trace of the static office: walls/door come from the scenario
   assert.deepEqual(
     view.walls.map((w) => w.id).sort(),
-    ["wall_east", "wall_north", "wall_south", "wall_west_lower", "wall_west_upper"],
+    ["wall_east", "wall_north_left", "wall_north_right", "wall_south", "wall_west"],
   );
   assert.equal(view.door?.id, "door");
   const byId = new Map(view.assets.map((a) => [a.id, a.asset]));
@@ -192,9 +225,12 @@ await test("scenarioScene: foreign scenario is driven by its own objects", async
   assert.equal(byId.get("tanya_laptop"), "laptop");
   assert.equal(byId.get("tanya_mug"), "cup");
   assert.equal(byId.get("tanya_papers"), "papers");
+  assert.equal(byId.get("anton_sign"), "deskSign");
+  assert.equal(byId.get("tanya_sign"), "deskSign");
+  assert.equal(byId.get("dana_sign"), "deskSign");
   assert.deepEqual(
     view.windows.map((w) => w.id).sort(),
-    ["window_north_1", "window_north_2", "window_north_3"],
+    ["window_north_1", "window_north_2"],
   );
   // every scenario object is painted (no silent drops)
   const painted = new Set([

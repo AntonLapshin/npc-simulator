@@ -56,6 +56,8 @@ export class MockSelectionEngine implements SelectionEngine {
         turnIndex: world.turnIndex,
         actorId,
         prompt,
+        promptChars: prompt.length,
+        promptTokensEstimate: Math.ceil(prompt.length / 4),
         rawResponse,
         parsedResponse: result,
         reasoning: result.reasoning,

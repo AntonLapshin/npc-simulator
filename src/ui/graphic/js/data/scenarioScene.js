@@ -214,6 +214,13 @@ function assetForObject(o, cx, cy, vw, vh) {
   if (/lamp/.test(hay)) {
     return { ...base, asset: "lamp", x: cx, y: cy, z: 44, sort: cy + 58 };
   }
+  if (/desk sign|name-plate|nameplate|name plate|\bsigns?\b/.test(hay)) {
+    // Desk name-plates (e.g. "Anton's desk sign"). The deskSign painter
+    // reads `text`, which engine objects don't carry — derive it from the
+    // object name ("Anton's desk sign" → "ANTON"). Checked before the
+    // desk/table rule below ("desk sign" contains "desk").
+    return { ...base, asset: "deskSign", x: cx, y: cy, z: 44, sort: cy + 59, text: signText(o) };
+  }
   if (/chair|stool|seat|bench/.test(hay)) {
     const explicitCh = o.dir ?? o.direction;
     return { ...base, asset: "chair", x: cx, y: cy, dir: normCompass(explicitCh, "S"), _explicitDir: Boolean(explicitCh), color: pick };
@@ -270,6 +277,20 @@ function assetForObject(o, cx, cy, vw, vh) {
   }
   // Anything unknown → generic box.
   return null;
+}
+
+/** Desk-sign plate text from an engine object ("Anton's desk sign" → "ANTON"). */
+function signText(o) {
+  const src = String(o.name || o.id || "");
+  let t = src
+    .replace(/'s/gi, "")
+    .replace(/desk/gi, "")
+    .replace(/sign/gi, "")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase()
+    .slice(0, 8);
+  if (!t) t = String(o.id || "").replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
+  return t;
 }
 
 function orientChairsToTables(assets) {
@@ -366,7 +387,8 @@ function stackPropsOnFurniture(assets) {
   if (!surfaces.length) return;
   const props = assets.filter((a) =>
     a.asset === "laptop" || a.asset === "cup" || a.asset === "papers" ||
-    a.asset === "lamp" || a.asset === "coffeeMachine" || a.asset === "kettle" || a.asset === "cupRow",
+    a.asset === "lamp" || a.asset === "deskSign" ||
+    a.asset === "coffeeMachine" || a.asset === "kettle" || a.asset === "cupRow",
   );
   for (const p of props) {
     let best = null;
@@ -390,10 +412,11 @@ function stackPropsOnFurniture(assets) {
     if (!best) continue;
     p.z = best.h || 44;
     p.sort = furnitureSortY(best) + 5;
-    // Keep laptop/cup/papers/lamp stacking distinct when several share a desk.
+    // Keep laptop/cup/papers/lamp/sign stacking distinct when several share a desk.
     if (p.asset === "cup") p.sort += 1;
     else if (p.asset === "papers") p.sort += 2;
     else if (p.asset === "lamp") p.sort += 3;
+    else if (p.asset === "deskSign") p.sort += 4;
   }
 }
 

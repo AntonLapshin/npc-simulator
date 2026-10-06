@@ -8,6 +8,8 @@ export const defaultConfig: EngineConfig = {
   logDir: "logs",
   saveDir: "saves",
   autosaveEnabled: true,
+  proposalHistoryLimit: 20,
+  maxProposalSuggestions: 10,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {

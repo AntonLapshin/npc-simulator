@@ -12,6 +12,10 @@ export type LogEntry = {
   input?: unknown;
   output?: unknown;
   prompt?: string;
+  /** Full prompt length in chars (system + user), for cost tracking. */
+  promptChars?: number;
+  /** Rough token estimate (chars / 4) for the full prompt. */
+  promptTokensEstimate?: number;
   rawResponse?: string;
   parsedResponse?: unknown;
   reasoning?: string;

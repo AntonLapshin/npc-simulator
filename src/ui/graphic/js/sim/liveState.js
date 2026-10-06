@@ -48,6 +48,7 @@ export class LiveState {
         color: p.color || "#8fa0c0",
         role: p.role || "",
         prop: p.prop ?? null,
+        pose: p.pose || "stand",
         look: p.look,
         x: this.mapper.toViewX(a.x),
         y: this.mapper.toViewY(a.y),
@@ -82,7 +83,7 @@ export class LiveState {
         // actor appeared mid-session: materialise with derived presentation
         const pres = resolvePresentation(null, [a]).get(a.id);
         v = {
-          id: a.id, name: a.name, color: pres.color, role: "", prop: null, look: pres.look,
+          id: a.id, name: a.name, color: pres.color, role: "", prop: pres.prop ?? null, pose: pres.pose || "stand", look: pres.look,
           x: this.mapper.toViewX(a.x), y: this.mapper.toViewY(a.y), wx: a.x, wy: a.y,
           dir: "down", emotion: a.emotion || "neutral", visible: true,
           isUser: a.id === world.userActorId, tween: null,
@@ -110,6 +111,15 @@ export class LiveState {
       v.wy = a.y;
       v.emotion = a.emotion || v.emotion;
       v.name = a.name;
+      // Appearance is data-driven from the actor: pose/prop/color/look
+      // follow the world immediately (only positions tween).
+      const pres = resolvePresentation(this._presentation, [a]).get(a.id);
+      if (pres) {
+        v.pose = pres.pose || v.pose || "stand";
+        v.prop = pres.prop ?? v.prop ?? null;
+        v.color = pres.color || v.color;
+        v.look = pres.look || v.look;
+      }
       v.visible = true;
     }
     for (const [id, v] of this.actors) if (!seen.has(id)) v.visible = false;

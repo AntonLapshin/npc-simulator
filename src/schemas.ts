@@ -26,6 +26,23 @@ export const sceneSchema = z
   })
   .strict();
 
+export const actorLookSchema = z
+  .object({
+    skin: z.string().optional(),
+    skin2: z.string().optional(),
+    hair: z.string().optional(),
+    hairStyle: z.string().optional(),
+    shirt: z.string().optional(),
+    shirt2: z.string().optional(),
+    pants: z.string().optional(),
+    shoes: z.string().optional(),
+  })
+  .strict();
+
+export const actorPoseSchema = z.enum(["stand", "sit", "kneel", "doggy", "prone"]);
+
+export const actorPropSchema = z.enum(["cup", "laptop"]).nullable();
+
 export const actorSchema = z
   .object({
     id: nonEmptyString,
@@ -42,6 +59,13 @@ export const actorSchema = z
     memories: z.array(z.string()),
     beliefs: z.array(z.string()),
     relationships: z.array(z.string()),
+    // Visual appearance (data-driven per npc-simulator-ui raw input
+    // contract). All optional with defaults so older scenario/save files
+    // without them still load; the UI falls back to derived looks.
+    color: z.string().optional(),
+    pose: actorPoseSchema.default("stand"),
+    prop: actorPropSchema.default(null),
+    look: actorLookSchema.default({}),
   })
   .strict();
 
@@ -209,6 +233,8 @@ const lenientActorPatchSchema = z.object({
   memoriesAppend: z.array(z.string()).optional(),
   beliefsAppend: z.array(z.string()).optional(),
   relationshipsAppend: z.array(z.string()).optional(),
+  pose: actorPoseSchema.optional(),
+  prop: actorPropSchema.optional(),
 });
 
 const lenientObjectPatchSchema = z.object({

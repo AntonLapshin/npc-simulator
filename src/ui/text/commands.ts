@@ -177,7 +177,7 @@ export const HELP_TEXT = [
   "  look                      Scene narrative (opening text only; details via look actor/object).",
   "  look actor <id>           Actor panel (state, emotion, goal, memories, beliefs, relations).",
   "  look object <id>          Object panel (description, rectangle, flags).",
-  "  thoughts [actor]          Show one-time thoughts (default: your actor).",
+  "  thoughts [actor]          Show one-time thoughts (own actor, or any actor with `debug on`).",
   "  memories [actor]          Show memories (default: your actor).",
   "  beliefs [actor]           Show beliefs (default: your actor).",
   "  relationships [actor]     Show relationships (default: your actor).",
@@ -223,14 +223,19 @@ function stripTickPrefix(entry: string): string {
   return entry.replace(/^Tick \d+ - /, "");
 }
 
-/** Actor panel (§17.1). */
-export function renderActorPanel(actor: Actor): string {
+/** Actor panel (§17.1). Thoughts are private: pass includeThoughts=false
+ *  to redact them (used for other actors unless GM debug view is on). */
+export function renderActorPanel(actor: Actor, opts: { includeThoughts?: boolean } = {}): string {
+  const includeThoughts = opts.includeThoughts ?? true;
+  const thoughtsLine = includeThoughts
+    ? `Thoughts: ${actor.thoughts || "(none)"}`
+    : "Thoughts: (private — enable `debug on` for GM view)";
   return [
     `--- ${actor.name} (${actor.id}) at (${actor.x}, ${actor.y}) ---`,
     `State: ${actor.state}`,
     `Emotion: ${actor.emotion}`,
     `Goal: ${actor.goal}`,
-    `Thoughts: ${actor.thoughts || "(none)"}`,
+    thoughtsLine,
     `Persona: ${actor.persona}`,
     "Memories:",
     bullet(actor.memories),
