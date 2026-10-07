@@ -15,6 +15,8 @@
 import type { Action, ActionSemantics, World } from "../types.js";
 import type { SemanticJudge } from "../intelligence/types.js";
 import {
+  hasDisplacementToken,
+  maskNonLocomotion as canonicalMaskNonLocomotion,
   parseActionQuotes,
   resolveDestinationActorId,
   resolveDestinationObjectId,
@@ -27,80 +29,23 @@ function quotedSegments(text: string): string[] {
 }
 
 /**
- * Mock-only movement heuristic (kept in sync with nothing — the production
- * path does not use it). Mirrors the retired validator masks so offline
- * runs behave as before: body-part "head" masked, "return/back to
- * <activity>" masked, subordinate "as/while/when" clauses dropped.
- *
- * Exp-3 item 3: perception/cognition is NEVER locomotion. Clauses headed
- * by look/glance (any direction — "look up", "glance over notes"), asking,
- * sipping/drinking, reviewing, preparing, or typing are masked to clause
- * end before the movement-verb scan, so "Take a sip of coffee, reviewing
- * candidate notes" and "Ask Anton about backend experience" no longer
- * force pointless teleports or guaranteed fallbacks.
+ * Mock-only movement heuristic: the canonical displacement-token check
+ * (engine/deterministicSemantics.ts) — body-part "head" masked,
+ * non-locomotion clauses masked, subordinate someone-else clauses dropped.
+ * Phase 2 moved the logic to the shared module so the mock and the
+ * production moves-grounding classify identically.
  */
 function mockLooksLikeMovement(text: string): boolean {
-  let t = text;
-  t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
-  t = maskNonLocomotion(t);
-  t = t.replace(/\b(as|while|when)\b[^,.;]*/gi, " ");
-  if (
-    /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  if (
-    /\b(walk|walks|walking|go|goes|going|move|moves|moving|moved|run|runs|running|step|steps|stepping|come|comes|coming|came|approach|approaches|approaching|enter|enters|entering|leave|leaves|leaving|follow|follows|following|join|joins|joining|return|returns|returning|advance|advances|proceed|shift|slide|stroll|hurry|rush|rushing)\b/i.test(
-      t,
-    )
-  ) {
-    return true;
-  }
-  return /\b(closer|close to|nearer|toward|towards|up to|next to|beside|over to)\b/i.test(t);
+  return hasDisplacementToken(text);
 }
 
 /**
  * Exp-3 item 3: mask non-locomotion clauses (perception/cognition/resumed
- * activity) to clause end. Exported so the mask list is visible in one
- * place; the LLM judge prompt carries the equivalent rule in prose.
+ * activity) to clause end. Re-exported from the canonical module so the
+ * mask list lives in exactly one place; the LLM judge prompt carries the
+ * equivalent rule in prose.
  */
-export function maskNonLocomotion(text: string): string {
-  let t = text;
-  // Resuming a task is not relocating ("return/back to typing/work/...").
-  t = t.replace(
-    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  t = t.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
-  // Perception/cognition verbs head non-locomotion clauses: looking or
-  // glancing anywhere ("look up", "glance over notes"), asking, sipping,
-  // reviewing, preparing, typing/thinking/waiting. Masked to clause end so
-  // a later movement verb in the SAME clause is not misread either — the
-  // mock stays keyword-based; nuanced mixed clauses belong to the LLM judge.
-  t = t.replace(
-    /\b(look|looks|looking|glance|glances|glancing|ask|asks|asked|asking|sip|sips|sipping|drink|drinks|drinking|drank|review|reviews|reviewing|prepare|prepares|preparing|type|types|typing|typed|think|thinks|thinking|wait|waits|waiting)\b[^,.;]*/gi,
-    " ",
-  );
-  return t;
-}
+export const maskNonLocomotion = canonicalMaskNonLocomotion;
 
 /** Mock-only speech-intent heuristic (keyword list lives ONLY in this mock). */
 function mockLooksLikeSpeech(text: string): boolean {

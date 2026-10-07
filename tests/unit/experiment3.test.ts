@@ -9,6 +9,7 @@ import {
   resolveActionSemantics,
 } from "../../src/engine/actionSemantics.js";
 import {
+  hasDisplacementToken,
   resolveDestinationActorId,
   resolveDeterministicSemantics,
 } from "../../src/engine/deterministicSemantics.js";
@@ -737,5 +738,216 @@ describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
     expect(resolveDeterministicSemantics(world, { actorId: "u", text: "Wave." })).toEqual({
       quotedSpeech: [],
     });
+  });
+});
+
+describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
+  it("hasDisplacementToken: perception/cognition/resumed activity carry no token", () => {
+    for (const text of [
+      "Quickly glance up before settling back into the chair.",
+      "Look up to greet N warmly.",
+      "Glance over notes and mentally prepare questions.",
+      "Ask N about backend experience and compare to the stack.",
+      "Take a sip of coffee, reviewing candidate notes.",
+      "Dana types up notes, focusing on the code.",
+      "Go the extra mile.",
+      "Call out a friendly 'Hey!' as she sees N, then return to typing.",
+      "Shake his head at N.",
+    ]) {
+      expect(hasDisplacementToken(text)).toBe(false);
+    }
+  });
+
+  it("hasDisplacementToken: explicit displacement verbs and proximity phrases carry a token", () => {
+    for (const text of [
+      "Walk to Nadia.",
+      "Head to the door.",
+      "Come closer to Nadia.",
+      "Saunter over.",
+      "Roll her chair closer.",
+      "Sidle over to him.",
+      "Stand next to Nadia.",
+      "Return to the door.",
+      "Walk from Tanya to Dana.",
+      "Set down the mug and approach Nadia.",
+      "Walk to my desk, then glance at the notes.",
+    ]) {
+      expect(hasDisplacementToken(text)).toBe(true);
+    }
+  });
+
+  it("grounds away moves=true on glance text, keeps it on walk text", async () => {
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    const glance = await resolveActionSemantics(
+      world,
+      { actorId: "u", text: "Quickly glance up before settling back into the chair." },
+      {
+        ...baseResult("U teleports across the room."),
+        actorPatches: [{ actorId: "u", x: 5, y: 5, thoughts: "Zone." }],
+        effects: { moved: true, spoke: false },
+      },
+      {
+        async classify(): Promise<ActionSemantics> {
+          return { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] };
+        },
+      },
+      logger,
+    );
+    // No displacement token in the action: moves downgraded, destination dropped.
+    expect(glance.semantics!.moves).toBe(false);
+    expect(glance.semantics!.destinationActorId).toBeUndefined();
+    expect(glance.disagreements!.join(" ")).toMatch(/no displacement verb or destination token/);
+
+    const walk = await resolveActionSemantics(
+      world,
+      { actorId: "u", text: "Walk to N." },
+      {
+        ...baseResult("U walks."),
+        actorPatches: [],
+        effects: { moved: true, spoke: false, destinationActorId: "n" },
+      },
+      {
+        async classify(): Promise<ActionSemantics> {
+          return { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] };
+        },
+      },
+      createTestLogger(),
+    );
+    expect(walk.semantics).toMatchObject({ moves: true, destinationActorId: "n" });
+    expect(walk.disagreements).toEqual([]);
+  });
+
+  it("glance-teleports fail, staying in place passes (ticks 8/20)", () => {
+    const world = makeTinyWorld();
+    world.scene.width = 20;
+    world.scene.height = 20;
+    const action = { actorId: "u", text: "Glance over notes and mentally prepare questions." };
+    const still: ActionSemantics = { moves: false, speaks: false, quotedSpeech: [] };
+    const teleport = validateConsequence(
+      world,
+      {
+        ...baseResult("U glances over notes."),
+        actorPatches: [{ actorId: "u", x: 14, y: 14, thoughts: "Zone." }],
+      },
+      action,
+      still,
+    );
+    expect(teleport.valid).toBe(false);
+    expect(teleport.errors.join(" ")).toMatch(/stay in place/);
+
+    const stayed = validateConsequence(
+      world,
+      {
+        ...baseResult("U glances over notes, staying seated."),
+        actorPatches: [{ actorId: "u", thoughts: "Zone." }],
+      },
+      action,
+      still,
+    );
+    expect(stayed).toEqual({ valid: true, errors: [] });
+  });
+
+  it("sit may settle locally but never teleport", () => {
+    const world = makeTinyWorld();
+    world.scene.width = 20;
+    world.scene.height = 20;
+    const action = { actorId: "u", text: "Sit on the chair at my desk." };
+    const still = stillSemantics();
+    const settle = validateConsequence(
+      world,
+      {
+        ...baseResult("U sits on the chair at the desk."),
+        actorPatches: [{ actorId: "u", x: 2, y: 1, pose: "sit", thoughts: "Settled." }],
+      },
+      action,
+      still,
+    );
+    expect(settle).toEqual({ valid: true, errors: [] });
+
+    const flung = validateConsequence(
+      world,
+      {
+        ...baseResult("U sits on a far chair."),
+        actorPatches: [{ actorId: "u", x: 14, y: 14, pose: "sit", thoughts: "Settled." }],
+      },
+      action,
+      still,
+    );
+    expect(flung.valid).toBe(false);
+    expect(flung.errors.join(" ")).toMatch(/stay in place/);
+  });
+
+  it("rejects token shuffles toward distant actors (tick-15 actor variant)", () => {
+    const world = makeTinyWorld();
+    world.scene.width = 20;
+    world.scene.height = 20;
+    world.actors.find((a) => a.id === "u")!.x = 0;
+    world.actors.find((a) => a.id === "u")!.y = 0;
+    world.actors.find((a) => a.id === "n")!.x = 15;
+    world.actors.find((a) => a.id === "n")!.y = 15;
+    const action = { actorId: "u", text: "Walk toward N." };
+    const semantics: ActionSemantics = {
+      moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [],
+    };
+    const shuffle = validateConsequence(
+      world,
+      {
+        ...baseResult("U steps toward N."),
+        actorPatches: [{ actorId: "u", x: 1, y: 0, thoughts: "Going." }],
+      },
+      action,
+      semantics,
+    );
+    expect(shuffle.valid).toBe(false);
+    expect(shuffle.errors.join(" ")).toMatch(/real progress/);
+
+    const stride = validateConsequence(
+      world,
+      {
+        ...baseResult("U strides toward N."),
+        actorPatches: [{ actorId: "u", x: 4, y: 4, thoughts: "Going." }],
+      },
+      action,
+      semantics,
+    );
+    expect(stride).toEqual({ valid: true, errors: [] });
+  });
+
+  it("glance turns resolve without forced movement end to end (tick-20 shape)", async () => {
+    const logger = new Logger({ sessionId: "exp3-phase2-glance", writeToFile: false });
+    const world = makeTinyWorld();
+    world.scene.width = 20;
+    world.scene.height = 20;
+    const action = { actorId: "u", text: "Glance over notes and mentally prepare questions." };
+    // A well-behaved consequence stays in place: passes, no repair, no fallback.
+    const staying = {
+      narrative: "U glances over the notes, staying seated.",
+      actorPatches: [{ actorId: "u", thoughts: "Back in the zone." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: { resolve: async () => structuredClone(staying) } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
+    });
+    const out = await resolveWithValidation(world, action, deps);
+    expect(out.narrative).not.toBe("Nothing changes.");
+    expect(logger.store.byEvent("movement_repaired")).toHaveLength(0);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+
+    // A stubborn teleporter on the same glance action fails instead of passing.
+    const teleporting = {
+      narrative: "U glances over notes.",
+      actorPatches: [{ actorId: "u", x: 14, y: 14, thoughts: "Zone." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const deps2 = makeTestDeps(logger, {
+      consequenceEngine: { resolve: async () => structuredClone(teleporting) } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
+    });
+    const out2 = await resolveWithValidation(world, action, deps2);
+    expect(out2.narrative).toBe("Nothing changes.");
   });
 });

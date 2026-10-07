@@ -12,6 +12,7 @@ import type { Action, ActionSemantics, ConsequenceResult, World } from "../types
 import type { SemanticJudge } from "../intelligence/types.js";
 import type { Logger } from "../logging/logger.js";
 import {
+  hasDisplacementToken,
   isActorMentioned,
   parseActionQuotes,
   resolveDeterministicSemantics,
@@ -135,6 +136,13 @@ export function mergeSemantics(
  *   addressees). A judge that can invent Jeff — or promote a "Thanks
  *   Tanya!" addressee to a destination — cannot ground such requirements.
  * - contactActorId stays LLM-owned: roster/object validity only.
+ * - moves (Phase 2 / exp-3 item 3): requires a destination-or-displacement
+ *   token in the action text (explicit displacement verb or proximity
+ *   phrase). A `moves=true` verdict on "glance up" / "ask" / "sip" /
+ *   "review" / "prepare" / "type" text is ungrounded — perception and
+ *   cognition are never locomotion — so it is downgraded to false and any
+ *   destination requirement goes with it (destinations are meaningless
+ *   without movement). speaks/contact are untouched.
  *
  * Returns the grounded semantics plus a disagreement list (empty when
  * everything agreed).
@@ -258,6 +266,20 @@ export function applyDeterministicGrounding(
   const contactActorId = groundActorId("contactActorId", merged.contactActorId);
 
   // Requirement flags stay merged-OR, but record effects-vs-judge conflict.
+  // Phase 2: `moves` additionally requires a destination-or-displacement
+  // token in the action text itself — merged-OR cannot conjure locomotion
+  // out of a glance.
+  let moves = merged.moves;
+  let moveDestinationsDropped = false;
+  if (moves && !hasDisplacementToken(action.text)) {
+    moves = false;
+    moveDestinationsDropped =
+      merged.destinationActorId !== undefined || merged.destinationObjectId !== undefined;
+    disagreements.push(
+      "dropped moves=true (no displacement verb or destination token in the action text; perception/cognition is never locomotion)" +
+        (moveDestinationsDropped ? " — destination requirement(s) dropped with it" : ""),
+    );
+  }
   if (fromEffects && fromJudge) {
     if (fromEffects.moves !== fromJudge.moves) {
       disagreements.push(
@@ -282,11 +304,11 @@ export function applyDeterministicGrounding(
 
   return {
     semantics: {
-      moves: merged.moves,
+      moves,
       speaks: merged.speaks,
       quotedSpeech: groundedQuotes,
-      ...(destinationActorId !== undefined ? { destinationActorId } : {}),
-      ...(destinationObjectId !== undefined ? { destinationObjectId } : {}),
+      ...(destinationActorId !== undefined && moves ? { destinationActorId } : {}),
+      ...(destinationObjectId !== undefined && moves ? { destinationObjectId } : {}),
       ...(addresseeActorId !== undefined ? { addresseeActorId } : {}),
       ...(contactActorId !== undefined ? { contactActorId } : {}),
     },

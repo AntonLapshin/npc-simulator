@@ -264,6 +264,13 @@ export function validateConsequence(
  * requires x/y; semantics.moves === true requires a changed, reachable
  * position, and — when the judge resolved a destinationActorId — one
  * strictly closer to that actor (by id comparison).
+ *
+ * Phase 2 (exp-3 item 3, ticks 8/20): the mirror direction also holds —
+ * with moves === false the acting actor must STAY in place. A glance, a
+ * question, or a sip never relocates the body, so a position change on
+ * such a turn is a teleport, not progress. Contact-driven approaches are
+ * exempt (a handshake turn legitimately closes to adjacency — enforced
+ * separately by the contact gate).
  */
 function validateMovementIntent(
   world: World,
@@ -272,9 +279,30 @@ function validateMovementIntent(
   semantics: ActionSemantics,
 ): string[] {
   const errors: string[] = [];
-  if (!semantics.moves) return errors;
   const actor = world.actors.find((a) => a.id === action.actorId);
   if (!actor) return errors;
+  if (!semantics.moves) {
+    if (semantics.contactActorId === undefined) {
+      const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+      if (
+        patch?.x !== undefined && patch?.y !== undefined &&
+        (patch.x !== actor.x || patch.y !== actor.y)
+      ) {
+        const step = Math.hypot(patch.x - actor.x, patch.y - actor.y);
+        // Sitting/standing relocates the body to furniture (settling into a
+        // chair), so a pose-verb action may reposition — but never teleport:
+        // the per-turn cap bounds it like any other turn.
+        const poseAction =
+          /\b(sit|sits|sitting|sat|seat|seated|stand|stands|standing|stood)\b/i.test(action.text);
+        if (!poseAction || step > MAX_STEP_DISTANCE + 1e-9) {
+          errors.push(
+            `action describes no movement ("${action.text.slice(0, 80)}") but acting actor (${action.actorId}) moves from (${actor.x}, ${actor.y}) to (${patch.x}, ${patch.y}): stay in place — perception, speech, and cognition never relocate the body (only explicit walk/go/head/move/approach/return-to-<place> verbs do)`,
+          );
+        }
+      }
+    }
+    return errors;
+  }
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
   if (!patch || patch.x === undefined || patch.y === undefined) {
     errors.push(

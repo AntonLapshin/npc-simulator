@@ -215,6 +215,106 @@ export type DeterministicSemantics = {
 };
 
 /**
+ * Phase 2 (exp-3 item 3): mask non-locomotion clauses (perception /
+ * cognition / resumed activity) to clause end. Canonical allowlist shared
+ * by the mock judge and the deterministic moves-grounding below; the LLM
+ * judge prompt carries the equivalent rule in prose.
+ *
+ * Resuming a task is not relocating ("return/back to typing/work/...").
+ * Perception/cognition verbs head non-locomotion clauses: looking or
+ * glancing anywhere ("look up", "glance over notes"), asking, sipping,
+ * reviewing, preparing, typing/thinking/waiting. Masked to clause end so a
+ * later movement verb in the SAME clause is not misread either — nuanced
+ * mixed clauses belong to the LLM judge.
+ */
+export function maskNonLocomotion(text: string): string {
+  let t = text;
+  // Resuming a task is not relocating ("return/back to typing/work/...").
+  t = t.replace(
+    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  t = t.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  t = t.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
+  // Metaphor is not movement ("go the extra mile").
+  t = t.replace(/\bgo\s+(?:the\s+)?extra\s+mile\b/gi, " ");
+  // Perception/cognition verbs head non-locomotion clauses.
+  t = t.replace(
+    /\b(look|looks|looking|glance|glances|glancing|ask|asks|asked|asking|sip|sips|sipping|drink|drinks|drinking|drank|review|reviews|reviewing|prepare|prepares|preparing|type|types|typing|typed|think|thinks|thinking|wait|waits|waiting)\b[^,.;]*/gi,
+    " ",
+  );
+  return t;
+}
+
+/**
+ * Explicit whole-body displacement verbs (Phase 2 / exp-3 item 3):
+ * walk/go/head/move/approach/`return to <place>` plus the close synonyms
+ * the LLM judge prompt already treats as locomotion (run/step/come/enter/
+ * leave/follow/join, saunter/drift/sidle/dance over, roll one's chair, slip
+ * out, teleport). Perception/cognition verbs (look/glance/ask/sip/review/
+ * prepare/type/...) are NEVER here — their clauses are masked above.
+ *
+ * Bare "head" is deliberately excluded (body-part collisions: "shake his
+ * head"); headed/heading/head-to-<dir> is matched separately below.
+ */
+const DISPLACEMENT_VERBS =
+  "walk|walks|walking|walked|go|goes|going|went|move|moves|moving|moved|run|runs|running|ran|" +
+  "step|steps|stepping|stepped|come|comes|coming|came|approach|approaches|approaching|approached|" +
+  "enter|enters|entering|entered|leave|leaves|leaving|follow|follows|following|followed|" +
+  "join|joins|joining|joined|return|returns|returning|returned|advance|advances|advancing|" +
+  "proceed|proceeds|proceeding|shift|shifts|shifting|slide|slides|sliding|stroll|strolls|strolling|" +
+  "hurry|hurries|hurrying|rush|rushes|rushing|rushed|saunter|saunters|sauntering|" +
+  "drift|drifts|drifting|sidle|sidles|sidling|dance|dances|dancing|" +
+  "roll|rolls|rolling|rolled|slip|slips|slipping|slipped|teleport|teleports|teleporting";
+
+const HEAD_TO_RE =
+  /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i;
+
+const PROXIMITY_RE =
+  /\b(closer|close to|nearer|toward|towards|up to|next to|beside|behind|over to)\b/i;
+
+/**
+ * Phase 2 (exp-3 item 3): does the action text carry a
+ * destination-or-displacement token? `moves` requires one: an explicit
+ * displacement verb (masked for perception/cognition/resumed-activity
+ * clauses, body-part "head", and subordinate someone-else clauses) or an
+ * explicit proximity phrase. A glance, question, sip, or typing session
+ * carries no token — so a `moves=true` verdict on such text is ungrounded
+ * and the grounding layer downgrades it (kills forced teleports and
+ * ask-question fallbacks in one edit).
+ *
+ * Over-broad by design: an unrecognized real verb simply keeps the merged
+ * verdict (status quo) — only the absence of ANY token downgrades.
+ */
+export function hasDisplacementToken(text: string): boolean {
+  let t = text;
+  // Body-part "head" is not locomotion ("nodding the head").
+  t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
+  t = maskNonLocomotion(t);
+  // Someone ELSE's motion in a subordinate clause ("as he enters") is not
+  // the acting actor moving.
+  t = t.replace(/\b(as|while|when)\b[^,.;]*/gi, " ");
+  if (HEAD_TO_RE.test(t)) return true;
+  if (new RegExp(`\\b(?:${DISPLACEMENT_VERBS})\\b`, "i").test(t)) return true;
+  return PROXIMITY_RE.test(t);
+}
+
+/**
  * The deterministic judge (Phase 1 role split): quotes and destinations
  * resolved from the action text with parsing + roster/landmark lookup, no
  * LLM. LLM output (moves/speaks/contact flags) is checked against this —
