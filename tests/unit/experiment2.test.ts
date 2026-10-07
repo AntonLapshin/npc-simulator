@@ -14,7 +14,7 @@ import { consequenceResultSchema } from "../../src/schemas.js";
 import { mockClassifyAction } from "../../src/mocks/mockSemanticJudge.js";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
 import { createTestLogger } from "../../src/logging/logger.js";
-import { makeTinyWorld } from "../helpers.js";
+import { makeTinyWorld, hist, errorText } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult, World } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
@@ -58,7 +58,7 @@ describe("exp2-1 placeholder/schema leak (tick 4)", () => {
         stillSemantics(),
       );
       expect(v.valid).toBe(false);
-      expect(v.errors.join(" ")).toMatch(/placeholder/);
+      expect(errorText(v.errors)).toMatch(/placeholder/);
     }
   });
 
@@ -74,7 +74,7 @@ describe("exp2-1 placeholder/schema leak (tick 4)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/echoes/);
+    expect(errorText(v.errors)).toMatch(/echoes/);
   });
 
   it("zero patches + zero movement for a movement action still fails", () => {
@@ -86,7 +86,7 @@ describe("exp2-1 placeholder/schema leak (tick 4)", () => {
       { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/no position change|no actorPatch/);
+    expect(errorText(v.errors)).toMatch(/no position change|no actorPatch/);
   });
 });
 
@@ -104,7 +104,7 @@ describe("exp2-2 acting-actor patch required (tick 11)", () => {
     };
     const v = validateConsequence(world, observerOnly, action, semantics);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/acting actor.*no actorPatch/);
+    expect(errorText(v.errors)).toMatch(/acting actor.*no actorPatch/);
 
     const both: ConsequenceResult = {
       ...baseResult("U shakes hands with N."),
@@ -144,7 +144,7 @@ describe("exp2-3 narrative name audit (ticks 2/5/14)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/unknown actor "Jeff"/);
+    expect(errorText(v.errors)).toMatch(/unknown actor "Jeff"/);
   });
 
   it("rejects vocative hallucinations (Hey Jeff)", () => {
@@ -163,7 +163,7 @@ describe("exp2-3 narrative name audit (ticks 2/5/14)", () => {
       { moves: false, speaks: true, quotedSpeech: ["Hey Jeff, welcome!"] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/unknown actor/);
+    expect(errorText(v.errors)).toMatch(/unknown actor/);
   });
 
   it("accepts prose naming roster actors and scene landmarks", () => {
@@ -215,7 +215,7 @@ describe("exp2-4 deterministic gates incl. user turns (ticks 18/21/28/29)", () =
       resolved.semantics!,
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/no position change|exact words/);
+    expect(errorText(v.errors)).toMatch(/no position change|exact words/);
   });
 
   it("effects schema preserves destination/addressee/contact ids", () => {
@@ -270,7 +270,7 @@ describe("exp2-6 destination fidelity (ticks 7/17/27)", () => {
     };
     const vFar = validateConsequence(world, far, action, semantics);
     expect(vFar.valid).toBe(false);
-    expect(vFar.errors.join(" ")).toMatch(/AT Anton's desk|cells away/);
+    expect(errorText(vFar.errors)).toMatch(/AT Anton's desk|cells away/);
   });
 });
 
@@ -305,7 +305,7 @@ describe("exp2-7 object grounding (30/30 empty objectPatches)", () => {
     };
     const v = validateConsequence(world, dry, action, stillSemantics());
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/brewing\/pouring/);
+    expect(errorText(v.errors)).toMatch(/brewing\/pouring/);
 
     const poured: ConsequenceResult = {
       ...baseResult("U pours a coffee and remarks on the taste."),
@@ -358,9 +358,9 @@ describe("exp2-9/12/13 roster anchor, pronouns, de-dup", () => {
 
   it("proposal/selection/consequence contexts all carry the roster", () => {
     const world = officeWorld();
-    world.history.push("Anton: Nadia, where is my desk?");
-    world.history.push("Nadia: Welcome to the team, Anton!");
-    world.history.push("Anton: Nadia, please stop greeting me.");
+    world.history.push(hist(world, "Anton: Nadia, where is my desk?"));
+    world.history.push(hist(world, "Nadia: Welcome to the team, Anton!"));
+    world.history.push(hist(world, "Anton: Nadia, please stop greeting me."));
     const proposal = buildProposalContext(world, "n");
     expect(proposal).toContain("ROSTER");
     expect(proposal).toMatch(/never invent/i);

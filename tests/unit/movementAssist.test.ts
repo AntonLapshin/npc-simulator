@@ -24,8 +24,13 @@ describe("movementAssist", () => {
   });
 
   it("detects movement-only failures", () => {
-    expect(isMovementOnlyFailure(['action implies movement ("x") but acting actor has no position change'])).toBe(true);
-    expect(isMovementOnlyFailure(['actor u: no valid path from current'])).toBe(false);
+    // F2: classification switches on stable codes, not message prose.
+    expect(
+      isMovementOnlyFailure([{ code: "movement.no_position_change", message: "action implies movement" }]),
+    ).toBe(true);
+    expect(
+      isMovementOnlyFailure([{ code: "actor.no_path", message: "actor u: no valid path from current" }]),
+    ).toBe(false);
     expect(isMovementOnlyFailure([])).toBe(false);
   });
 

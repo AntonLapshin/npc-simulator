@@ -64,6 +64,15 @@ export type Actor = {
   look?: ActorLook;
 };
 
+export type ScenarioVocabulary = {
+  /**
+   * F8: object nouns this scenario uses. Object/verb validators use these
+   * instead of the hardcoded office noun list when present; scenarios
+   * without a vocabulary keep the office defaults.
+   */
+  objectNouns?: string[];
+};
+
 export type Scenario = {
   version: number;
   id: string;
@@ -73,6 +82,8 @@ export type Scenario = {
   order: string[];
   scene: Scene;
   actors: Actor[];
+  /** F8: optional scenario-specific object/prop vocabulary. */
+  vocabulary?: ScenarioVocabulary;
 };
 
 export type World = {
@@ -82,12 +93,64 @@ export type World = {
   narrative: string;
   userActorId: string;
   order: string[];
+  /**
+   * Q4: world-global turn counter. Increments once per completed turn for
+   * the whole world — not per actor, not wall-clock. Consumers must not
+   * read per-actor progress or elapsed time into it.
+   */
   tick: number;
   turnIndex: number;
-  history: string[];
+  history: HistoryEntry[];
   scene: Scene;
   actors: Actor[];
+  /** F8: carried over from the scenario (see Scenario.vocabulary). */
+  vocabulary?: ScenarioVocabulary;
 };
+
+/**
+ * F6: a world-history entry. `text` is the human-readable record;
+ * `perceivers` is the list of actor ids who perceived the event (F6:
+ * knowledge is perception-gated, not global).
+ */
+export type HistoryEntry = {
+  text: string;
+  perceivers: string[];
+};
+
+/**
+ * F6: normalize a history entry. Plain-string legacy entries (old saves,
+ * hand-built test worlds) become global entries perceived by every actor.
+ */
+export function normalizeHistoryEntry(
+  raw: string | HistoryEntry,
+  allActorIds: string[],
+): HistoryEntry {
+  if (typeof raw === "string") {
+    return { text: raw, perceivers: [...allActorIds] };
+  }
+  return {
+    text: raw.text,
+    perceivers: Array.isArray(raw.perceivers) ? [...raw.perceivers] : [...allActorIds],
+  };
+}
+
+/**
+ * F22: machine-readable fallback marker. Appended to "tried … (not done)"
+ * history entries INSTEAD of relying on the "(not done)" substring for
+ * streak counting and open-question filtering — a user-written action
+ * containing "(not done)" must never corrupt those. The human-readable
+ * "(not done)" text is kept alongside the sentinel; only the sentinel is
+ * parsed. U+10FFFF is a Unicode noncharacter: invisible, and vanishingly
+ * unlikely to appear in user text.
+ */
+export const NOT_DONE_SENTINEL = "\u{10FFFF}";
+
+/**
+ * F27: world/save format versions this engine build understands.
+ * scenarioLoader rejects anything else with a descriptive error.
+ * (persistence.ts imports this exact name.)
+ */
+export const KNOWN_WORLD_VERSIONS: number[] = [1];
 
 export type Action = {
   actorId: string;
@@ -139,6 +202,14 @@ export type ConsequenceResult = {
   actorPatches: ActorPatch[];
   objectPatches: ObjectPatch[];
   reasoning: string;
+  /**
+   * F23: true when this result is the canonical "Nothing changes."
+   * fallback (set on the engine-produced fallback clone).
+   * `isFallbackConsequence` checks this flag first; narrative equality
+   * remains only as a backward-compat fallback for results built before
+   * the flag existed.
+   */
+  fallback?: boolean;
   /**
    * Machine-readable self-declaration by the consequence LLM about what the
    * action did (see refactor plan §B). The validator checks patches against
@@ -226,9 +297,22 @@ export type EngineConfig = {
   turnTimeoutMs: number;
 };
 
+/**
+ * F2: a validation failure as a stable machine-readable code plus the
+ * human-readable message. Salvage tiers, retry hints, and repair
+ * eligibility switch on `code` — never on message substrings — so
+ * rewording a message cannot silently change turn behavior.
+ */
+export type ValidationError = {
+  /** Stable snake_case code, e.g. "movement.no_progress". */
+  code: string;
+  /** Human-readable detail (still surfaced in retry feedback and logs). */
+  message: string;
+};
+
 export type ValidationResult = {
   valid: boolean;
-  errors: string[];
+  errors: ValidationError[];
 };
 
 export type Point = {

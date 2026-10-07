@@ -95,17 +95,20 @@ export function isActorMentioned(
  * resolved — that stays with the LLM). Used for addressees and contact
  * targets: being greeted/thanked/asked/touched needs a mention, not a
  * movement phrase.
+ *
+ * F21: word-boundary matching — a bare substring match lets id "dan"
+ * match "Dana". Uses actorMentionVariants + mentionsVariant (\b…\b).
  */
 export function resolveMentionedActorId(
   world: World,
   actingActorId: string,
   actionText: string,
 ): string | undefined {
-  const lowered = actionText.toLowerCase();
   for (const a of world.actors) {
     if (a.id === actingActorId) continue;
-    if (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) return a.id;
-    if (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase())) return a.id;
+    if (actorMentionVariants(world, a.id).some((v) => mentionsVariant(actionText, v))) {
+      return a.id;
+    }
   }
   return undefined;
 }
@@ -165,7 +168,7 @@ export function resolveDestinationActorId(
 }
 
 /** Object name variants: id, de-underscored id, name. */
-function objectMentionVariants(obj: { id: string; name: string }): string[] {
+export function objectMentionVariants(obj: { id: string; name: string }): string[] {
   const out = new Set<string>();
   if (obj.id.length >= 3) {
     out.add(obj.id.toLowerCase());
@@ -176,7 +179,7 @@ function objectMentionVariants(obj: { id: string; name: string }): string[] {
 }
 
 /** Object mention with plural tolerance ("west-side desks" hits the desks). */
-function mentionsObjectVariant(clause: string, variant: string): boolean {
+export function mentionsObjectVariant(clause: string, variant: string): boolean {
   if (mentionsVariant(clause, variant)) return true;
   return new RegExp(`\\b${escapeRegExp(variant)}s\\b`, "i").test(clause);
 }
@@ -534,6 +537,39 @@ export type DeterministicSemantics = {
 };
 
 /**
+ * F35: the single canonical "resumed activity" mask. Resuming a task is
+ * not relocating ("return/back to typing/work/...") and must never read
+ * as locomotion or as starting an object interaction. Shared by
+ * maskNonLocomotion below and by validate/speech.ts (which imports and
+ * re-exports this) — one implementation, no drift.
+ */
+export function maskResumedActivity(t: string): string {
+  let out = t;
+  out = out.replace(
+    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  out = out.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
+  return out;
+}
+
+/**
  * Phase 2 (exp-3 item 3): mask non-locomotion clauses (perception /
  * cognition / resumed activity) to clause end. Canonical allowlist shared
  * by the mock judge and the deterministic moves-grounding below; the LLM
@@ -547,29 +583,9 @@ export type DeterministicSemantics = {
  * mixed clauses belong to the LLM judge.
  */
 export function maskNonLocomotion(text: string): string {
-  let t = text;
-  // Resuming a task is not relocating ("return/back to typing/work/...").
-  t = t.replace(
-    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  t = t.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  t = t.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
+  // F35: resumed-activity masking is the canonical maskResumedActivity
+  // above (shared with validate/speech.ts).
+  let t = maskResumedActivity(text);
   // Metaphor is not movement ("go the extra mile").
   t = t.replace(/\bgo\s+(?:the\s+)?extra\s+mile\b/gi, " ");
   // Perception/cognition verbs head non-locomotion clauses.
@@ -602,7 +618,7 @@ const DISPLACEMENT_VERBS =
   "roll|rolls|rolling|rolled|slip|slips|slipping|slipped|teleport|teleports|teleporting";
 
 const HEAD_TO_RE =
-  /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i;
+  /\b(heads?\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i;
 
 const PROXIMITY_RE =
   /\b(closer|close to|nearer|toward|towards|up to|next to|beside|behind|over to)\b/i;

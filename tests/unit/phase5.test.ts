@@ -25,7 +25,7 @@ import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { Logger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import type { World } from "../../src/types.js";
-import { makeTinyWorld } from "../helpers.js";
+import { makeTinyWorld, hist } from "../helpers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -147,7 +147,7 @@ describe("phase5 rolling summarization (flat tokens)", () => {
     const thin = makeTinyWorld();
     const thick = makeTinyWorld();
     for (let i = 0; i < 150; i++) {
-      thick.history.push(`U: filler turn ${i} describing routine office activity in words.`);
+      thick.history.push(hist(thick, `U: filler turn ${i} describing routine office activity in words.`));
     }
     const thinLen = buildConsequenceContext(thin, { actorId: "u", text: "Wave." }).length;
     const thickLen = buildConsequenceContext(thick, { actorId: "u", text: "Wave." }).length;
@@ -166,23 +166,23 @@ describe("phase5 rolling summarization (flat tokens)", () => {
 describe("phase5 open questions persist until answered", () => {
   it("survives many intervening turns, closes when the addressee speaks", () => {
     const world = makeTinyWorld();
-    world.history.push("U: N, where is my desk?");
+    world.history.push(hist(world, "U: N, where is my desk?"));
     for (let i = 0; i < 25; i++) {
-      world.history.push(`Zed: filler chatter turn ${i} about the weather.`);
+      world.history.push(hist(world, `Zed: filler chatter turn ${i} about the weather.`));
     }
     // Still open after 25 unrelated turns (old code lost it past the slice).
     expect(getOpenQuestions(world, "n")).toHaveLength(1);
     expect(buildProposalContext(world, "n")).toContain("where is my desk?");
     // Addressee responds -> their turn to move on; question closes.
-    world.history.push("N: Over by the window, U!");
+    world.history.push(hist(world, "N: Over by the window, U!"));
     expect(getOpenQuestions(world, "n")).toHaveLength(0);
   });
 
   it("a new question after an answer re-opens", () => {
     const world = makeTinyWorld();
-    world.history.push("U: N, where is my desk?");
-    world.history.push("N: Over by the window!");
-    world.history.push("U: N, what should my first task be?");
+    world.history.push(hist(world, "U: N, where is my desk?"));
+    world.history.push(hist(world, "N: Over by the window!"));
+    world.history.push(hist(world, "U: N, what should my first task be?"));
     expect(getOpenQuestions(world, "n")).toEqual(["U: N, what should my first task be?"]);
   });
 });
@@ -247,7 +247,7 @@ describe("phase5 memory caps and growth metrics", () => {
     const world = makeTinyWorld();
     const before = memoryGrowthStats(world);
     world.actors.find((a) => a.id === "u")!.memories.push("Something happened today.");
-    world.history.push("U: Hello everyone.");
+    world.history.push(hist(world, "U: Hello everyone."));
     const after = memoryGrowthStats(world);
     expect(after.memoryEntries).toBe(before.memoryEntries + 1);
     expect(after.historyEntries).toBe(before.historyEntries + 1);

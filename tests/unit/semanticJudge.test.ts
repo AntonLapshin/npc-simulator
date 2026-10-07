@@ -194,3 +194,42 @@ describe("LLMSemanticJudge", () => {
     expect(provider.calls).toBe(2);
   });
 });
+
+describe("MockSemanticJudge idiom map (F16)", () => {
+  it("classifies movement idioms as movement", async () => {
+    const world = makeTinyWorld();
+    const judge = new MockSemanticJudge();
+    for (const text of [
+      "Heads over to the coffee machine.",
+      "Makes her way toward Nadia.",
+      "Sidles up to Nadia.",
+    ]) {
+      const s = await judge.classify(world, { actorId: "u", text });
+      expect(s.moves).toBe(true);
+    }
+  });
+
+  it("classifies speech idioms as speech, even unquoted", async () => {
+    const world = makeTinyWorld();
+    const judge = new MockSemanticJudge();
+    for (const text of [
+      "Mutters about the deadline.",
+      "Whispers to Nadia.",
+      "Calls out to the room.",
+    ]) {
+      const s = await judge.classify(world, { actorId: "u", text });
+      expect(s.speaks).toBe(true);
+      expect(s.quotedSpeech).toEqual([]);
+    }
+  });
+
+  it("does not mistake a body-part head for the 'heads over' idiom", async () => {
+    const world = makeTinyWorld();
+    const judge = new MockSemanticJudge();
+    const s = await judge.classify(world, {
+      actorId: "u",
+      text: "Shakes his head over the report.",
+    });
+    expect(s.moves).toBe(false);
+  });
+});

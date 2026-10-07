@@ -11,8 +11,11 @@ import type {
   Action,
   ActionSemantics,
   ConsequenceResult,
+  EngineConfig,
+  ValidationError,
   World,
 } from "../types.js";
+import { defaultConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
 import { FALLBACK_CONSEQUENCE } from "../llm/llmConsequenceEngine.js";
 import { validateConsequence } from "./physicalValidator.js";
@@ -30,23 +33,34 @@ import {
 import { tryCloseTruncatedJson } from "../llm/json.js";
 
 /**
- * Exp-4 item 6: did this turn fall back? Structural check (canonical
- * fallback narrative with no patches) so the history entry can be marked
- * as un-applied ("tried … (not done)") instead of asserted as fact.
+ * Exp-4 item 6 / F23: did this turn fall back? The explicit `fallback`
+ * flag is checked first; the structural check (canonical fallback
+ * narrative with no patches) remains as backward compat for results built
+ * before the flag existed — so the history entry can be marked as
+ * un-applied ("tried … (not done)") instead of asserted as fact.
  */
 export function isFallbackConsequence(result: ConsequenceResult): boolean {
+  if (result.fallback === true) return true;
+  if (result.fallback === false) return false;
   return (
     result.narrative === FALLBACK_CONSEQUENCE.narrative &&
     result.actorPatches.length === 0 &&
     result.objectPatches.length === 0
   );
 }
+
+/** F2: speech-nit codes — salvage tier 1 downgrades these to warnings. */
+const SPEECH_ONLY_CODES = new Set([
+  "speech.dropped_words",
+  "speech.invented_dialogue",
+  "speech.question_dropped",
+  "speech.no_speech_rendered",
+]);
+
 /** True when every validation error is a speech-rendering nit (dropped/invented wording, lost question, silent-behavior swap). */
-export function isSpeechOnlyFailure(errors: string[]): boolean {
+export function isSpeechOnlyFailure(errors: ValidationError[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every((e) =>
-    /exact words|invents dialogue|keeps no question|renders no speech/.test(e),
-  );
+  return errors.every((e) => SPEECH_ONLY_CODES.has(e.code));
 }
 
 /**
@@ -63,13 +77,25 @@ export function isSpeechOnlyFailure(errors: string[]): boolean {
  * acting-actor presence, and the direct-addressee patch (repaired
  * deterministically with a stub reaction instead of downgraded).
  */
-export function isTier2Salvageable(errors: string[]): boolean {
+/** F2: tier-2 codes — speech + object/prop/pose WORDING misses downgraded to warnings. */
+const TIER2_CODES = new Set([
+  ...SPEECH_ONLY_CODES,
+  "speech.topic_dropped",
+  "object_grounding.sit_no_pose",
+  "object_grounding.brew_no_patch",
+  "object_grounding.pickup_no_patch",
+  "object_grounding.open_no_patch",
+  "object_grounding.sip_no_prop",
+  "object_grounding.hold_no_prop",
+  "action.pour_no_patch",
+  "action.pickup_no_patch",
+  "action.sit_no_pose",
+  "action.stand_no_pose",
+]);
+
+export function isTier2Salvageable(errors: ValidationError[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every((e) =>
-    /exact words|invents dialogue|keeps no question|renders no speech|keeps none of its topic words|pour\/brew\/open|pick up\/hold|describes sitting|brewing\/pouring|picking something up|opening\/booting|sipping\/drinking\/typing|holding\/carrying|says to (sit|stand)|neither sets pose|without an object patch|without a prop\/object patch/.test(
-      e,
-    ),
-  );
+  return errors.every((e) => TIER2_CODES.has(e.code));
 }
 
 /**
@@ -86,13 +112,15 @@ export function getHonestHistoryNote(result: ConsequenceResult): string | undefi
   return honestHistoryNotes.get(result);
 }
 
-function withHonestNote(out: { salvaged: ConsequenceResult; warnings: string[] }): {
+function withHonestNote(out: { salvaged: ConsequenceResult; warnings: ValidationError[] }): {
   salvaged: ConsequenceResult;
-  warnings: string[];
+  warnings: ValidationError[];
 } {
   honestHistoryNotes.set(
     out.salvaged,
-    out.warnings.length > 0 ? `partial: ${out.warnings.join(" | ").slice(0, 240)}` : "partial",
+    out.warnings.length > 0
+      ? `partial: ${out.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ").slice(0, 240)}`
+      : "partial",
   );
   return out;
 }
@@ -157,6 +185,28 @@ function applySalvageMovementRepair(
 }
 
 /**
+ * F25: shared perceiver check — does `perceiverId` perceive the acting
+ * actor's event (see/hear/adjacent)? Mirrors the validator's perceiver
+ * rule so no patch is owed when the event was unperceivable. Used by
+ * repairMissingAddressee and the format-collapse addressee stub.
+ */
+export function perceivesEvent(
+  world: World,
+  perceiverId: string,
+  actingActorId: string,
+  cfg: EngineConfig = defaultConfig,
+): boolean {
+  const target = world.actors.find((a) => a.id === perceiverId);
+  const actor = world.actors.find((a) => a.id === actingActorId);
+  if (!target || !actor) return false;
+  return (
+    getVisibleActors(world, perceiverId, cfg).some((a) => a.id === actingActorId) ||
+    getAudibleActors(world, perceiverId, cfg).some((a) => a.id === actingActorId) ||
+    Math.abs(target.x - actor.x) + Math.abs(target.y - actor.y) <= 2
+  );
+}
+
+/**
  * Exp-5 item 1: deterministic addressee repair for the salvage path. When
  * the action speaks directly TO someone (addressee semantics) but the
  * consequence left no patch on them, add a minimal stub thoughts reaction
@@ -172,22 +222,17 @@ function repairMissingAddressee(
   action: Action,
   candidate: ConsequenceResult,
   semantics: ActionSemantics,
+  cfg: EngineConfig = defaultConfig,
 ): ConsequenceResult | null {
   const addressee = semantics.addresseeActorId;
   if (addressee === undefined || addressee === action.actorId) return null;
   if (candidate.actorPatches.some((p) => p.actorId === addressee)) return null;
-  const target = world.actors.find((a) => a.id === addressee);
+  if (!perceivesEvent(world, addressee, action.actorId, cfg)) return null;
   const actor = world.actors.find((a) => a.id === action.actorId);
-  if (!target || !actor) return null;
-  const perceives =
-    getVisibleActors(world, addressee).some((a) => a.id === action.actorId) ||
-    getAudibleActors(world, addressee).some((a) => a.id === action.actorId) ||
-    Math.abs(target.x - actor.x) + Math.abs(target.y - actor.y) <= 2;
-  if (!perceives) return null;
   const repaired: ConsequenceResult = structuredClone(candidate);
   repaired.actorPatches.push({
     actorId: addressee,
-    thoughts: `Heard ${actor.name} — will pick this up next turn.`,
+    thoughts: `Heard ${actor?.name ?? action.actorId} — will pick this up next turn.`,
   });
   return repaired;
 }
@@ -215,7 +260,7 @@ export type SalvageEvaluation = {
   eligible: boolean;
   reason: string;
   /** Non-speech blockers when ineligible (empty when eligible or unknown). */
-  blockers: string[];
+  blockers: ValidationError[];
 };
 
 export function trySalvageConsequence(
@@ -224,8 +269,9 @@ export function trySalvageConsequence(
   result: ConsequenceResult,
   semantics: ActionSemantics | undefined,
   logger?: Logger,
-): { salvaged: ConsequenceResult; warnings: string[] } | null {
-  const evaluate = (eligible: boolean, reason: string, blockers: string[] = []): null => {
+  cfg: EngineConfig = defaultConfig,
+): { salvaged: ConsequenceResult; warnings: ValidationError[] } | null {
+  const evaluate = (eligible: boolean, reason: string, blockers: ValidationError[] = []): null => {
     // Exp-4 item 8: every salvage entry evaluation is logged (eligible /
     // ineligible + reason) so the session trace shows WHY salvage never
     // fires — not just that it didn't.
@@ -263,6 +309,13 @@ export function trySalvageConsequence(
   // patch) and an emptied husk is no better than the fallback. The one
   // exception is a locomotion turn whose movement can be deterministically
   // repaired below (same repair the retry loop applies).
+  //
+  // F3: the addressee repair runs BEFORE this early return. It exists
+  // precisely for speech-only turns whose consequence left the addressee
+  // unpatched (which validateAddresseePatch rejects) — the old order made
+  // that repair unreachable for non-movement turns.
+  const withEarlyAddressee = repairMissingAddressee(world, action, candidate, semantics, cfg);
+  if (withEarlyAddressee) candidate = withEarlyAddressee;
   if (
     !candidate.actorPatches.some((p) => p.actorId === action.actorId) &&
     !semantics.moves
@@ -271,8 +324,8 @@ export function trySalvageConsequence(
   }
   const accept = (
     c: ConsequenceResult,
-  ): { salvaged: ConsequenceResult; warnings: string[] } | null => {
-    const revalidation = validateConsequence(world, c, action, semantics);
+  ): { salvaged: ConsequenceResult; warnings: ValidationError[] } | null => {
+    const revalidation = validateConsequence(world, c, action, semantics, cfg);
     if (revalidation.valid) return { salvaged: c, warnings: [] };
     if (isSpeechOnlyFailure(revalidation.errors)) {
       return { salvaged: c, warnings: revalidation.errors };
@@ -312,9 +365,9 @@ export function trySalvageConsequence(
   // warnings, not fatal. Physics, direction/progress, contact adjacency,
   // and observer discipline stay hard.
   const tierBase = movementBase ?? candidate;
-  const withAddressee = repairMissingAddressee(world, action, tierBase, semantics);
+  const withAddressee = repairMissingAddressee(world, action, tierBase, semantics, cfg);
   const tiered = withAddressee ?? tierBase;
-  const revalidation = validateConsequence(world, tiered, action, semantics);
+  const revalidation = validateConsequence(world, tiered, action, semantics, cfg);
   if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
     evaluate(
       true,
@@ -438,6 +491,7 @@ export function salvageFormatCollapse(
   world: World,
   action: Action,
   rawAttempts: string[],
+  cfg: EngineConfig = defaultConfig,
 ): ConsequenceResult | null {
   if (rawAttempts.length === 0) return null;
   const actor = world.actors.find((a) => a.id === action.actorId);
@@ -454,10 +508,14 @@ export function salvageFormatCollapse(
   const actorPatches: ConsequenceResult["actorPatches"] = [];
   if (thoughts) actorPatches.push({ actorId: action.actorId, thoughts });
   const addressee = resolveDeterministicSemantics(world, action).addresseeActorId;
+  // F25: the addressee stub passes the same perceiver check as
+  // repairMissingAddressee — no patch is owed when the addressee could not
+  // perceive the event.
   if (
     addressee !== undefined &&
     addressee !== action.actorId &&
-    world.actors.some((a) => a.id === addressee)
+    world.actors.some((a) => a.id === addressee) &&
+    perceivesEvent(world, addressee, action.actorId, cfg)
   ) {
     actorPatches.push({
       actorId: addressee,

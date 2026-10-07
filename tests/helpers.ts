@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { World } from "../src/types.js";
+import type { HistoryEntry, ValidationError, World } from "../src/types.js";
+import { NOT_DONE_SENTINEL } from "../src/types.js";
 import { loadScenario } from "../src/engine/scenarioLoader.js";
 import { Logger } from "../src/logging/logger.js";
 import { MockProposalEngine } from "../src/mocks/mockProposalEngine.js";
@@ -34,8 +35,7 @@ export function makeTestDeps(
   };
 }
 
-export function makeTinyWorld(): World {
-  return loadScenario({
+export function makeTinyWorld(): World {  return loadScenario({
     version: 1,
     id: "tiny",
     title: "Tiny",
@@ -72,4 +72,26 @@ export function makeTinyWorld(): World {
       },
     ],
   });
+}
+
+/**
+ * Build a HistoryEntry perceived by every actor (F6: legacy-global
+ * semantics for hand-built test worlds).
+ */
+export function hist(world: World, text: string, perceivers?: string[]): HistoryEntry {
+  return { text, perceivers: perceivers ?? world.actors.map((a) => a.id) };
+}
+
+/**
+ * Build a fallback-marked history entry: `text` should already carry the
+ * "Name tried: <action>" prefix; the human-readable "(not done)" marker
+ * and the F22 machine-readable sentinel are appended.
+ */
+export function triedHist(world: World, text: string): HistoryEntry {
+  return hist(world, `${text} (not done)${NOT_DONE_SENTINEL}`);
+}
+
+/** Render coded validation errors as one searchable string (F2). */
+export function errorText(errors: ValidationError[]): string {
+  return errors.map((e) => `[${e.code}] ${e.message}`).join(" ");
 }

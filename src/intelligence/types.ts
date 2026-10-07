@@ -16,7 +16,18 @@ export interface SelectionEngine {
 }
 
 export interface ConsequenceEngine {
-  resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult>;
+  /**
+   * F28: `opts.signal` carries the turn-deadline AbortSignal. Engines
+   * forward it to the provider call so a hung LLM request is actually
+   * cancelled on timeout instead of burning tokens in the background.
+   * Optional — engines that ignore it still satisfy the interface.
+   */
+  resolve(
+    world: World,
+    action: Action,
+    feedback?: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ConsequenceResult>;
 }
 
 /**

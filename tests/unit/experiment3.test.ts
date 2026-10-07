@@ -17,7 +17,7 @@ import { isSpeechOnlyFailure, resolveWithValidation, summarizeTurnOutcomes, tryS
 import { suggestSimilarIds } from "../../src/engine/physicalValidator.js";
 import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
 import { Logger } from "../../src/logging/logger.js";
-import { makeTestDeps, makeTinyWorld } from "../helpers.js";
+import { makeTestDeps, makeTinyWorld, errorText } from "../helpers.js";
 import {
   buildConsequenceContext,
   buildObjectIdCatalog,
@@ -159,7 +159,7 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
       { moves: false, speaks: true, quotedSpeech: ["Hi, I am Anton, where is my desk?"] },
     );
     expect(trunc.valid).toBe(false);
-    expect(trunc.errors.join(" ")).toMatch(/exact words/);
+    expect(errorText(trunc.errors)).toMatch(/exact words/);
   });
 
   it("fails dropped handshakes via action-side contact coverage (tick 12)", () => {
@@ -180,7 +180,7 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
       },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/physical contact/);
+    expect(errorText(v.errors)).toMatch(/physical contact/);
   });
 
   it("fails sit-dodged-by-stands via action-side pose coverage (tick 15)", () => {
@@ -195,7 +195,7 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/sit/);
+    expect(errorText(v.errors)).toMatch(/sit/);
   });
 
   it("fails pour-dodged-by-silence via action-side object coverage (tick 9)", () => {
@@ -212,7 +212,7 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
       { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/pour\/brew\/open/);
+    expect(errorText(v.errors)).toMatch(/pour\/brew\/open/);
   });
 
   it("fails flipped ask-to-thanks via action-side question coverage (tick 16)", () => {
@@ -230,7 +230,7 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
       { moves: true, destinationActorId: "u", speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/asks a question/);
+    expect(errorText(v.errors)).toMatch(/asks a question/);
   });
 
   it("does not mistake adjectives for verbs ('an open demeanor')", () => {
@@ -331,7 +331,7 @@ describe("exp3-4 displacement cap + real progress (ticks 8/15/20)", () => {
       { moves: true, speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/at most 6 cells/);
+    expect(errorText(v.errors)).toMatch(/at most 6 cells/);
   });
 
   it("rejects token shuffles toward distant named landmarks (tick 15)", () => {
@@ -354,7 +354,7 @@ describe("exp3-4 displacement cap + real progress (ticks 8/15/20)", () => {
       { moves: true, destinationObjectId: "anton_desk", speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/real progress|different landmark/);
+    expect(errorText(v.errors)).toMatch(/real progress|different landmark/);
   });
 
   it("accepts real progress toward a distant landmark", () => {
@@ -406,7 +406,7 @@ describe("exp3-5 observer-as-subject prose (tick 13)", () => {
       { moves: true, destinationActorId: "u", speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/observer.*as the acting subject|describe ONLY/);
+    expect(errorText(v.errors)).toMatch(/observer.*as the acting subject|describe ONLY/);
   });
 
   it("passes landmark mentions and possessives", () => {
@@ -447,7 +447,7 @@ describe("exp3-7 fuzzy object-ID repair (ticks 10/11)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/unknown object id.*did you mean/);
+    expect(errorText(v.errors)).toMatch(/unknown object id.*did you mean/);
   });
 });
 
@@ -494,9 +494,16 @@ describe("exp3-6 partial-apply / salvage (ticks 3/9)", () => {
   });
 
   it("isSpeechOnlyFailure matches only speech nits", () => {
-    expect(isSpeechOnlyFailure(['narrative drops the acting actor\'s exact words ("x")'])).toBe(true);
-    expect(isSpeechOnlyFailure(['narrative invents dialogue ("x") not present'])).toBe(true);
-    expect(isSpeechOnlyFailure(["actor u: coordinates outside scene bounds"])).toBe(false);
+    // F2: classification switches on stable codes, not message prose.
+    expect(
+      isSpeechOnlyFailure([{ code: "speech.dropped_words", message: "narrative drops the acting actor's exact words" }]),
+    ).toBe(true);
+    expect(
+      isSpeechOnlyFailure([{ code: "speech.invented_dialogue", message: "narrative invents dialogue" }]),
+    ).toBe(true);
+    expect(
+      isSpeechOnlyFailure([{ code: "actor.out_of_bounds", message: "actor u: coordinates outside scene bounds" }]),
+    ).toBe(false);
     expect(isSpeechOnlyFailure([])).toBe(false);
   });
 
@@ -755,7 +762,7 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
       stillSemantics(),
     );
     expect(dropped.valid).toBe(false);
-    expect(dropped.errors.join(" ")).toMatch(/renders no speech/);
+    expect(errorText(dropped.errors)).toMatch(/renders no speech/);
 
     const kept = validateConsequence(
       world,
@@ -803,7 +810,7 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
         stillSemantics(),
       );
       expect(dropped.valid, text).toBe(false);
-      expect(dropped.errors.join(" "), text).toMatch(/pick up\/hold/);
+      expect(errorText(dropped.errors), text).toMatch(/pick up\/hold/);
     }
     const held = validateConsequence(
       world,
@@ -833,7 +840,7 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
       stillSemantics(),
     );
     expect(far.valid).toBe(false);
-    expect(far.errors.join(" ")).toMatch(/adjacent/);
+    expect(errorText(far.errors)).toMatch(/adjacent/);
 
     // Adjacent: Nadia one cell away, handshake narrated — passes.
     world.actors.find((a) => a.id === "n")!.x = 2;
@@ -946,10 +953,12 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
       },
       logger,
     );
-    // No displacement token in the action: moves downgraded, destination dropped.
-    expect(glance.semantics!.moves).toBe(false);
+    // F1: token evidence may ASSERT movement but never downgrade a true
+    // merged verdict to false — the merged moves=true stands even with no
+    // displacement token, and the disagreement is logged.
+    expect(glance.semantics!.moves).toBe(true);
     expect(glance.semantics!.destinationActorId).toBeUndefined();
-    expect(glance.disagreements!.join(" ")).toMatch(/no displacement verb or destination token/);
+    expect(glance.disagreements!.join(" ")).toMatch(/kept from the merged verdict despite no displacement token/);
 
     const walk = await resolveActionSemantics(
       world,
@@ -986,7 +995,7 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
       still,
     );
     expect(teleport.valid).toBe(false);
-    expect(teleport.errors.join(" ")).toMatch(/stay in place/);
+    expect(errorText(teleport.errors)).toMatch(/stay in place/);
 
     const stayed = validateConsequence(
       world,
@@ -1027,7 +1036,7 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
       still,
     );
     expect(flung.valid).toBe(false);
-    expect(flung.errors.join(" ")).toMatch(/stay in place/);
+    expect(errorText(flung.errors)).toMatch(/stay in place/);
   });
 
   it("rejects token shuffles toward distant actors (tick-15 actor variant)", () => {
@@ -1052,7 +1061,7 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
       semantics,
     );
     expect(shuffle.valid).toBe(false);
-    expect(shuffle.errors.join(" ")).toMatch(/real progress/);
+    expect(errorText(shuffle.errors)).toMatch(/real progress/);
 
     const stride = validateConsequence(
       world,
@@ -1106,21 +1115,22 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
 
 describe("phase4 partial-apply fallback (plan Phase 4)", () => {
   it("isSpeechOnlyFailure covers lost questions and silent-behavior swaps", () => {
+    // F2: codes, not prose.
     expect(
       isSpeechOnlyFailure([
-        'action asks a question ("where is my desk?") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)',
+        { code: "speech.question_dropped", message: "action asks a question but the narrative keeps no question" },
       ]),
     ).toBe(true);
     expect(
       isSpeechOnlyFailure([
-        'action says something ("thanks for the welcome") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior',
+        { code: "speech.no_speech_rendered", message: "action says something but the narrative renders no speech" },
       ]),
     ).toBe(true);
     // Speech nit mixed with a physics error is still a hard failure.
     expect(
       isSpeechOnlyFailure([
-        'narrative drops the acting actor\'s exact words ("hi")',
-        "actor u: coordinates outside scene bounds",
+        { code: "speech.dropped_words", message: "narrative drops the acting actor's exact words" },
+        { code: "actor.out_of_bounds", message: "actor u: coordinates outside scene bounds" },
       ]),
     ).toBe(false);
   });
@@ -1153,7 +1163,7 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
     expect(out!.warnings.length).toBeGreaterThan(0);
-    expect(out!.warnings.join(" ")).toMatch(/question|exact words/);
+    expect(errorText(out!.warnings)).toMatch(/question|exact words/);
   });
 
   it("repairs missing movement in salvage when locomotion is implied", () => {
@@ -1219,7 +1229,7 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     );
     expect(pour).not.toBeNull();
     expect(pour!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBe(1);
-    expect(pour!.warnings.join(" ")).toMatch(/pour\/brew\/open/);
+    expect(errorText(pour!.warnings)).toMatch(/pour\/brew\/open/);
 
     // Far handshake with no adjacency (tick-12 shape): u (1,1), n (4,4).
     const contact = trySalvageConsequence(

@@ -66,8 +66,10 @@ export class LLMProposalEngine implements ProposalEngine {
     const maxRetries = this.options.maxRetries ?? 3;
 
     let userPrompt: string;
+    let suffix: string;
     try {
-      userPrompt = `${buildProposalContext(world, actorId, { historyLimit: this.options.historyLimit, maxSuggestions: this.options.maxSuggestions })}\n\n${proposalSuffix()}`;
+      suffix = proposalSuffix();
+      userPrompt = `${buildProposalContext(world, actorId, { historyLimit: this.options.historyLimit, maxSuggestions: this.options.maxSuggestions })}\n\n${suffix}`;
     } catch (err) {
       this.logger.log({
         module: "proposal",
@@ -95,6 +97,9 @@ export class LLMProposalEngine implements ProposalEngine {
       maxRetries,
       schema: proposalResultSchema,
       schemaText: PROPOSAL_OUTPUT_SCHEMA,
+      // F33: protected instruction tail — kept intact if the input cap
+      // truncates the world-dump portion of the prompt.
+      suffix,
       extraCheck: (value) => {
         const cleaned = normalizeSuggestions(value.suggestions);
         if (cleaned.length === 0) return "no usable suggestions";
@@ -140,6 +145,8 @@ export class LLMProposalEngine implements ProposalEngine {
         input: { actorId },
         prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
         rawResponse: result.lastRaw,
+        // F31: usage from the last attempt, when the backend reported it.
+        usage: result.usage,
         error: `fallback: ${result.error}`,
         durationMs: Date.now() - startedAt,
       });
@@ -159,6 +166,8 @@ export class LLMProposalEngine implements ProposalEngine {
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,
+      // F31: per-call usage captured from the chat-completions response.
+      usage: result.usage,
       output: result.value,
       durationMs: Date.now() - startedAt,
     });

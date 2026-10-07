@@ -2,6 +2,7 @@ import type { Action, Actor, ConsequenceResult, EngineConfig, World } from "../t
 import { defaultConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
 import { applyConsequence } from "./patchApplier.js";
+import type { ApplyConsequenceOptions } from "./patchApplier.js";
 
 export function cloneWorld(world: World): World {
   return structuredClone(world);
@@ -50,9 +51,18 @@ export class WorldStore {
     return cloneWorld(this.world);
   }
 
-  applyConsequence(result: ConsequenceResult, action: Action): World {
+  /**
+   * F26: accepts and forwards ApplyConsequenceOptions (fallback marking,
+   * honest-history notes) — the store is usable for the real turn loop,
+   * not just unmarked applies.
+   */
+  applyConsequence(
+    result: ConsequenceResult,
+    action: Action,
+    opts: ApplyConsequenceOptions = {},
+  ): World {
     const before = this.world;
-    this.world = applyConsequence(before, result, action, this.config);
+    this.world = applyConsequence(before, result, action, this.config, opts);
     this.logger?.log({
       module: "world",
       event: "patch_applied",

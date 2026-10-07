@@ -40,8 +40,10 @@ export class LLMSelectionEngine implements SelectionEngine {
     const maxRetries = this.options.maxRetries ?? 3;
 
     let userPrompt: string;
+    let suffix: string;
     try {
-      userPrompt = `${buildSelectionContext(world, actorId, suggestions, { historyLimit: this.options.historyLimit })}\n\n${selectionSuffix()}`;
+      suffix = selectionSuffix();
+      userPrompt = `${buildSelectionContext(world, actorId, suggestions, { historyLimit: this.options.historyLimit })}\n\n${suffix}`;
     } catch (err) {
       this.logger.log({
         module: "selection",
@@ -69,6 +71,9 @@ export class LLMSelectionEngine implements SelectionEngine {
       maxRetries,
       schema: selectionResultSchema,
       schemaText: SELECTION_OUTPUT_SCHEMA,
+      // F33: protected instruction tail — kept intact if the input cap
+      // truncates the world-dump portion of the prompt.
+      suffix,
       extraCheck: (value) => {
         if (value.action.trim().length === 0) return "empty action text";
         // Exp-4 item 9: the chosen action must be the DECIDING actor's own —
@@ -99,6 +104,8 @@ export class LLMSelectionEngine implements SelectionEngine {
         input: { actorId, suggestions },
         prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
         rawResponse: result.lastRaw,
+        // F31: usage from the last attempt, when the backend reported it.
+        usage: result.usage,
         error: `fallback: ${result.error}`,
         durationMs: Date.now() - startedAt,
       });
@@ -118,6 +125,8 @@ export class LLMSelectionEngine implements SelectionEngine {
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,
+      // F31: per-call usage captured from the chat-completions response.
+      usage: result.usage,
       output: result.value,
       durationMs: Date.now() - startedAt,
     });

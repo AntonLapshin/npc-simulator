@@ -37,12 +37,29 @@
 // Simple-tier model override: LLM_SIMPLE_MODEL.
 
 import { errorMessage } from "../util/errors.js";
+import type { LlmUsage } from "../logging/logTypes.js";
+
+/** F28: per-call options for LLMProvider.complete. Additive/optional. */
+export type LlmCallOptions = {
+  /**
+   * Abort the in-flight request (e.g. the engine's turn deadline fired).
+   * The provider links it to its own timeout controller; a caller abort
+   * surfaces as an "aborted by caller" error, distinct from a timeout.
+   */
+  signal?: AbortSignal;
+};
 
 export interface LLMProvider {
   /** Complete a system+user prompt pair. Resolves with raw text (JSON expected). */
-  complete(systemPrompt: string, userPrompt: string): Promise<string>;
+  complete(systemPrompt: string, userPrompt: string, opts?: LlmCallOptions): Promise<string>;
   /** Human-readable backend id for logs (never includes secrets). */
   readonly name: string;
+  /**
+   * F31: per-call usage from the most recent request (the OpenAI `usage`
+   * block), when the backend reports it. Drained on read — call once per
+   * request. Optional: providers that cannot report usage omit it.
+   */
+  takeLastUsage?(): LlmUsage | undefined;
 }
 
 export type OpenAICompatibleOptions = {
@@ -58,7 +75,8 @@ export type OpenAICompatibleOptions = {
    * Exp-6 item 7: request structured output from the gateway
    * (`response_format: {type: "json_object"}`) — the single highest-ROI
    * fix for the "Let me analyze this…" format-collapse failures, when the
-   * backend honors it. Env: LLM_JSON_MODE=1.
+   * backend honors it. ON by default; env LLM_JSON_MODE=0 (or "false")
+   * disables it.
    */
   jsonMode?: boolean;
   /** Extra fetch init (custom headers, dispatcher, ...). */
@@ -71,6 +89,32 @@ function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
 
+function toNonNegativeInt(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+}
+
+/**
+ * F31: normalize the OpenAI chat-completions `usage` block into LlmUsage.
+ * Tolerates missing fields (derives total = prompt + completion when the
+ * backend omits it); returns undefined when nothing usable is present.
+ */
+function parseLlmUsage(raw: unknown): LlmUsage | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  const promptTokens = toNonNegativeInt(r["prompt_tokens"]);
+  const completionTokens = toNonNegativeInt(r["completion_tokens"]);
+  const totalTokens = toNonNegativeInt(r["total_tokens"]);
+  if (promptTokens === undefined && completionTokens === undefined && totalTokens === undefined) {
+    return undefined;
+  }
+  return {
+    promptTokens: promptTokens ?? 0,
+    completionTokens: completionTokens ?? 0,
+    totalTokens: totalTokens ?? (promptTokens ?? 0) + (completionTokens ?? 0),
+  };
+}
+
 /**
  * Shared OpenAI-compatible Chat Completions client with timeout,
  * rate-limit / refusal surfacing, and empty-response detection.
@@ -80,6 +124,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
   readonly name: string;
   protected readonly options: Required<Omit<OpenAICompatibleOptions, "apiKey" | "fetchImpl">> &
     Pick<OpenAICompatibleOptions, "apiKey" | "fetchImpl">;
+  /** F31: usage reported by the most recent request (drained by takeLastUsage). */
+  private lastUsage: LlmUsage | undefined;
 
   constructor(name: string, options: OpenAICompatibleOptions) {
     this.name = name;
@@ -90,7 +136,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
       repeatPenalty: options.repeatPenalty ?? 1.1,
       maxTokens: options.maxTokens ?? 1500,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      jsonMode: options.jsonMode ?? false,
+      // F13: JSON mode is ON by default (LLM_JSON_MODE=0 disables it).
+      jsonMode: options.jsonMode ?? true,
       apiKey: options.apiKey,
       fetchImpl: options.fetchImpl,
     };
@@ -105,10 +152,34 @@ export class OpenAICompatibleProvider implements LLMProvider {
     return this.options.baseUrl;
   }
 
-  async complete(systemPrompt: string, userPrompt: string): Promise<string> {
+  /**
+   * F31: usage from the most recent completed request (the OpenAI `usage`
+   * block), when the backend reports it. Drained on read.
+   */
+  takeLastUsage(): LlmUsage | undefined {
+    const usage = this.lastUsage;
+    this.lastUsage = undefined;
+    return usage;
+  }
+
+  async complete(
+    systemPrompt: string,
+    userPrompt: string,
+    opts?: LlmCallOptions,
+  ): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    // F28: link the caller's signal (e.g. the engine's turn deadline) to
+    // the in-flight request so a late result stops burning tokens.
+    const externalSignal = opts?.signal;
+    const onExternalAbort = (): void => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
     const fetchImpl = this.options.fetchImpl ?? fetch;
+    // A new request invalidates any previous usage reading.
+    this.lastUsage = undefined;
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (this.options.apiKey) headers["Authorization"] = `Bearer ${this.options.apiKey}`;
@@ -130,7 +201,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
         }),
       });
       if (res.status === 429) {
-        throw new Error(`${this.name}: rate limited (HTTP 429)`);
+        // F11: surface Retry-After so the retry loop can honor it.
+        const retryAfter = res.headers?.get?.("retry-after")?.trim();
+        const secs = retryAfter ? Number(retryAfter) : NaN;
+        const hint =
+          Number.isFinite(secs) && secs >= 0 ? `, retry after ${secs}s` : "";
+        throw new Error(`${this.name}: rate limited (HTTP 429${hint})`);
       }
       if (!res.ok) {
         const detail = await res.text().catch(() => "");
@@ -140,7 +216,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown };
       };
+      // F31: capture per-call usage for cost tracking.
+      const usage = parseLlmUsage(data.usage);
+      if (usage) this.lastUsage = usage;
       const content = data.choices?.[0]?.message?.content;
       if (!content || content.trim().length === 0) {
         const reason = data.choices?.[0]?.finish_reason ?? "unknown";
@@ -149,11 +229,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
       return content;
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
+        // F28: a caller abort (turn deadline) is not a provider timeout.
+        if (externalSignal?.aborted) throw new Error(`${this.name}: aborted by caller`);
         throw new Error(`${this.name}: timed out after ${this.options.timeoutMs}ms`);
       }
       throw err instanceof Error ? err : new Error(`${this.name}: ${errorMessage(err)}`);
     } finally {
       clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
     }
   }
 }
@@ -301,8 +384,20 @@ export type LlmEnvConfig = {
   temperature: number;
   repeatPenalty: number;
   maxTokens: number;
-  /** Exp-6 item 7: request gateway JSON-mode responses (LLM_JSON_MODE=1). */
+  /**
+   * Exp-6 item 7: request gateway JSON-mode responses. ON by default;
+   * LLM_JSON_MODE=0 (or "false") disables it.
+   */
   jsonMode: boolean;
+  /**
+   * F14: per-task temperatures (LLM_TEMPERATURE_{PROPOSAL,SELECTION,
+   * CONSEQUENCE,SEMANTIC}), each falling back to LLM_TEMPERATURE.
+   * Entries are present only when the corresponding env var (or the
+   * global LLM_TEMPERATURE) is set; unset tasks use
+   * DEFAULT_TASK_TEMPERATURES. Mirrors the LLM_MAX_TOKENS_* pattern,
+   * except temperature 0 is valid (deterministic) while maxTokens 0 is not.
+   */
+  temperatureByTask: Partial<Record<LlmTask, number>>;
   /**
    * Exp-6 item 6: token budgets proportional to payload
    * (LLM_MAX_TOKENS_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}) — the
@@ -313,7 +408,8 @@ export type LlmEnvConfig = {
 
 const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
 
-function parseBackend(raw: string | undefined): LlmBackend | undefined {
+/** F12: parse a backend name for LLM_FAILOVER_BACKEND (exported for createLlmEngines). */
+export function parseBackend(raw: string | undefined): LlmBackend | undefined {
   return raw === "laya-local" || raw === "ollama" || raw === "joingonka" ? raw : undefined;
 }
 
@@ -341,6 +437,22 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
     const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
     if (Number.isFinite(n) && n > 0) maxTokensByTask[task] = Math.floor(n);
   }
+  // F14: per-task temperatures (LLM_TEMPERATURE_{PROPOSAL,SELECTION,
+  // CONSEQUENCE,SEMANTIC}), each falling back to LLM_TEMPERATURE. Chain:
+  // LLM_TEMPERATURE_<TASK> → LLM_TEMPERATURE → DEFAULT_TASK_TEMPERATURES.
+  // Unlike maxTokens, temperature 0 is meaningful (deterministic), so the
+  // validity floor is >= 0 rather than > 0.
+  const globalTempRaw = env["LLM_TEMPERATURE"];
+  const globalTempN =
+    globalTempRaw !== undefined && globalTempRaw !== "" ? Number(globalTempRaw) : NaN;
+  const globalTempValid = Number.isFinite(globalTempN) && globalTempN >= 0;
+  const temperatureByTask: Partial<Record<LlmTask, number>> = {};
+  for (const task of ["proposal", "selection", "consequence", "semantic"] as const) {
+    const raw = env[`LLM_TEMPERATURE_${task.toUpperCase()}`];
+    const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
+    if (Number.isFinite(n) && n >= 0) temperatureByTask[task] = n;
+    else if (globalTempValid) temperatureByTask[task] = globalTempN;
+  }
   return {
     backend,
     simpleBackend,
@@ -365,8 +477,10 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
     temperature: Number(env["LLM_TEMPERATURE"] ?? 0.9),
     repeatPenalty: Number(env["LLM_REPEAT_PENALTY"] ?? 1.1),
     maxTokens: Number(env["LLM_MAX_TOKENS"] ?? 1500),
-    jsonMode: env["LLM_JSON_MODE"] === "1" || env["LLM_JSON_MODE"]?.toLowerCase() === "true",
+    // F13: JSON mode is ON by default; LLM_JSON_MODE=0 (or "false") disables it.
+    jsonMode: env["LLM_JSON_MODE"] !== "0" && env["LLM_JSON_MODE"]?.toLowerCase() !== "false",
     maxTokensByTask,
+    temperatureByTask,
   };
 }
 
@@ -396,6 +510,27 @@ export function createProviderFromEnv(
   return buildProviderForBackend(cfg, which);
 }
 
+/**
+ * F14: built-in per-task temperature defaults, used when neither
+ * LLM_TEMPERATURE_<TASK> nor LLM_TEMPERATURE is set. Classification tasks
+ * (selection, semantic) want determinism; creative tasks keep 0.9.
+ */
+export const DEFAULT_TASK_TEMPERATURES: Record<LlmTask, number> = {
+  proposal: 0.9,
+  selection: 0.2,
+  consequence: 0.9,
+  semantic: 0.2,
+};
+
+/**
+ * F14: effective temperature for a task. Chain: LLM_TEMPERATURE_<TASK> →
+ * LLM_TEMPERATURE (both baked into cfg.temperatureByTask by resolveLlmEnv)
+ * → built-in per-task default.
+ */
+export function resolveTaskTemperature(task: LlmTask, cfg: LlmEnvConfig): number {
+  return cfg.temperatureByTask[task] ?? DEFAULT_TASK_TEMPERATURES[task];
+}
+
 function buildProviderForBackend(
   cfg: LlmEnvConfig,
   which: LlmBackend,
@@ -405,12 +540,16 @@ function buildProviderForBackend(
   // Exp-6 item 6: token budgets proportional to payload — the per-task
   // LLM_MAX_TOKENS_* override wins over the global LLM_MAX_TOKENS.
   const maxTokens = (task !== undefined ? cfg.maxTokensByTask[task] : undefined) ?? cfg.maxTokens;
+  // F14: per-task temperature — the per-task LLM_TEMPERATURE_* override
+  // wins over the global LLM_TEMPERATURE (which itself falls back to the
+  // built-in per-task defaults in resolveTaskTemperature).
+  const temperature = task !== undefined ? resolveTaskTemperature(task, cfg) : cfg.temperature;
   if (which === "laya-local") {
     return new LocalLayaProvider({
       baseUrl: cfg.laya.baseUrl,
       model: modelOverride ?? cfg.laya.model,
       apiKey: cfg.laya.apiKey,
-      temperature: cfg.temperature,
+      temperature,
       repeatPenalty: cfg.repeatPenalty,
       maxTokens,
       timeoutMs: cfg.timeoutMs,
@@ -422,7 +561,7 @@ function buildProviderForBackend(
       baseUrl: cfg.ollama.baseUrl,
       model: modelOverride ?? cfg.ollama.model,
       apiKey: cfg.ollama.apiKey,
-      temperature: cfg.temperature,
+      temperature,
       repeatPenalty: cfg.repeatPenalty,
       maxTokens,
       timeoutMs: cfg.timeoutMs,
@@ -436,7 +575,7 @@ function buildProviderForBackend(
     apiKey: cfg.joingonka.apiKey,
     baseUrl: cfg.joingonka.baseUrl,
     model: modelOverride ?? cfg.joingonka.model,
-    temperature: cfg.temperature,
+    temperature,
     repeatPenalty: cfg.repeatPenalty,
     maxTokens,
     timeoutMs: cfg.timeoutMs,
@@ -508,6 +647,8 @@ export class FailoverProvider implements LLMProvider {
   private useFallback = false;
   private lastProbeAt = 0;
   private readonly probeCacheMs: number;
+  /** F31: the provider that served the most recent call (for usage delegation). */
+  private lastServed: LLMProvider | undefined;
 
   constructor(
     private readonly primary: LLMProvider,
@@ -523,16 +664,26 @@ export class FailoverProvider implements LLMProvider {
     return this.useFallback ? this.fallback.name : this.primary.name;
   }
 
+  /** F31: usage from whichever backend served the last call. Drained on read. */
+  takeLastUsage(): LlmUsage | undefined {
+    return this.lastServed?.takeLastUsage?.();
+  }
+
   private endpointBaseUrl(p: LLMProvider): string | undefined {
     // OpenAICompatibleProvider exposes baseUrl; foreign providers probe
     // as healthy (failover still triggers on their transport errors).
     return p instanceof OpenAICompatibleProvider ? p.baseUrl : undefined;
   }
 
-  async complete(systemPrompt: string, userPrompt: string): Promise<string> {
+  async complete(
+    systemPrompt: string,
+    userPrompt: string,
+    opts?: LlmCallOptions,
+  ): Promise<string> {
     const active = (): LLMProvider => (this.useFallback ? this.fallback : this.primary);
+    this.lastServed = active();
     try {
-      return await active().complete(systemPrompt, userPrompt);
+      return await this.lastServed.complete(systemPrompt, userPrompt, opts);
     } catch (err) {
       if (!isTransportError(err)) throw err;
       // Transport failure is real signal: fail over immediately for the
@@ -552,8 +703,9 @@ export class FailoverProvider implements LLMProvider {
         if (primaryOk === true) this.useFallback = false;
         else if (primaryOk === false && fallbackOk === true) this.useFallback = true;
       }
+      this.lastServed = active();
       try {
-        return await active().complete(systemPrompt, userPrompt);
+        return await this.lastServed.complete(systemPrompt, userPrompt, opts);
       } catch {
         // Both backends failed — surface the first error (it carries the
         // original context); the caller retries per its own policy.

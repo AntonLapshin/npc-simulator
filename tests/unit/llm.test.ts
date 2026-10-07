@@ -16,10 +16,20 @@ import {
   resolveLlmEnv,
   type LLMProvider,
 } from "../../src/llm/index.js";
+import {
+  applyInputCap,
+  backoffDelayMs,
+  completeJson,
+  DEFAULT_MAX_INPUT_CHARS,
+} from "../../src/llm/complete.js";
+import { consequenceResultSchema } from "../../src/schemas.js";
+import type { LlmUsage } from "../../src/logging/logTypes.js";
 
 class StubProvider implements LLMProvider {
   readonly name = "stub";
   calls: Array<{ system: string; user: string }> = [];
+  /** F31: usage returned (once) by takeLastUsage. */
+  usage?: LlmUsage;
 
   constructor(private readonly script: Array<string | Error>) {}
 
@@ -29,6 +39,12 @@ class StubProvider implements LLMProvider {
     if (next instanceof Error) throw next;
     if (next === undefined) throw new Error("stub provider exhausted");
     return next;
+  }
+
+  takeLastUsage(): LlmUsage | undefined {
+    const u = this.usage;
+    this.usage = undefined;
+    return u;
   }
 }
 
@@ -364,5 +380,254 @@ describe("subjective vs objective contexts (§16.6)", () => {
     expect(consequencePrompt).toContain("All actor positions");
     expect(consequencePrompt).not.toContain("The design deadline is close.");
     expect(consequencePrompt).not.toContain("Finish an urgent design draft.");
+  });
+});
+
+describe("F11 retry backoff", () => {
+  it("backoffDelayMs is exponential with jitter, capped at 8s", () => {
+    const d1 = backoffDelayMs(1, new Error("x: timed out after 60000ms"));
+    expect(d1).toBeGreaterThanOrEqual(2000);
+    expect(d1).toBeLessThan(3000);
+    const d2 = backoffDelayMs(2, new Error("socket hang up"));
+    expect(d2).toBeGreaterThanOrEqual(4000);
+    expect(d2).toBeLessThan(5000);
+    const d10 = backoffDelayMs(10, new Error("fetch failed"));
+    expect(d10).toBeGreaterThanOrEqual(8000);
+    expect(d10).toBeLessThan(9000);
+  });
+
+  it("HTTP 429 honors Retry-After (capped at 30s); without it, backs off up to 30s", () => {
+    const withHeader = backoffDelayMs(1, new Error("gw: rate limited (HTTP 429, retry after 5s)"));
+    expect(withHeader).toBeGreaterThanOrEqual(5000);
+    expect(withHeader).toBeLessThan(6000);
+    const huge = backoffDelayMs(1, new Error("gw: rate limited (HTTP 429, retry after 120s)"));
+    expect(huge).toBeGreaterThanOrEqual(30_000);
+    expect(huge).toBeLessThan(31_000);
+    const noHeader = backoffDelayMs(1, new Error("gw: rate limited (HTTP 429)"));
+    expect(noHeader).toBeGreaterThanOrEqual(2000);
+    expect(noHeader).toBeLessThan(31_000);
+    const late = backoffDelayMs(9, new Error("gw: rate limited (HTTP 429)"));
+    expect(late).toBeGreaterThanOrEqual(30_000);
+    expect(late).toBeLessThan(31_000);
+  });
+
+  it("completeJson sleeps between transport-failure attempts", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      new Error("stub: timed out after 60000ms"),
+      consequenceJson,
+    ]);
+    const started = Date.now();
+    const result = await completeJson({
+      logger,
+      provider,
+      module: "consequence",
+      tick: 0,
+      turnIndex: 0,
+      systemPrompt: "s",
+      userPrompt: "u",
+      maxRetries: 1,
+      schema: consequenceResultSchema,
+    });
+    const elapsed = Date.now() - started;
+    expect(result.ok).toBe(true);
+    // One backoff between the two attempts: min(1000 * 2^1, 8000) + jitter.
+    expect(elapsed).toBeGreaterThanOrEqual(1900);
+  });
+});
+
+describe("F15 lenient-repair logging", () => {
+  it("logs a consequence_lenient_repair record naming repairs with a payload fingerprint", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U waves.",
+        actorPatches: [{ id: "u", thoughts: "Friendly.", bogus: 1 }],
+        objectPatches: [],
+        // reasoning omitted on purpose → defaulted
+      }),
+    ]);
+    const result = await completeJson({
+      logger,
+      provider,
+      module: "consequence",
+      tick: 0,
+      turnIndex: 0,
+      systemPrompt: "s",
+      userPrompt: "u",
+      maxRetries: 0,
+      schema: consequenceResultSchema,
+    });
+    expect(result.ok).toBe(true);
+    const repairs = logger.store.byEvent("consequence_lenient_repair");
+    expect(repairs).toHaveLength(1);
+    const error = repairs[0]!.error ?? "";
+    expect(error).toMatch(/renamed "id" to "actorId"/);
+    expect(error).toMatch(/dropped unknown key "bogus" from actor patch/);
+    expect(error).toMatch(/defaulted missing\/non-string reasoning/);
+    expect(error).toMatch(/payload fingerprint: [0-9a-f]{8}/);
+  });
+
+  it("warns loudly on malformed effects but keeps the fallback-to-judge behavior", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([
+      JSON.stringify({
+        narrative: "U waves.",
+        actorPatches: [],
+        objectPatches: [],
+        reasoning: "r",
+        effects: "this is not json",
+      }),
+    ]);
+    const result = await completeJson({
+      logger,
+      provider,
+      module: "consequence",
+      tick: 0,
+      turnIndex: 0,
+      systemPrompt: "s",
+      userPrompt: "u",
+      maxRetries: 0,
+      schema: consequenceResultSchema,
+    });
+    // Still parses: effects is optional, the judge classification stands in.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.effects).toBeUndefined();
+    const repairs = logger.store.byEvent("consequence_lenient_repair");
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.error ?? "").toMatch(/WARNING: dropped malformed effects/);
+  });
+
+  it("stays silent when nothing was repaired", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([consequenceJson]);
+    const result = await completeJson({
+      logger,
+      provider,
+      module: "consequence",
+      tick: 0,
+      turnIndex: 0,
+      systemPrompt: "s",
+      userPrompt: "u",
+      maxRetries: 0,
+      schema: consequenceResultSchema,
+    });
+    expect(result.ok).toBe(true);
+    expect(logger.store.byEvent("consequence_lenient_repair")).toHaveLength(0);
+  });
+});
+
+describe("F31 usage capture", () => {
+  function usageFetch(usage: unknown): typeof fetch {
+    return (async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: '{"a":1}' }, finish_reason: "stop" }],
+        usage,
+      }),
+    })) as unknown as typeof fetch;
+  }
+
+  it("captures prompt/completion/total tokens from the chat-completions response", async () => {
+    const provider = new JoinGonkaProvider({
+      apiKey: "gk-test",
+      fetchImpl: usageFetch({ prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }),
+    });
+    await provider.complete("s", "u");
+    expect(provider.takeLastUsage()).toEqual({
+      promptTokens: 120,
+      completionTokens: 30,
+      totalTokens: 150,
+    });
+    // Drained on read.
+    expect(provider.takeLastUsage()).toBeUndefined();
+  });
+
+  it("derives total tokens when the backend omits it; undefined when no usage block", async () => {
+    const derived = new JoinGonkaProvider({
+      apiKey: "gk-test",
+      fetchImpl: usageFetch({ prompt_tokens: 100, completion_tokens: 25 }),
+    });
+    await derived.complete("s", "u");
+    expect(derived.takeLastUsage()).toEqual({
+      promptTokens: 100,
+      completionTokens: 25,
+      totalTokens: 125,
+    });
+    const none = new JoinGonkaProvider({
+      apiKey: "gk-test",
+      fetchImpl: usageFetch(undefined),
+    });
+    await none.complete("s", "u");
+    expect(none.takeLastUsage()).toBeUndefined();
+  });
+
+  it("logs per-call usage on the completed record", async () => {
+    const logger = createTestLogger();
+    const provider = new StubProvider([consequenceJson]);
+    provider.usage = { promptTokens: 1000, completionTokens: 200, totalTokens: 1200 };
+    const engine = new LLMConsequenceEngine(logger, provider);
+    await engine.resolve(makeTinyWorld(), { actorId: "u", text: "Wave." });
+    const completed = logger.store.byEvent("consequence_completed")[0]!;
+    expect(completed.usage).toEqual({
+      promptTokens: 1000,
+      completionTokens: 200,
+      totalTokens: 1200,
+    });
+  });
+});
+
+describe("F33 input cap", () => {
+  it("leaves prompts under the cap untouched", () => {
+    const out = applyInputCap("sys", "user", "tail", DEFAULT_MAX_INPUT_CHARS);
+    expect(out.truncated).toBe(false);
+    expect(out.userPrompt).toBe("user");
+  });
+
+  it("truncates the world-dump head but keeps the engine suffix intact", () => {
+    const suffix = "\n\nReturn JSON only.";
+    const user = `${"world dump ".repeat(500)}${suffix}`;
+    const out = applyInputCap("sys", user, suffix, 1000);
+    expect(out.truncated).toBe(true);
+    expect(out.originalChars).toBe("sys".length + 2 + user.length);
+    expect(out.userPrompt.endsWith(suffix)).toBe(true);
+    expect(out.userPrompt).toContain("[truncated: prompt exceeded LLM_MAX_INPUT_CHARS=1000]");
+    expect(out.userPrompt.length).toBeLessThanOrEqual(1000);
+  });
+
+  it("without a clean section boundary, protects a trailing instruction window", () => {
+    const user = `${"a".repeat(5000)}TAIL${"b".repeat(500)}`;
+    const out = applyInputCap("sys", user, undefined, 1000);
+    expect(out.truncated).toBe(true);
+    expect(out.userPrompt.endsWith(`TAIL${"b".repeat(500)}`)).toBe(true);
+    expect(out.userPrompt).toContain("[truncated: prompt exceeded LLM_MAX_INPUT_CHARS=");
+  });
+
+  it("completeJson logs a truncation warning and sends the truncated prompt", async () => {
+    const logger = createTestLogger();
+    const suffix = "\n\nReturn JSON only.";
+    const user = `${"world dump ".repeat(500)}${suffix}`;
+    const provider = new StubProvider([consequenceJson]);
+    const result = await completeJson({
+      logger,
+      provider,
+      module: "consequence",
+      tick: 0,
+      turnIndex: 0,
+      systemPrompt: "s",
+      userPrompt: user,
+      suffix,
+      maxInputChars: 1000,
+      maxRetries: 0,
+      schema: consequenceResultSchema,
+    });
+    expect(result.ok).toBe(true);
+    const warnings = logger.store.byEvent("consequence_prompt_truncated");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.error ?? "").toMatch(/LLM_MAX_INPUT_CHARS=1000/);
+    const sent = provider.calls[0]!.user;
+    expect(sent).toContain("[truncated: prompt exceeded LLM_MAX_INPUT_CHARS=1000]");
+    expect(sent.endsWith(suffix)).toBe(true);
   });
 });

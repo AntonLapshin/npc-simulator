@@ -19,13 +19,14 @@ import {
   clampMoveToCap,
   isClampableMovementFailure,
   isMovementOnlyFailure,
+  isRealProgressFailure,
   suggestMoveTarget,
 } from "./movementAssist.js";
 import { validateSelectionForActor } from "./contextBuilder.js";
 import { buildObjectAffordanceNudge } from "./contextBuilder.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
-import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
+import { getCurrentActor } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import {
   getHonestHistoryNote,
@@ -36,6 +37,7 @@ import {
 } from "./turnSalvage.js";
 import { buildLivenessConsequence, consecutiveFallbacks } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
+import type { LlmUsage } from "../logging/logTypes.js";
 import { errorMessage } from "../util/errors.js";
 
 export type TurnProgressStage =
@@ -116,6 +118,51 @@ function depsConfig(deps: EngineDependencies): EngineConfig {
 }
 
 /**
+ * F31: per-turn LLM usage totals — `LlmUsage` from src/logging/logTypes.ts
+ * (Worker-B contract: { promptTokens, completionTokens, totalTokens }).
+ */
+
+/**
+ * F31: accumulate per-turn LLM usage totals from the log store. The
+ * engines log per-call `usage` on their log entries; this sums every
+ * entry recorded for this (tick, turnIndex).
+ */
+export function accumulateTurnUsage(
+  logger: Logger,
+  tick: number,
+  turnIndex: number,
+): LlmUsage {
+  const total: LlmUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  for (const entry of logger.store.all()) {
+    if (entry.tick !== tick || entry.turnIndex !== turnIndex) continue;
+    const usage = entry.usage;
+    if (!usage) continue;
+    total.promptTokens += usage.promptTokens ?? 0;
+    total.completionTokens += usage.completionTokens ?? 0;
+    total.totalTokens +=
+      usage.totalTokens ?? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0);
+  }
+  return total;
+}
+
+/**
+ * F2: error codes that mean "a missing object/prop/pose patch" — gates the
+ * object-affordance retry hint (previously a prose regex over messages).
+ */
+const OBJECT_PATCH_ERROR_CODES = new Set([
+  "object_grounding.sit_no_pose",
+  "object_grounding.brew_no_patch",
+  "object_grounding.pickup_no_patch",
+  "object_grounding.open_no_patch",
+  "object_grounding.sip_no_prop",
+  "object_grounding.hold_no_prop",
+  "action.pour_no_patch",
+  "action.pickup_no_patch",
+  "action.sit_no_pose",
+  "action.stand_no_pose",
+]);
+
+/**
  * LLMs sometimes echo the candidate list numbering ("3. Call out ...",
  * "2) Nod ...") into the chosen action. That prefix is presentation, not
  * part of the action — strip it so it never reaches consequences,
@@ -133,18 +180,23 @@ const defaultSemanticJudge: SemanticJudge = new MockSemanticJudge();
 
 
 /**
- * Exp-6 item 3: race a promise against the turn's remaining time budget.
- * The underlying work keeps running in the background (a promise cannot
- * be cancelled) — its late result is simply ignored and the turn moves on
- * to salvage instead of burning more wall time.
+ * Exp-6 item 3 / F28: race work against the turn's remaining time budget.
+ * The work receives an AbortController signal; on timeout the controller
+ * aborts (so a hung LLM provider call is actually cancelled instead of
+ * burning tokens in the background) and the turn falls through to salvage
+ * instead of burning more wall time. The late result, if any, is ignored.
  */
-function withTurnDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
-  if (!(ms > 0)) return promise;
+function withTurnDeadline<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
+  if (!(ms > 0)) return work(controller.signal);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("turn deadline exceeded")), ms);
+    timer = setTimeout(() => {
+      controller.abort(new Error("turn deadline exceeded"));
+      reject(new Error("turn deadline exceeded"));
+    }, ms);
   });
-  return Promise.race([promise, timeout]).finally(() => {
+  return Promise.race([work(controller.signal), timeout]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
 }
@@ -200,10 +252,12 @@ export async function resolveWithValidation(
   const timeLeft = (): number => deadlineAt - Date.now();
   let deadlineExceeded = false;
 
-  // Exp-6 item 6: the semantic judge classifies the ACTION text —
-  // independent of the consequence result — so start it once, concurrently
-  // with the first consequence call, and reuse it across retry attempts
-  // instead of re-running a judge LLM call per attempt.
+  // Exp-6 item 6 / Q2: the semantic judge classifies the ACTION text —
+  // independent of the consequence result — but only when a consequence
+  // provides no `effects` (lazy judge: classification is only needed for
+  // grounding then). Started once, on the first attempt that needs it, and
+  // reused across retry attempts instead of re-running a judge LLM call
+  // per attempt.
   const judge: SemanticJudge = deps.semanticJudge ?? defaultSemanticJudge;
   let judgePromise: Promise<ActionSemantics> | undefined;
   const judgeForAttempt = (): SemanticJudge => ({
@@ -233,8 +287,11 @@ export async function resolveWithValidation(
     }
     let result: ConsequenceResult;
     try {
+      // F28: the deadline signal is forwarded to the consequence engine
+      // (which passes it to the provider call) so a hung LLM request is
+      // cancelled on timeout.
       result = await withTurnDeadline(
-        deps.consequenceEngine.resolve(world, action, feedback),
+        (signal) => deps.consequenceEngine.resolve(world, action, feedback, { signal }),
         timeLeft(),
       );
     } catch (err) {
@@ -313,14 +370,16 @@ export async function resolveWithValidation(
     // checked against an independent classification of the action text
     // (OR for requirement flags), so a consequence cannot dodge
     // movement/speech/addressee gates by declaring moved=false/spoke=false.
-    // Judge output is logged per turn
-    // (semantic_resolved/semantic_completed) for observability, like
+    // Q2 (lazy semantic judge): the judge only runs when the consequence
+    // provides no `effects` — classification exists to ground the gates,
+    // and `effects` alone already grounds them. Judge output is logged per
+    // turn (semantic_resolved/semantic_completed) for observability, like
     // selection_completed.
     const resolved = await resolveActionSemantics(
       world,
       action,
       result,
-      judgeForAttempt(),
+      result.effects === undefined ? judgeForAttempt() : undefined,
       logger,
     );
     lastResult = result;
@@ -346,7 +405,9 @@ export async function resolveWithValidation(
       turnIndex: world.turnIndex,
       actorId: action.actorId,
       input: { action, result, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
-      validationErrors: validation.errors,
+      // LogInput.validationErrors is string[] — log the messages; the
+      // codes stay on the ValidationError objects in the trace output.
+      validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
     });
 
     // Deterministic movement repair: small LLMs often narrate movement
@@ -373,7 +434,10 @@ export async function resolveWithValidation(
           `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
           ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
           `Set effects.moved=true${resolved.semantics.destinationActorId ? ` and effects.destinationActorId="${resolved.semantics.destinationActorId}"` : ""}${resolved.semantics.destinationObjectId ? ` and effects.destinationObjectId="${resolved.semantics.destinationObjectId}"` : ""}.`;
-        if (isMovementOnlyFailure(validation.errors)) {
+        // F24: the in-loop repair also covers "make real progress" /
+        // token-shuffle failures — try suggestMoveTarget first, then
+        // clampMoveToCap below.
+        if (isMovementOnlyFailure(validation.errors) || isRealProgressFailure(validation.errors)) {
           const repaired: ConsequenceResult = structuredClone(result);
           const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
           if (existing) {
@@ -433,8 +497,11 @@ export async function resolveWithValidation(
       // continue next turn — instead of failing the whole turn. Accepts
       // only when the clamped position passes the full gate on
       // revalidation; otherwise the turn retries/salvages normally.
-      const capHit = validation.errors.some((e) => /at most 6 cells/i.test(e));
-      if (capHit && isClampableMovementFailure(validation.errors)) {
+      // F2: cap detection is code-based. F24: also fires for real-progress
+      // failures (suggestMoveTarget above is tried first).
+      const capHit = validation.errors.some((e) => e.code === "movement.over_step_cap");
+      const progressHit = isRealProgressFailure(validation.errors);
+      if ((capHit || progressHit) && isClampableMovementFailure(validation.errors)) {
         const claimed = result.actorPatches.find((p) => p.actorId === action.actorId);
         const clamped =
           claimed?.x !== undefined && claimed?.y !== undefined
@@ -498,7 +565,7 @@ export async function resolveWithValidation(
     if (isSpeechOnlyFailure(validation.errors)) {
       proseHint =
         "The patches are valid — keep every actorPatch/objectPatch exactly as-is and fix ONLY the narrative prose (preserve the action's exact wording).";
-    } else if (validation.errors.some((e) => /unknown (actor|object) id/.test(e))) {
+    } else if (validation.errors.some((e) => e.code === "actor.unknown_id" || e.code === "object.unknown_id")) {
       proseHint =
         "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
     }
@@ -506,13 +573,14 @@ export async function resolveWithValidation(
     // Exp-6 item 8: when the failure is a missing object/prop/pose patch
     // for a manipulated object, demand that patch explicitly (naming the
     // object) instead of only punishing its absence after the fact.
+    // F2: gated on error codes, not message prose.
     const objectAffordanceHint =
       affordanceNudge !== undefined &&
-      validation.errors.some((e) => /object ?patch|\bprop\b|\bpose\b/i.test(e))
+      validation.errors.some((e) => OBJECT_PATCH_ERROR_CODES.has(e.code))
         ? affordanceNudge
         : undefined;
 
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}\nReturn corrected JSON only.`;
+    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- [${e.code}] ${e.message}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
     report(deps, {
       stage: "consequence_retry",
@@ -527,7 +595,7 @@ export async function resolveWithValidation(
       actorId: action.actorId,
       input: { action, attempt: attempt + 1 },
       output: { feedback },
-      validationErrors: validation.errors,
+      validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
     });
   }
 
@@ -551,7 +619,7 @@ export async function resolveWithValidation(
   // content-salvage ladder; when it finds nothing usable, the ladder below
   // still gets its chance.
   if (!haveParseableResult && turnRawAttempts.length > 0) {
-    const degraded = salvageFormatCollapse(world, action, turnRawAttempts);
+    const degraded = salvageFormatCollapse(world, action, turnRawAttempts, config);
     if (degraded) {
       logger.log({
         module: "turn",
@@ -571,7 +639,7 @@ export async function resolveWithValidation(
   // Exp-4 item 8: the evaluation (eligible/ineligible + reason) is logged
   // inside trySalvageConsequence as `salvage_evaluated`.
   if (lastResult && lastSemantics) {
-    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics, logger);
+    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics, logger, config);
     if (salvage) {
       logger.log({
         module: "turn",
@@ -582,7 +650,7 @@ export async function resolveWithValidation(
         input: { action, result: lastResult },
         output: { salvaged: salvage.salvaged, warnings: salvage.warnings },
         ...(salvage.warnings.length > 0
-          ? { error: `speech warnings (applied anyway): ${salvage.warnings.join(" | ")}` }
+          ? { error: `speech warnings (applied anyway): ${salvage.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ")}` }
           : {}),
       });
       return salvage.salvaged;
@@ -624,7 +692,11 @@ export async function resolveWithValidation(
     output: FALLBACK_CONSEQUENCE,
     error: "max retries exceeded",
   });
-  return structuredClone(FALLBACK_CONSEQUENCE);
+  // F23: mark the engine-produced fallback so isFallbackConsequence checks
+  // the flag first (narrative equality stays as backward compat).
+  const fallbackResult = structuredClone(FALLBACK_CONSEQUENCE);
+  fallbackResult.fallback = true;
+  return fallbackResult;
 }
 
 async function autosave(world: World, deps: EngineDependencies): Promise<void> {
@@ -658,13 +730,22 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   const logger = deps.logger;
   const actor = getCurrentActor(world);
 
+  // F18: exactly one deep clone per turn, taken here at turn start. The
+  // snapshot doubles as the turn_started log input AND as the mutation
+  // base passed to applyConsequence below (which no longer clones when it
+  // receives one). Aliasing note: the in-memory log-store entry for
+  // turn_started references the same object that applyConsequence then
+  // mutates — the JSONL file write is unaffected (the logger stringifies
+  // synchronously at log time), but in-memory readers see the applied
+  // state. This is the accepted trade-off of the single-clone budget.
+  const turnSnapshot = structuredClone(world);
   logger.log({
     module: "turn",
     event: "turn_started",
     tick: world.tick,
     turnIndex: world.turnIndex,
     actorId: actor.id,
-    input: { world: structuredClone(world) },
+    input: { world: turnSnapshot },
   });
 
   report(deps, { stage: "turn_started", actorId: actor.id, message: `turn started — ${actor.id} (tick ${world.tick})` });
@@ -775,10 +856,12 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // record the narrative (what happened) plus the honest note — never the
   // raw action text — so later turns don't assume a dropped desk question
   // was asked or a laptop setup happened.
+  // F18: applyConsequence mutates the turn-start snapshot in place —
+  // no second clone.
   const patched = applyConsequence(world, consequence, action, config, {
     fallback: isFallbackConsequence(consequence),
     honestHistoryNote: getHonestHistoryNote(consequence),
-  });
+  }, turnSnapshot);
   report(deps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({
     module: "turn",
@@ -798,16 +881,30 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     output: { history: patched.history.slice(-1) },
   });
 
-  const ticked = incrementTick(patched);
-  const nextWorld = advanceTurn(ticked);
+  // F18: tick/turn advance in place on the working snapshot — no extra
+  // clones (worldStore's pure incrementTick/advanceTurn stay for other
+  // callers; runTurn owns its private clone here).
+  patched.tick += 1;
+  patched.turnIndex = (patched.turnIndex + 1) % patched.order.length;
+  const nextWorld = patched;
 
+  // F31: accumulate this turn's LLM usage totals (per-call usage is logged
+  // by the engines) and include them on the turn-completed record.
+  const turnUsage = accumulateTurnUsage(logger, world.tick, world.turnIndex);
   logger.log({
     module: "turn",
     event: "turn_completed",
     tick: nextWorld.tick,
     turnIndex: nextWorld.turnIndex,
     actorId: action.actorId,
-    output: structuredClone(nextWorld),
+    // F18: reuse the final world object without re-cloning. Nothing
+    // mutates it afterwards: autosave only serializes, and the caller
+    // receives it as an immutable snapshot (the next turn clones again).
+    output: nextWorld,
+    // Worker-B contract: `turnUsage?: LlmUsage` lands on the log record
+    // type in src/logging/logTypes.ts; spread avoids an excess-property
+    // error until it does.
+    ...(turnUsage.totalTokens > 0 ? { turnUsage } : {}),
   });
 
   await autosave(nextWorld, deps);

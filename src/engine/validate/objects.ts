@@ -1,8 +1,57 @@
 // Object-interaction validation checks (extracted from physicalValidator.ts).
 
-import type { Action, World } from "../../types.js";
+import type { Action, ValidationError, World } from "../../types.js";
 import { contentWords, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
 import { CONTACT_RADIUS } from "./movement.js";
+
+/**
+ * F4: object interaction radius. Moving/resizing an object or flipping its
+ * passable/blocksVision/blocksSound flags requires the acting actor within
+ * this many cells (Euclidean) of the object's center — no cross-room
+ * telekinesis. Description-only patches are always allowed.
+ */
+export const OBJECT_INTERACT_RADIUS = 4;
+
+/**
+ * F8: object-noun vocabulary for the object/verb validators. When the
+ * scenario declares `vocabulary.objectNouns`, those nouns (with simple
+ * plural tolerance) drive the pick-up/open/take patterns; otherwise the
+ * office default list below keeps existing scenarios working.
+ */
+const DEFAULT_PICKUP_NOUNS = "laptop|mug|cup|bag|chair|papers?|phone|monitor";
+// The narrative-side open/boot gate historically matched only "laptop" —
+// keep that exact default so office scenarios behave identically.
+const DEFAULT_OPEN_NOUNS = "laptop";
+
+function scenarioNounAlternation(world: World): string | undefined {
+  const nouns = world.vocabulary?.objectNouns;
+  if (nouns === undefined || nouns.length === 0) return undefined;
+  return nouns
+    .map((n) => {
+      const e = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return /s$/i.test(n) ? e : `${e}s?`;
+    })
+    .join("|");
+}
+
+/** Noun alternation for pick-up/take patterns (F8). */
+function pickupNounPattern(world: World): string {
+  return scenarioNounAlternation(world) ?? DEFAULT_PICKUP_NOUNS;
+}
+
+/** Noun alternation for open/boot patterns (F8). */
+function openNounPattern(world: World): string {
+  return scenarioNounAlternation(world) ?? DEFAULT_OPEN_NOUNS;
+}
+
+/**
+ * F21: word-boundary mention test shared by the contact block below.
+ * A bare substring lets id "dan" match "Dana".
+ */
+function mentionsWordBoundary(text: string, variant: string): boolean {
+  if (variant.length < 2) return false;
+  return new RegExp(`\\b${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+}
 
 /**
  * Object grounding (exp-2 item 7 — 30/30 empty objectPatches repro): prose
@@ -20,8 +69,8 @@ export function validateObjectGrounding(
     objectPatches: { objectId: string }[];
   },
   action?: Action,
-): string[] {
-  const errors: string[] = [];
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   const text = maskResumedActivity(normalized.narrative);
   const actingId = action?.actorId;
   const actingPatch = actingId !== undefined
@@ -41,37 +90,47 @@ export function validateObjectGrounding(
     const poseOk =
       actingPatch?.pose !== undefined || (actingWorld?.pose ?? "stand") === "sit";
     if (!poseOk) {
-      errors.push(
-        `narrative describes sitting but no pose patch sets it: include pose ("sit") on the acting actor${actingId ? ` (${actingId})` : ""}`,
-      );
+      errors.push({
+        code: "object_grounding.sit_no_pose",
+        message: `narrative describes sitting but no pose patch sets it: include pose ("sit") on the acting actor${actingId ? ` (${actingId})` : ""}`,
+      });
     }
   }
   if (/\b(brews?|brewing|pours?|pouring|fills?(?:ing)? (?:his|her|their|my|the|a) mug|makes? coffee)\b/i.test(text)) {
     if (!hasObjectPatch && !propPatched) {
-      errors.push(
-        `narrative describes brewing/pouring but no object patch backs it: add an objectPatch for the coffee machine/mug (or a prop patch for the cup picked up)`,
-      );
+      errors.push({
+        code: "object_grounding.brew_no_patch",
+        message: `narrative describes brewing/pouring but no object patch backs it: add an objectPatch for the coffee machine/mug (or a prop patch for the cup picked up)`,
+      });
     }
   }
-  if (/\b(picks?\s+up|picking\s+up|picked\s+up|grabs?|takes? (?:the|his|her|their|my|your|its|a|an) (?:laptop|mug|cup|bag|chair|papers?|phone|monitor))\b/i.test(text)) {
+  if (
+    new RegExp(
+      `\\b(picks?\\s+up|picking\\s+up|picked\\s+up|grabs?|takes? (?:the|his|her|their|my|your|its|a|an) (?:${pickupNounPattern(world)}))\\b`,
+      "i",
+    ).test(text)
+  ) {
     if (!propPatched && !hasObjectPatch) {
-      errors.push(
-        `narrative describes picking something up but no prop/object patch backs it: set prop on the acting actor (or an objectPatch for what moved)`,
-      );
+      errors.push({
+        code: "object_grounding.pickup_no_patch",
+        message: `narrative describes picking something up but no prop/object patch backs it: set prop on the acting actor (or an objectPatch for what moved)`,
+      });
     }
   }
-  if (new RegExp(`\\b(opens?(?:ing|ed)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?laptop|boots?(?:ing)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?laptop|powers?\\s+on)\\b`, "i").test(text)) {
+  if (new RegExp(`\\b(opens?(?:ing|ed)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?(?:${openNounPattern(world)})|boots?(?:ing)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?(?:${openNounPattern(world)})|powers?\\s+on)\\b`, "i").test(text)) {
     if (!propPatched && !hasObjectPatch && !holdsSomething) {
-      errors.push(
-        `narrative describes opening/booting a laptop but no prop/object patch backs it: set prop ("laptop") on the acting actor or add the matching objectPatch`,
-      );
+      errors.push({
+        code: "object_grounding.open_no_patch",
+        message: `narrative describes opening/booting but no prop/object patch backs it: set the matching prop on the acting actor or add the objectPatch`,
+      });
     }
   }
   if (/\b(sips?|sipping|sipped|drinks?|drinking|drank|swigs?|gulps?|types?|typing|typed)\b/i.test(text)) {
     if (!propPatched && !hasObjectPatch && !holdsSomething) {
-      errors.push(
-        `narrative describes sipping/drinking/typing but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
-      );
+      errors.push({
+        code: "object_grounding.sip_no_prop",
+        message: `narrative describes sipping/drinking/typing but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
+      });
     }
   }
   // Phase 3 (exp-3 item 2, tick 11 shape): holding/carrying is an object
@@ -81,9 +140,10 @@ export function validateObjectGrounding(
   // task-resumption prose never trips this gate.)
   if (/\b(holds?|holding|carr(?:y|ies|ied|ying))\b(?!\s+on\b)/i.test(text)) {
     if (!propPatched && !hasObjectPatch && !holdsSomething) {
-      errors.push(
-        `narrative describes holding/carrying but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
-      );
+      errors.push({
+        code: "object_grounding.hold_no_prop",
+        message: `narrative describes holding/carrying but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
+      });
     }
   }
   return errors;
@@ -113,28 +173,25 @@ export function validateActionVerbCoverage(
     actorPatches: { actorId: string; x?: number; y?: number; pose?: string; prop?: string | null }[];
     objectPatches: { objectId: string }[];
   },
-): string[] {
-  const errors: string[] = [];
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   const text = action.text;
   const narrative = normalized.narrative;
   const actingPatch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
 
-  const namesRosterActor =
-    world.actors.filter((a) => a.id !== action.actorId).some((a) => {
-      const lowered = text.toLowerCase();
-      return (
-        (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) ||
-        (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase()))
-      );
-    });
+  // F21: word-boundary mention matching — a bare substring lets id "dan"
+  // match "Dana".
+  const namesRosterActor = world.actors
+    .filter((a) => a.id !== action.actorId)
+    .some(
+      (a) =>
+        mentionsWordBoundary(text, a.id) ||
+        mentionsWordBoundary(text, a.name),
+    );
   /** Roster actors (other than the acting actor) named in the action text. */
   const namedRosterActors = world.actors.filter((a) => {
     if (a.id === action.actorId) return false;
-    const lowered = text.toLowerCase();
-    return (
-      (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) ||
-      (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase()))
-    );
+    return mentionsWordBoundary(text, a.id) || mentionsWordBoundary(text, a.name);
   });
 
   if (
@@ -144,9 +201,10 @@ export function validateActionVerbCoverage(
     namesRosterActor
   ) {
     if (!/\b(shake|shook|hands?|hug|embrace|kiss|high[\s-]?five|fist|pat|slap|give|gave|pass|hand)\b/i.test(narrative)) {
-      errors.push(
-        `action describes physical contact ("${text.slice(0, 80)}") but the narrative never mentions it: narrate the handshake/hug/handover (dodging the verb does not excuse dropping the contact)`,
-      );
+      errors.push({
+        code: "contact.narrative_drops_contact",
+        message: `action describes physical contact ("${text.slice(0, 80)}") but the narrative never mentions it: narrate the handshake/hug/handover (dodging the verb does not excuse dropping the contact)`,
+      });
     }
     // Phase 3 (exp-3 item 2, tick 12 symmetric hole): the semantics-owned
     // adjacency gate only fires when effects/judge declare contactActorId —
@@ -165,9 +223,10 @@ export function validateActionVerbCoverage(
       if (!close) {
         const t = namedRosterActors[0]!;
         const dist = Math.hypot(endX - t.x, endY - t.y).toFixed(1);
-        errors.push(
-          `action describes physical contact with ${t.id} but ends at (${endX}, ${endY}), ${dist} cells away: end adjacent (within ${CONTACT_RADIUS} cells) before touching — a handshake across the room is not contact`,
-        );
+        errors.push({
+          code: "contact.action_too_far",
+          message: `action describes physical contact with ${t.id} but ends at (${endX}, ${endY}), ${dist} cells away: end adjacent (within ${CONTACT_RADIUS} cells) before touching — a handshake across the room is not contact`,
+        });
       }
     }
   }
@@ -178,17 +237,19 @@ export function validateActionVerbCoverage(
     const poseOk =
       actingPatch?.pose === "sit" || /\b(sit|sits|sitting|sat|seat|seated)\b/i.test(narrative);
     if (!poseOk) {
-      errors.push(
-        `action says to sit ("${text.slice(0, 80)}") but the consequence neither sets pose ("sit") nor describes sitting: sitting without the matching patch is incomplete (saying "stands" instead fails)`,
-      );
+      errors.push({
+        code: "action.sit_no_pose",
+        message: `action says to sit ("${text.slice(0, 80)}") but the consequence neither sets pose ("sit") nor describes sitting: sitting without the matching patch is incomplete (saying "stands" instead fails)`,
+      });
     }
   } else if (standMatch && !sitMatch) {
     const poseOk =
       actingPatch?.pose === "stand" || /\b(stand|stands|standing|stood)\b/i.test(narrative);
     if (!poseOk) {
-      errors.push(
-        `action says to stand ("${text.slice(0, 80)}") but the consequence neither sets pose ("stand") nor describes standing`,
-      );
+      errors.push({
+        code: "action.stand_no_pose",
+        message: `action says to stand ("${text.slice(0, 80)}") but the consequence neither sets pose ("stand") nor describes standing`,
+      });
     }
   }
 
@@ -204,7 +265,11 @@ export function validateActionVerbCoverage(
   // laptop opens next turn — a turn that sits without the laptop patch
   // still fails here, and the message says so (Tier-2 salvage may advance
   // the movement/sit with the laptop miss logged as a warning instead).
+  //
+  // F8: the object nouns come from the scenario vocabulary when declared,
+  // else the office default list below.
   const OPEN_OBJECT_NOUNS =
+    scenarioNounAlternation(world) ??
     "laptop|mug|cup|door|bag|chair|papers?|phone|monitor|book|box|window|desk|machine|notes?|documents?|bottle|drawer|lid";
   if (
     /\b(brew|brews|pour|pours|fill|fills|boot|boots|mak(e|es|ing)\s+coffee)\b/i.test(text) ||
@@ -216,9 +281,10 @@ export function validateActionVerbCoverage(
     const backed =
       normalized.objectPatches.length > 0 || actingPatch?.prop !== undefined;
     if (!backed) {
-      errors.push(
-        `action says to pour/brew/open ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch (split triple-verb actions across turns — sit now via the pose patch, open the laptop next turn)`,
-      );
+      errors.push({
+        code: "action.pour_no_patch",
+        message: `action says to pour/brew/open ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch (split triple-verb actions across turns — sit now via the pose patch, open the laptop next turn)`,
+      });
     }
   }
 
@@ -232,22 +298,27 @@ export function validateActionVerbCoverage(
     /\bgrab(?:s|bed|bing)?\b/i.test(text) ||
     /\bholds?\b|\bholding\b/i.test(text) ||
     /\bcarr(?:y|ies|ied|ying)\b(?!\s+on\b)/i.test(text) ||
-    /\btakes?\s+(?:the|his|her|their|my|your|its|a|an)\s+(?:laptop|mug|cup|bag|chair|papers?|phone|monitor)\b/i.test(text)
+    new RegExp(
+      `\\btakes?\\s+(?:the|his|her|their|my|your|its|a|an)\\s+(?:${pickupNounPattern(world)})\\b`,
+      "i",
+    ).test(text)
   ) {
     const backed =
       normalized.objectPatches.length > 0 || actingPatch?.prop !== undefined;
     if (!backed) {
-      errors.push(
-        `action says to pick up/hold ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch`,
-      );
+      errors.push({
+        code: "action.pickup_no_patch",
+        message: `action says to pick up/hold ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch`,
+      });
     }
   }
 
   if (/\bask\w*\b|\?/.test(text)) {
     if (!narrative.includes("?") && !/\bask\w*|questions?\b/i.test(narrative)) {
-      errors.push(
-        `action asks a question ("${text.slice(0, 80)}") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)`,
-      );
+      errors.push({
+        code: "speech.question_dropped",
+        message: `action asks a question ("${text.slice(0, 80)}") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)`,
+      });
     }
   }
 
@@ -277,9 +348,10 @@ export function validateActionVerbCoverage(
         quotedSegments(narrative).length > 0 ||
         new RegExp(`\\b(say|says|said|tell|tells|told|thank|thanks|thanked|greet|greets|greeted|greeting|welcome|welcomes|welcomed|ask|asks|asked|answer|answers|answered|repl(?:y|ies|ied)|mentions?|mentioned|${EXPLANATORY_VERBS}|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\\b`, "i").test(narrative);
       if (!rendersSpeech) {
-        errors.push(
-          `action says something ("${text.slice(0, 80)}") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior`,
-        );
+        errors.push({
+          code: "speech.no_speech_rendered",
+          message: `action says something ("${text.slice(0, 80)}") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior`,
+        });
       }
     }
   }
@@ -325,7 +397,7 @@ const EXPLANATION_STOP_WORDS = new Set(
 export function validateExplanationCoverage(
   action: Action,
   normalized: { narrative: string },
-): string[] {
+): ValidationError[] {
   if (!EXPLANATION_VERBS_RE.test(action.text)) return [];
   const topic = contentWords(action.text).filter(
     (w) => !EXPLANATION_STOP_WORDS.has(w.slice(0, 4)),
@@ -335,7 +407,10 @@ export function validateExplanationCoverage(
   const kept = topic.filter((w) => narrativeWords.some((nw) => sameStem(w, nw)));
   if (kept.length === 0) {
     return [
-      `action explains/describes something ("${action.text.slice(0, 80)}") but the narrative keeps none of its topic words (${topic.slice(0, 4).join(", ") || "none"}): preserve WHAT is explained (the topic), not just that someone spoke — a greeting substitute for an explanation is hollow`,
+      {
+        code: "speech.topic_dropped",
+        message: `action explains/describes something ("${action.text.slice(0, 80)}") but the narrative keeps none of its topic words (${topic.slice(0, 4).join(", ") || "none"}): preserve WHAT is explained (the topic), not just that someone spoke — a greeting substitute for an explanation is hollow`,
+      },
     ];
   }
   return [];

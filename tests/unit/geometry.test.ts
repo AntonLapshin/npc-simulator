@@ -14,6 +14,7 @@ import {
   getVisibleObjects,
 } from "../../src/engine/perceptionHelpers.js";
 import { makeTinyWorld } from "../helpers.js";
+import { defaultConfig } from "../../src/config.js";
 
 describe("geometry", () => {
   it("pointInRect uses half-open bounds", () => {
@@ -103,7 +104,10 @@ describe("perceptionHelpers", () => {
 
   it("respects perception radius", () => {
     const world = makeTinyWorld();
-    expect(canSeePoint(world, { x: 1, y: 1 }, { x: 4, y: 4 }, 1)).toBe(false);
+    // F7: radius now comes from the injected config, not a raw number.
+    expect(
+      canSeePoint(world, { x: 1, y: 1 }, { x: 4, y: 4 }, { ...defaultConfig, defaultPerceptionRadius: 1 }),
+    ).toBe(false);
   });
 
   it("getVisibleObjects uses object centers", () => {

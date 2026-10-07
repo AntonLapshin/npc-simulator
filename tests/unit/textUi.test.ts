@@ -9,7 +9,7 @@ import {
 } from "../../src/ui/text/commands.js";
 import { handleLine, TextSession } from "../../src/ui/text/textUi.js";
 import { createTestLogger } from "../../src/logging/logger.js";
-import { makeTestDeps, makeTinyWorld, loadOfficeScenario } from "../helpers.js";
+import { hist, makeTestDeps, makeTinyWorld, loadOfficeScenario } from "../helpers.js";
 
 function makeSession() {
   const logger = createTestLogger("textui");
@@ -76,7 +76,8 @@ describe("text UI panels (§17.1)", () => {
 
   it("suggestions render numbered; history renders tail", () => {
     expect(renderSuggestions(["Stay.", "Look."])).toContain("[1] Stay.");
-    const world = { ...makeTinyWorld(), history: ["a", "b", "c"] };
+    const base = makeTinyWorld();
+    const world = { ...base, history: [hist(base, "a"), hist(base, "b"), hist(base, "c")] };
     expect(renderHistory(world, 2)).toContain("b");
     expect(renderHistory(makeTinyWorld())).toContain("no history");
   });
@@ -166,8 +167,8 @@ describe("text UI session flow", () => {
     const { session } = makeSession();
     const text = "Walk to N and say hello, newcomer style!";
     const res = await handleLine(`action: ${text}`, session, ask);
-    // User text lands in history (no Latest echo); NPC + Your-turn prompt follow.
-    expect(session.world!.history[0]).toContain(text);
+    // User text lands in history via the mock narrative (no Latest echo); NPC + Your-turn prompt follow.
+    expect(session.world!.history[0]!.text).toContain(text);
     expect(res.output).toContain("Your turn");
   });
 

@@ -1,12 +1,16 @@
-import type { Action, Actor, SceneObject, World } from "../types.js";
+import type { Action, Actor, EngineConfig, HistoryEntry, SceneObject, World } from "../types.js";
+import { NOT_DONE_SENTINEL, normalizeHistoryEntry } from "../types.js";
 import { defaultConfig } from "../config.js";
 import { distance } from "./geometry.js";
 import {
   findManipulatedObjects,
+  mentionsObjectVariant,
+  objectMentionVariants,
   resolveDestinationActorId,
   resolveDestinationObjectId,
   resolveMentionedActorId,
 } from "./deterministicSemantics.js";
+import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
 import {
   getVisibleActors,
   getAudibleActors,
@@ -36,7 +40,7 @@ export function worldMemoryBytes(world: World): number {
       for (const entry of list) bytes += entry.length;
     }
   }
-  for (const entry of world.history) bytes += entry.length;
+  for (const entry of world.history) bytes += entry.text.length;
   return bytes;
 }
 
@@ -75,9 +79,12 @@ export function memoryGrowthStats(world: World): {
  */
 export function summarizeListForPrompt(
   entries: string[],
-  keepNewest = defaultConfig.memorySummaryKeepNewest,
-  budgetChars = defaultConfig.promptListBudgetChars,
+  keepNewest?: number,
+  budgetChars?: number,
+  cfg: EngineConfig = defaultConfig,
 ): string {
+  const keep = keepNewest ?? cfg.memorySummaryKeepNewest;
+  const budget = budgetChars ?? cfg.promptListBudgetChars;
   const deduped: string[] = [];
   const seen = new Set<string>();
   for (const e of entries) {
@@ -87,25 +94,25 @@ export function summarizeListForPrompt(
     deduped.push(e);
   }
   if (deduped.length === 0) return "(none)";
-  const newest = deduped.slice(-Math.max(1, keepNewest));
+  const newest = deduped.slice(-Math.max(1, keep));
   const older = deduped.slice(0, Math.max(0, deduped.length - newest.length));
   const lines = newest.map((m) => `- ${m}`);
   if (older.length > 0) {
     // Digest: first clause of each older entry (the fact, not the wording).
     const clauses = older.map((e) => e.split(/[.!\n]/)[0]?.trim() || e.slice(0, 80));
     let digest = `Earlier (${older.length} entries, summarized): ${clauses.join("; ")}`;
-    const digestBudget = Math.max(200, Math.floor(budgetChars / 2));
+    const digestBudget = Math.max(200, Math.floor(budget / 2));
     if (digest.length > digestBudget) digest = digest.slice(0, digestBudget - 3) + "...";
     lines.unshift(`- ${digest}`);
   }
   let out = lines.join("\n");
-  if (out.length > budgetChars) {
+  if (out.length > budget) {
     // Hard cap: keep the newest lines (they carry the live arc), note the cut.
     const kept: string[] = [];
     let used = 0;
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]!;
-      if (used + line.length + 1 > budgetChars && kept.length > 0) break;
+      if (used + line.length + 1 > budget && kept.length > 0) break;
       kept.unshift(line);
       used += line.length + 1;
     }
@@ -117,19 +124,27 @@ export function summarizeListForPrompt(
 /**
  * Phase 5 history budget: newest entries joined within a char budget,
  * head-truncated with an explicit note (never silently dropped from view).
+ *
+ * F6/F7: accepts raw or normalized entries; the caller filters to
+ * perception-visible entries first (see historyVisibleTo). The char budget
+ * defaults to the injected config's promptHistoryBudgetChars.
  */
 export function formatHistoryForPrompt(
-  history: string[],
+  history: Array<HistoryEntry | string>,
   maxEntries: number,
-  budgetChars = defaultConfig.promptHistoryBudgetChars,
+  budgetChars?: number,
+  cfg: EngineConfig = defaultConfig,
 ): string {
-  const tail = history.slice(-Math.max(1, maxEntries));
+  const budget = budgetChars ?? cfg.promptHistoryBudgetChars;
+  const allIds: string[] = [];
+  const texts = history.map((e) => normalizeHistoryEntry(e, allIds).text);
+  const tail = texts.slice(-Math.max(1, maxEntries));
   if (tail.length === 0) return "(no history yet)";
   const kept: string[] = [];
   let used = 0;
   for (let i = tail.length - 1; i >= 0; i--) {
     const line = tail[i]!;
-    if (used + line.length + 1 > budgetChars && kept.length > 0) break;
+    if (used + line.length + 1 > budget && kept.length > 0) break;
     kept.unshift(line);
     used += line.length + 1;
   }
@@ -138,19 +153,45 @@ export function formatHistoryForPrompt(
   return omitted > 0 ? `(${omitted} older entries omitted for budget)\n${body}` : body;
 }
 
+/**
+ * F6: history entries visible to `actorId` — entries the actor perceived
+ * (in the entry's perceivers list) or authored ("Name:" / "id:" /
+ * "Name tried:" prefixes). Proposal/selection prompts and the
+ * open-question scan use this instead of the global history, so an NPC in
+ * another room no longer "knows" events they could not perceive.
+ */
+export function historyVisibleTo(world: World, actorId: string): HistoryEntry[] {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const allIds = world.actors.map((a) => a.id);
+  const prefixes = actor
+    ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+    : [`${actorId}:`, `${actorId} tried:`];
+  const authored = (text: string): boolean =>
+    prefixes.some((p) => text.toLowerCase().startsWith(p.toLowerCase()));
+  return world.history
+    .map((e) => normalizeHistoryEntry(e, allIds))
+    .filter((e) => e.perceivers.includes(actorId) || authored(e.text));
+}
+
 export type SubjectiveContextOptions = {
   /** Recent-history entries to include. Defaults to proposalHistoryLimit (20). */
   historyLimit?: number;
   /** Max suggestions requested. Defaults to maxProposalSuggestions (10). */
   maxSuggestions?: number;
+  /** F7: injected engine config (defaults to defaultConfig). */
+  cfg?: EngineConfig;
 };
 
-function resolveHistoryLimit(opts?: SubjectiveContextOptions): number {
-  return opts?.historyLimit ?? defaultConfig.proposalHistoryLimit;
+function resolveHistoryLimit(opts: SubjectiveContextOptions | undefined, cfg: EngineConfig): number {
+  return opts?.historyLimit ?? cfg.proposalHistoryLimit;
 }
 
-function resolveMaxSuggestions(opts?: SubjectiveContextOptions): number {
-  return opts?.maxSuggestions ?? defaultConfig.maxProposalSuggestions;
+function resolveMaxSuggestions(opts: SubjectiveContextOptions | undefined, cfg: EngineConfig): number {
+  return opts?.maxSuggestions ?? cfg.maxProposalSuggestions;
+}
+
+function resolveCfg(opts?: SubjectiveContextOptions): EngineConfig {
+  return opts?.cfg ?? defaultConfig;
 }
 
 function formatVisibleActors(visible: Actor[]): string {
@@ -194,23 +235,33 @@ export const MAX_RECENT_OWN_ACTIONS = 5;
  * desk?"/"first task?" from silently expiring into re-asks (Exp-3 ticks
  * 14/17/20).
  */
-export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN_QUESTIONS): string[] {
+export function getOpenQuestions(
+  world: World,
+  actorId: string,
+  limit = MAX_OPEN_QUESTIONS,
+  cfg: EngineConfig = defaultConfig,
+): string[] {
   const actor = getActorById(world, actorId);
   if (!actor) return [];
   const nameLower = actor.name.toLowerCase();
   const idLower = actor.id.toLowerCase();
   const scanWindow = Math.max(
-    defaultConfig.openQuestionScanWindow,
-    defaultConfig.proposalHistoryLimit,
+    cfg.openQuestionScanWindow,
+    cfg.proposalHistoryLimit,
   );
-  const entries = world.history.slice(-scanWindow);
+  // F6: only entries this actor perceived or authored can open questions
+  // for them — unperceived events are not their knowledge.
+  const entries = historyVisibleTo(world, actorId)
+    .slice(-scanWindow)
+    .map((e) => e.text);
   const authorPrefixes = [`${actor.name}:`, `${actor.id}:`];
   const out: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
-    // Exp-4 item 6: fallback attempts never happened — their questions
-    // were never asked and must not become open questions.
-    if (entry.includes("(not done)")) continue;
+    // Exp-4 item 6 / F22: fallback attempts never happened — their
+    // questions were never asked and must not become open questions.
+    // Detected via the sentinel, never the "(not done)" substring.
+    if (entry.includes(NOT_DONE_SENTINEL)) continue;
     if (!entry.includes("?")) continue;
     const lower = entry.toLowerCase();
     const mentionsMe = lower.includes(nameLower) || lower.includes(idLower) || /\byou\b/.test(lower);
@@ -218,7 +269,8 @@ export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN
     if (!mentionsMe || mine) continue;
     // Answered once the addressee authored any later entry (their response
     // turn) — until then the question stays open no matter how many other
-    // turns intervene.
+    // turns intervene. Q1: clean turns now record the narrative, so a
+    // question answered in narrative prose still closes the question.
     const answered = entries
       .slice(i + 1)
       .some((later) => authorPrefixes.some((p) => later.startsWith(p)));
@@ -413,13 +465,17 @@ export function getRecentOwnActions(world: World, actorId: string, limit = MAX_R
   if (!actor) return [];
   const prefixName = `${actor.name}:`;
   const prefixId = `${actor.id}:`;
-  // Exp-4 item 6: fallback attempts ("tried … (not done)") never happened —
-  // neither a repeat to avoid nor a question answered. The "tried:" prefix
-  // already misses the ":" author match below; the explicit filter keeps
-  // this true even if the format ever changes.
-  const mine = world.history.filter(
-    (h) => !h.includes("(not done)") && (h.startsWith(prefixName) || h.startsWith(prefixId)),
-  );
+  // Exp-4 item 6 / F22: fallback attempts ("tried … (not done)" +
+  // sentinel) never happened — neither a repeat to avoid nor a question
+  // answered. The "tried:" prefix already misses the ":" author match
+  // below; the explicit sentinel filter keeps this true even if the
+  // format ever changes. Q1: clean turns record the narrative now, so
+  // these are narrative records of own turns.
+  const mine = world.history
+    .map((h) => h.text)
+    .filter(
+      (h) => !h.includes(NOT_DONE_SENTINEL) && (h.startsWith(prefixName) || h.startsWith(prefixId)),
+    );
   return mine.slice(-limit);
 }
 
@@ -560,20 +616,43 @@ export function buildObjectIdCatalog(world: World): string {
 }
 
 /**
- * Exp-6 item 8 (object interaction): affordance nudge. Zero object touches
- * across 70+ turns in four experiments is structural: the engine punishes
- * missing object/prop patches after the fact but never *demands* them up
- * front. When the action names a manipulable object (grab/manipulation
- * verb or a named grab target), return an explicit demand line naming the
- * exact object id and the required patch — used in the consequence context
- * and in retry feedback. Returns undefined when the action names nothing
- * manipulable.
+ * Exp-6 item 8 (object interaction), strengthened per Q7: affordance nudge.
+ * Zero object touches across 70+ turns in four experiments is structural:
+ * the engine punishes missing object/prop patches after the fact but never
+ * *demands* them up front. Two tiers:
+ * - STRONG: the action carries a manipulation verb or manipulates an
+ *   object in a grab clause ("open the laptop") — the consequence is
+ *   INCOMPLETE without the patch, stated as a hard requirement.
+ * - SOFT: the action merely names a manipulable object (walk to the coffee
+ *   machine) — one eliciting line so the consequence considers using it
+ *   instead of narrating around it.
+ * Both tiers name exact object ids, the required patch shape, and the
+ * physical-reach rule (F4: within OBJECT_INTERACT_RADIUS cells). Building
+ * fabric (walls/windows/doors/signs) is never manipulable.
+ * Returns undefined when the action names nothing manipulable.
  */
 const MANIPULATION_VERBS =
   "pour|pours|pouring|brew|brews|brewing|open|opens|opening|pick|picks|picking|grab|grabs|grabbing|" +
   "hold|holds|holding|carry|carries|carrying|sip|sips|sipping|drink|drinks|drinking|fill|fills|filling|" +
   "set\\s+up|boot|boots|booting|move|moves|moving|hand|hands|handing|pass|passes|passing|give|gives|giving|" +
   "sit|sits|sitting|sat|stand|stands|standing|stood";
+
+const NON_MANIPULABLE_RE = /wall|window|door|sign/i;
+
+/** Manipulable objects the action text names (by id/name), even without a manipulation verb. */
+function findNamedManipulableObjects(
+  world: World,
+  actionText: string,
+): { id: string; name: string }[] {
+  const out: { id: string; name: string }[] = [];
+  for (const o of world.scene.objects) {
+    if (NON_MANIPULABLE_RE.test(`${o.id} ${o.name}`)) continue;
+    if (objectMentionVariants(o).some((v) => mentionsObjectVariant(actionText, v))) {
+      out.push({ id: o.id, name: o.name });
+    }
+  }
+  return out;
+}
 
 export function buildObjectAffordanceNudge(world: World, action: Action): string | undefined {
   const verbHit = new RegExp(`\\b(?:${MANIPULATION_VERBS})\\b`, "i").test(action.text);
@@ -582,21 +661,34 @@ export function buildObjectAffordanceNudge(world: World, action: Action): string
   // laptop" → the laptop, not the desk). Building fabric is not
   // manipulable.
   const manipulated = findManipulatedObjects(world, action.text).filter(
-    (o) => !/wall|window|door|sign/i.test(`${o.id} ${o.name}`),
+    (o) => !NON_MANIPULABLE_RE.test(`${o.id} ${o.name}`),
   );
-  if (!verbHit && manipulated.length === 0) return undefined;
-  const target =
-    manipulated.length > 0
-      ? manipulated.map((o) => `"${o.id}" (${o.name})`).join(", ")
-      : "the named object (resolve its exact id from OBJECT IDS above)";
-  const patchFor =
-    manipulated.length > 0
-      ? manipulated.map((o) => `"${o.id}"`).join(", ")
-      : "the object";
+  if (verbHit || manipulated.length > 0) {
+    const target =
+      manipulated.length > 0
+        ? manipulated.map((o) => `"${o.id}" (${o.name})`).join(", ")
+        : "the named object (resolve its exact id from OBJECT IDS above)";
+    const patchFor =
+      manipulated.length > 0
+        ? manipulated.map((o) => `"${o.id}"`).join(", ")
+        : "the object";
+    return (
+      `OBJECT AFFORDANCE: the action manipulates ${target} — the consequence is INCOMPLETE without its patch: ` +
+      `set 'prop' (cup|laptop|null) and/or an objectPatch for ${patchFor} reflecting the change (new description, position, or passable/blocksVision/blocksSound flags). ` +
+      `PHYSICAL REACH: moving/resizing/toggling an object requires the acting actor within ${OBJECT_INTERACT_RADIUS} cells of it — walk up first, then manipulate. ` +
+      `A verb like pour/open/pick up/hold/sit with no backing patch fails validation — emit the patch, do not just narrate the verb.`
+    );
+  }
+  // Q7 soft tier: the action names a manipulable object without a
+  // manipulation verb ("walk to the coffee machine", "stand by the desk").
+  // Elicit the interaction instead of letting the turn narrate past it.
+  const named = findNamedManipulableObjects(world, action.text);
+  if (named.length === 0) return undefined;
+  const target = named.map((o) => `"${o.id}" (${o.name})`).join(", ");
   return (
-    `OBJECT AFFORDANCE: the action manipulates ${target} — the consequence is INCOMPLETE without its patch: ` +
-    `set 'prop' (cup|laptop|null) and/or an objectPatch for ${patchFor} reflecting the change. ` +
-    `A verb like pour/open/pick up/hold/sit with no backing patch fails validation — emit the patch, do not just narrate the verb.`
+    `OBJECT AFFORDANCE: the action names ${target}. If the actor uses, touches, or changes it in any way, ` +
+    `that MUST be backed by an objectPatch for its exact id (or 'prop' for a held item) — narrating the use without the patch fails validation. ` +
+    `Manipulation requires being within ${OBJECT_INTERACT_RADIUS} cells of the object.`
   );
 }
 
@@ -624,10 +716,12 @@ export function buildProposalContext(
   if (!actor) throw new Error(`unknown actor: ${actorId}`);
   const visible = getVisibleActors(world, actorId);
   const objects = getVisibleObjects(world, actorId);
-  const historyLimit = resolveHistoryLimit(opts);
-  const maxSuggestions = resolveMaxSuggestions(opts);
-  const recentHistory = formatHistoryForPrompt(world.history, historyLimit);
-  const openQuestions = getOpenQuestions(world, actorId);
+  const cfg = resolveCfg(opts);
+  const historyLimit = resolveHistoryLimit(opts, cfg);
+  const maxSuggestions = resolveMaxSuggestions(opts, cfg);
+  // F6: the prompt sees only what this actor perceived or authored.
+  const recentHistory = formatHistoryForPrompt(historyVisibleTo(world, actorId), historyLimit, undefined, cfg);
+  const openQuestions = getOpenQuestions(world, actorId, MAX_OPEN_QUESTIONS, cfg);
   const questionsLine =
     openQuestions.length > 0
       ? `Open questions addressed to you (answer these before starting anything new):\n${openQuestions.map((q) => `- ${q}`).join("\n")}`
@@ -701,8 +795,10 @@ function buildFullActorContext(
   if (!actor) throw new Error(`unknown actor: ${actorId}`);
   const visible = getVisibleActors(world, actorId);
   const objects = getVisibleObjects(world, actorId);
-  const historyLimit = resolveHistoryLimit(opts);
-  const recentHistory = formatHistoryForPrompt(world.history, historyLimit);
+  const cfg = resolveCfg(opts);
+  const historyLimit = resolveHistoryLimit(opts, cfg);
+  // F6: the prompt sees only what this actor perceived or authored.
+  const recentHistory = formatHistoryForPrompt(historyVisibleTo(world, actorId), historyLimit, undefined, cfg);
 
   return [
     "Current Actor",
@@ -759,7 +855,9 @@ export function buildSelectionContext(
     suggestions.length > 0
       ? suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")
       : "(no candidates)";
-  const openQuestions = getOpenQuestions(world, actorId);
+  const cfg = resolveCfg(opts);
+  // F6: open questions are perception-filtered inside getOpenQuestions.
+  const openQuestions = getOpenQuestions(world, actorId, MAX_OPEN_QUESTIONS, cfg);
   const recentOwn = getRecentOwnActions(world, actorId);
   const questionsBlock =
     openQuestions.length > 0
@@ -814,7 +912,11 @@ export function buildSelectionContext(
 // position (movement/adjacency reasoning), perceivers + named targets in
 // detail, nearby + named-target objects with rects, bounded history, and
 // the exact-id catalog (kept as a separate line below).
-export function getPerceivingActors(world: World, action: Action): Actor[] {
+export function getPerceivingActors(
+  world: World,
+  action: Action,
+  cfg: EngineConfig = defaultConfig,
+): Actor[] {
   const actor = getActorById(world, action.actorId);
   if (!actor) return [];
   return world.actors.filter((o) => {
@@ -822,8 +924,8 @@ export function getPerceivingActors(world: World, action: Action): Actor[] {
     const from = { x: o.x, y: o.y };
     const to = { x: actor.x, y: actor.y };
     return (
-      getVisibleActors(world, o.id).some((a) => a.id === action.actorId) ||
-      getAudibleActors(world, o.id).some((a) => a.id === action.actorId) ||
+      getVisibleActors(world, o.id, cfg).some((a) => a.id === action.actorId) ||
+      getAudibleActors(world, o.id, cfg).some((a) => a.id === action.actorId) ||
       Math.abs(from.x - to.x) + Math.abs(from.y - to.y) <= 2
     );
   });
@@ -855,8 +957,10 @@ function formatSnapshotObject(o: SceneObject): string {
 export function buildSlimObjectiveSnapshot(
   world: World,
   action: Action,
-  radius = defaultConfig.consequenceSnapshotRadius,
+  cfg: EngineConfig = defaultConfig,
+  radius?: number,
 ): string {
+  const r = radius ?? cfg.consequenceSnapshotRadius;
   const actor = getActorById(world, action.actorId);
   const at = actor ? { x: actor.x, y: actor.y } : { x: 0, y: 0 };
   const destActorId = actor ? resolveDestinationActorId(world, action.actorId, action.text) : undefined;
@@ -866,7 +970,7 @@ export function buildSlimObjectiveSnapshot(
 
   const detailIds = new Set<string>();
   if (actor) detailIds.add(actor.id);
-  for (const p of getPerceivingActors(world, action)) detailIds.add(p.id);
+  for (const p of getPerceivingActors(world, action, cfg)) detailIds.add(p.id);
   if (destActorId) detailIds.add(destActorId);
   if (mentionedActorId) detailIds.add(mentionedActorId);
   const detailActors = world.actors.filter((a) => detailIds.has(a.id));
@@ -885,7 +989,7 @@ export function buildSlimObjectiveSnapshot(
       return false;
     }
     const center = { x: o.x + o.w / 2, y: o.y + o.h / 2 };
-    return distance(at, center) <= radius;
+    return distance(at, center) <= r;
   });
   const targetObjects = world.scene.objects.filter((o) => targetObjectIds.has(o.id));
 
@@ -900,9 +1004,11 @@ export function buildSlimObjectiveSnapshot(
     lines.push(`Acting actor memories (latest + digest): ${summarizeListForPrompt(actor.memories, 5).replace(/\n/g, " ")}`);
   }
   lines.push(
-    `Nearby objects (within ${radius} cells): ${nearbyObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
+    `Nearby objects (within ${r} cells): ${nearbyObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
     `Named-target objects (always included): ${targetObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
-    `Recent history: ${formatHistoryForPrompt(world.history, 8).replace(/\n/g, " ")}`,
+    // F6: the consequence snapshot is built for the acting actor — history
+    // is filtered to what they perceived or authored.
+    `Recent history: ${formatHistoryForPrompt(historyVisibleTo(world, action.actorId), 8, undefined, cfg).replace(/\n/g, " ")}`,
     `Memory stats: ${world.actors.length} actors, ${stats.historyEntries} history entries, ${stats.memoryBytes} bytes compounding (prompt stays flat via summaries).`,
   );
   return lines.join("\n");
@@ -912,16 +1018,17 @@ export function buildConsequenceContext(
   world: World,
   action: Action,
   feedback?: string,
+  cfg: EngineConfig = defaultConfig,
 ): string {
   const actor = getActorById(world, action.actorId);
-  const perceivers = getPerceivingActors(world, action);
+  const perceivers = getPerceivingActors(world, action, cfg);
   // Exp-6 item 8: demand the object/prop patch up front when the action
   // names a manipulable object — don't just punish its absence later.
   const affordanceNudge = buildObjectAffordanceNudge(world, action);
   const lines = [
     "Objective Snapshot (slim — nearby actors/objects + named targets; far state omitted for budget)",
     "",
-    buildSlimObjectiveSnapshot(world, action),
+    buildSlimObjectiveSnapshot(world, action, cfg),
     "",
     "Current Action",
     "",

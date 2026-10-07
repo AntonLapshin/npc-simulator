@@ -32,7 +32,8 @@ import {
 } from "../../src/engine/contextBuilder.js";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
 import { Logger, createTestLogger } from "../../src/logging/logger.js";
-import { makeTestDeps, makeTinyWorld } from "../helpers.js";
+import { makeTestDeps, makeTinyWorld, hist, errorText, triedHist } from "../helpers.js";
+import { NOT_DONE_SENTINEL } from "../../src/types.js";
 import type { ActionSemantics, ConsequenceResult, World } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
@@ -173,7 +174,7 @@ describe("exp4-5 ranked destination resolution (ticks 4/7/15/18)", () => {
 });
 
 describe("exp4-7 narrowed merged-OR (ticks 3/7/10/15/17)", () => {
-  it("judge-hallucinated moves=true on glance text is dropped deterministically", async () => {
+  it("merged moves=true on glance text is kept (F1: token never downgrades)", async () => {
     const world = makeTinyWorld();
     const resolved = await resolveActionSemantics(
       world,
@@ -186,7 +187,10 @@ describe("exp4-7 narrowed merged-OR (ticks 3/7/10/15/17)", () => {
       },
       createTestLogger(),
     );
-    expect(resolved.semantics!.moves).toBe(false);
+    // F1: a true merged verdict stands even without a displacement token —
+    // the fixed verb ontology is not the whole language.
+    expect(resolved.semantics!.moves).toBe(true);
+    expect(resolved.disagreements!.join(" ")).toMatch(/kept from the merged verdict/);
   });
 
   it("deterministic moves=true survives effects+judge both claiming stillness", async () => {
@@ -242,7 +246,7 @@ describe("exp4-2 reverse verb-drop (ticks 2/16)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/no position change/);
+    expect(errorText(v.errors)).toMatch(/no position change/);
   });
 
   it("fails narrated pose change with no pose patch", () => {
@@ -257,7 +261,7 @@ describe("exp4-2 reverse verb-drop (ticks 2/16)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/pose/);
+    expect(errorText(v.errors)).toMatch(/pose/);
   });
 
   it("passes posture prose and staying-negations without patches", () => {
@@ -274,7 +278,7 @@ describe("exp4-2 reverse verb-drop (ticks 2/16)", () => {
         { actorId: "u", text: "Wait quietly." },
         stillSemantics(),
       );
-      expect(v.errors.join(" ")).not.toMatch(/narrative describes movement|declares moved=true/);
+      expect(errorText(v.errors)).not.toMatch(/narrative describes movement|declares moved=true/);
     }
   });
 
@@ -307,8 +311,22 @@ describe("exp4-1 clamp over-cap walks to a partial step (ticks 15/18)", () => {
   });
 
   it("isClampableMovementFailure covers cap + progress errors", () => {
-    expect(isClampableMovementFailure(["acting actor (anton) moves 13.0 cells in one turn: a single turn covers at most 6 cells"])).toBe(true);
-    expect(isClampableMovementFailure(["narrative invents dialogue"])).toBe(false);
+    // F2: codes, not prose.
+    expect(
+      isClampableMovementFailure([
+        { code: "movement.over_step_cap", message: "acting actor (anton) moves 13.0 cells in one turn" },
+      ]),
+    ).toBe(true);
+    expect(
+      isClampableMovementFailure([
+        { code: "movement.no_progress_actor", message: "make real progress" },
+      ]),
+    ).toBe(true);
+    expect(
+      isClampableMovementFailure([
+        { code: "speech.invented_dialogue", message: "narrative invents dialogue" },
+      ]),
+    ).toBe(false);
   });
 
   it("resolveWithValidation clamps instead of falling back (tick-15 shape)", async () => {
@@ -371,7 +389,7 @@ describe("exp4-8 salvage entry logging (whole run)", () => {
       semantics, logger,
     );
     expect(tier2).not.toBeNull();
-    expect(tier2!.warnings.join(" ")).toMatch(/pour\/brew\/open/);
+    expect(errorText(tier2!.warnings)).toMatch(/pour\/brew\/open/);
     // Refuse: far contact with no adjacency (adjacency stays hard).
     const no = trySalvageConsequence(
       world,
@@ -390,7 +408,7 @@ describe("exp4-8 salvage entry logging (whole run)", () => {
     expect((evals[0]!.output as { eligible: boolean }).eligible).toBe(true);
     expect((evals[1]!.output as { eligible: boolean }).eligible).toBe(true);
     expect((evals[2]!.output as { eligible: boolean }).eligible).toBe(false);
-    expect((evals[2]!.output as { blockers: string[] }).blockers.length).toBeGreaterThan(0);
+    expect((evals[2]!.output as { blockers: Array<{ code: string; message: string }> }).blockers.length).toBeGreaterThan(0);
   });
 });
 
@@ -398,12 +416,17 @@ describe("exp4-6 fallback history marked un-applied (ticks 8/16/20)", () => {
   it("marks fallback entries and detects the marker", () => {
     const world = makeTinyWorld();
     const action = { actorId: "u", text: "Nod and start explaining the first task." };
+    // Q1: clean turns record the narrative, not the action text.
     const applied = applyConsequence(world, baseResult("Done."), action);
-    expect(applied.history.at(-1)).toBe(`U: ${action.text}`);
+    expect(applied.history.at(-1)!.text).toBe("U: Done.");
     expect(isFallbackHistoryEntry(applied.history.at(-1)!)).toBe(false);
     const fellBack = applyConsequence(world, baseResult("Done."), action, undefined, { fallback: true });
-    expect(fellBack.history.at(-1)).toBe(`U tried: ${action.text} (not done)`);
+    // F22: the human-readable "(not done)" text is kept, but detection
+    // uses the sentinel.
+    expect(fellBack.history.at(-1)!.text).toBe(`U tried: ${action.text} (not done)${NOT_DONE_SENTINEL}`);
     expect(isFallbackHistoryEntry(fellBack.history.at(-1)!)).toBe(true);
+    // A user-written "(not done)" without the sentinel is NOT a fallback.
+    expect(isFallbackHistoryEntry(hist(world, "U tried: something (not done)"))).toBe(false);
   });
 
   it("isFallbackConsequence detects the canonical fallback only", () => {
@@ -415,8 +438,8 @@ describe("exp4-6 fallback history marked un-applied (ticks 8/16/20)", () => {
     const world = makeTinyWorld();
     world.actors.find((a) => a.id === "n")!.name = "Nadia";
     world.history.push(
-      "U: Walk to Nadia. Nadia, where is my desk?",
-      "Nadia tried: Nod and start explaining the first task. (not done)",
+      hist(world, "U: Walk to Nadia. Nadia, where is my desk?"),
+      triedHist(world, "Nadia tried: Nod and start explaining the first task."),
     );
     // The question from the applied turn stays open; the fallback explanation
     // counts as neither an answer nor a prior action to avoid repeating.
@@ -459,7 +482,7 @@ describe("exp4-10 handshake/greeting attractor dedup", () => {
 
   it("findCoreRepeat flags a reworded repeat of a recent own action", () => {
     const world = antonWorld();
-    world.history.push("Tanya: Shake Anton's hand warmly.");
+    world.history.push(hist(world, "Tanya: Shake Anton's hand warmly."));
     expect(findCoreRepeat(world, "tanya", "Stand up and shake Anton's hand.")).toContain("Shake Anton's hand");
     expect(findCoreRepeat(world, "tanya", "Walk to the coffee machine and pour a coffee.")).toBeUndefined();
     // Another actor's handshake is not this actor's repeat.

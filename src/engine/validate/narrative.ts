@@ -1,19 +1,27 @@
 // Narrative actor, observer-discipline, state-coherence and addressee checks
 // (extracted from physicalValidator.ts).
 
-import type { Action, ActionSemantics, World } from "../../types.js";
+import type { Action, ActionSemantics, EngineConfig, ValidationError, World } from "../../types.js";
+import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity } from "./speech.js";
 
-/** Actors that perceived the acting actor's event (mirrors contextBuilder). */
-export function perceiverIds(world: World, actingActorId: string): Set<string> {
+/**
+ * Actors that perceived the acting actor's event (mirrors contextBuilder).
+ * F7: takes the injected EngineConfig so perception-radius overrides apply.
+ */
+export function perceiverIds(
+  world: World,
+  actingActorId: string,
+  cfg: EngineConfig = defaultConfig,
+): Set<string> {
   const actor = world.actors.find((a) => a.id === actingActorId);
   const out = new Set<string>([actingActorId]);
   if (!actor) return out;
   for (const o of world.actors) {
     if (o.id === actingActorId) continue;
-    const sees = getVisibleActors(world, o.id).some((a) => a.id === actingActorId);
-    const hears = getAudibleActors(world, o.id).some((a) => a.id === actingActorId);
+    const sees = getVisibleActors(world, o.id, cfg).some((a) => a.id === actingActorId);
+    const hears = getAudibleActors(world, o.id, cfg).some((a) => a.id === actingActorId);
     const adjacent =
       Math.abs(o.x - actor.x) + Math.abs(o.y - actor.y) <= 2;
     if (sees || hears || adjacent) out.add(o.id);
@@ -32,18 +40,20 @@ export function validateAddresseePatch(
   normalized: { actorPatches: { actorId: string; thoughts?: string }[] },
   action: Action,
   semantics: ActionSemantics,
-): string[] {
-  const errors: string[] = [];
+  cfg: EngineConfig = defaultConfig,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   if (semantics.addresseeActorId === undefined) return errors;
   if (semantics.addresseeActorId === action.actorId) return errors;
   const target = world.actors.find((a) => a.id === semantics.addresseeActorId);
   if (!target) return errors;
-  if (!perceiverIds(world, action.actorId).has(target.id)) return errors; // couldn't perceive — no patch owed
+  if (!perceiverIds(world, action.actorId, cfg).has(target.id)) return errors; // couldn't perceive — no patch owed
   const patched = normalized.actorPatches.some((p) => p.actorId === target.id);
   if (!patched) {
-    errors.push(
-      `action speaks directly to ${target.id} but ${target.id} has no actorPatch: give every perceiving actor (especially a direct addressee) at least a 'thoughts' reaction patch`,
-    );
+    errors.push({
+      code: "speech.addressee_not_patched",
+      message: `action speaks directly to ${target.id} but ${target.id} has no actorPatch: give every perceiving actor (especially a direct addressee) at least a 'thoughts' reaction patch`,
+    });
   }
   return errors;
 }
@@ -88,8 +98,8 @@ export function validateStateCoherence(
     }[];
   },
   action: Action,
-): string[] {
-  const errors: string[] = [];
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   const sittingRe = /\bsit\b|\bsitting\b|\bseated\b/i;
   const standingRe = /\bstand\b|\bstanding\b(?!\s+desk)|\bstood\b/i;
   /**
@@ -122,17 +132,19 @@ export function validateStateCoherence(
         sittingRe.test(state) &&
         isDescriptiveState(state, sittingRe)
       ) {
-        errors.push(
-          `actor ${patch.actorId}: pose changed to "stand" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (standing, no longer sitting)`,
-        );
+        errors.push({
+          code: "state.pose_state_mismatch",
+          message: `actor ${patch.actorId}: pose changed to "stand" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (standing, no longer sitting)`,
+        });
       } else if (
         /^sit$/i.test(patch.pose!) &&
         standingRe.test(state) &&
         isDescriptiveState(state, standingRe)
       ) {
-        errors.push(
-          `actor ${patch.actorId}: pose changed to "sit" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (sitting, no longer standing)`,
-        );
+        errors.push({
+          code: "state.pose_state_mismatch",
+          message: `actor ${patch.actorId}: pose changed to "sit" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (sitting, no longer standing)`,
+        });
       }
     }
     if (propChanged && actor.prop) {
@@ -144,9 +156,10 @@ export function validateStateCoherence(
       const stillClaimsProp =
         new RegExp(`\\b${oldProp}\\b`, "i").test(state) && !releaseRe.test(state);
       if (stillClaimsProp) {
-        errors.push(
-          `actor ${patch.actorId}: prop changed from "${oldProp}" to ${patch.prop === null ? "null" : `"${patch.prop}"`} but state still reads "${state.slice(0, 80)}": update 'state' to match (no longer working on/holding the ${oldProp})`,
-        );
+        errors.push({
+          code: "state.prop_state_mismatch",
+          message: `actor ${patch.actorId}: prop changed from "${oldProp}" to ${patch.prop === null ? "null" : `"${patch.prop}"`} but state still reads "${state.slice(0, 80)}": update 'state' to match (no longer working on/holding the ${oldProp})`,
+        });
       }
     }
     if (
@@ -157,9 +170,10 @@ export function validateStateCoherence(
     ) {
       // Rolling a chair is legitimate seated locomotion — exempt it.
       if (!/\b(roll\w*|wheel\w*|chair)\b/i.test(action.text)) {
-        errors.push(
-          `actor ${patch.actorId}: moved ${Math.hypot(patch.x! - actor.x, patch.y! - actor.y).toFixed(1)} cells but state still reads "${state.slice(0, 80)}": update 'state' (and 'pose') to match — a sitting state cannot walk across the room`,
-        );
+        errors.push({
+          code: "state.moved_while_sitting",
+          message: `actor ${patch.actorId}: moved ${Math.hypot(patch.x! - actor.x, patch.y! - actor.y).toFixed(1)} cells but state still reads "${state.slice(0, 80)}": update 'state' (and 'pose') to match — a sitting state cannot walk across the room`,
+        });
       }
     }
   }
@@ -169,14 +183,17 @@ export function validateStateCoherence(
 export function validateActingActorPresence(  normalized: { actorPatches: { actorId: string }[] },
   action: Action,
   semantics: ActionSemantics,
-): string[] {
+): ValidationError[] {
   const needsActor = semantics.moves || semantics.contactActorId !== undefined;
   if (!needsActor) return [];
   const hasActing = normalized.actorPatches.some((p) => p.actorId === action.actorId);
   if (!hasActing) {
     const kind = semantics.contactActorId !== undefined ? "physical contact" : "movement";
     return [
-      `action implies ${kind} but acting actor (${action.actorId}) has no actorPatch (only observers patched, or none): patch the acting actor itself with the movement/contact outcome`,
+      {
+        code: "turn_discipline.acting_actor_not_patched",
+        message: `action implies ${kind} but acting actor (${action.actorId}) has no actorPatch (only observers patched, or none): patch the acting actor itself with the movement/contact outcome`,
+      },
     ];
   }
   return [];
@@ -211,7 +228,7 @@ const COMMON_CAPITALIZED = new Set(
 export function validateNarrativeActors(
   world: World,
   normalized: { narrative: string; reasoning?: string },
-): string[] {
+): ValidationError[] {
   const roster = new Map<string, string>();
   for (const a of world.actors) {
     roster.set(a.name.toLowerCase(), a.id);
@@ -249,7 +266,10 @@ export function validateNarrativeActors(
     if (objectTokens.has(lower)) continue;
     if (COMMON_CAPITALIZED.has(lower)) continue;
     return [
-      `narrative names unknown actor "${s}" with no roster entry or patch: only the listed actors exist — describe only them, never invent or address anyone else`,
+      {
+        code: "narrative.unknown_actor",
+        message: `narrative names unknown actor "${s}" with no roster entry or patch: only the listed actors exist — describe only them, never invent or address anyone else`,
+      },
     ];
   }
   return [];
@@ -268,7 +288,8 @@ export function validateNarrativeActors(
  */
 const NARRATIVE_LOCOMOTION_RE =
   /\b(walk|walks|walked|walking|go|goes|went|going|headed|heading|move|moves|moved|moving|approach|approaches|approached|approaching|enter|enters|entered|entering|leave|leaves|left|leaving|return|returns|returned|returning|advance|advances|proceed|proceeds|come|comes|came|coming|follow|follows|followed|join|joins|joined|hurry|hurries|rush|rushes|stroll|strolls|saunter|saunters|drift|drifts|sidle|sidles)\b/i;
-const HEAD_VERB_RE = /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along))\b/i;
+// F34: "heads to/toward" (and the headed/heading variants) are locomotion.
+const HEAD_VERB_RE = /\b(heads?\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along))\b/i;
 const NARRATIVE_POSE_CHANGE_RE =
   /\b((stand|stands|standing|stood)\s+up\b|\bsit(s|ting)?\s+down\b|\bsat\s+down\b|\btakes?\s+a\s+seat\b|\bget(s|ting)?\s+up\b)/i;
 const STAY_NEGATION_RE = /\b(stay|stays|staying|stayed|remain|remains|remaining|remained|keep|keeps|keeping|kept|continue|continues|continuing|still|without\s+(moving|standing\s+up|sitting\s+down))\b/i;
@@ -281,8 +302,8 @@ export function validateNarrativeMovementGrounding(
     effects?: { moved?: boolean };
   },
   action: Action,
-): string[] {
-  const errors: string[] = [];
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   const actor = world.actors.find((a) => a.id === action.actorId);
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
   const movedPatch =
@@ -292,9 +313,10 @@ export function validateNarrativeMovementGrounding(
     (patch.x !== actor.x || patch.y !== actor.y);
   // 1. Declared movement must move.
   if (normalized.effects?.moved === true && !movedPatch) {
-    errors.push(
-      `effects declares moved=true but acting actor (${action.actorId}) has no position change: emit x and y with a new reachable position when movement occurs — never declare movement without the patch`,
-    );
+    errors.push({
+      code: "movement.declared_without_patch",
+      message: `effects declares moved=true but acting actor (${action.actorId}) has no position change: emit x and y with a new reachable position when movement occurs — never declare movement without the patch`,
+    });
   }
   // 2. Narrated locomotion must move (mask resumed activity + body-part
   // "head" + staying-negations so "return to typing", "shake his head",
@@ -308,17 +330,19 @@ export function validateNarrativeMovementGrounding(
     (NARRATIVE_LOCOMOTION_RE.test(masked) || HEAD_VERB_RE.test(masked)) &&
     !STAY_NEGATION_RE.test(masked);
   if (claimsLocomotion && !movedPatch) {
-    errors.push(
-      `narrative describes movement ("${normalized.narrative.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement — describing a walk without the patch is incomplete`,
-    );
+    errors.push({
+      code: "movement.narrated_without_patch",
+      message: `narrative describes movement ("${normalized.narrative.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement — describing a walk without the patch is incomplete`,
+    });
   }
   // 3. Narrated pose change must set pose ("stands up" needs pose:"stand").
   // Deliberately narrow (stand UP / sit DOWN only): "standing beside it"
   // is posture prose, not a pose change.
   if (NARRATIVE_POSE_CHANGE_RE.test(normalized.narrative) && patch?.pose === undefined) {
-    errors.push(
-      `narrative describes standing up/sitting down but no pose patch sets it: include pose ("stand" or "sit") on the acting actor (${action.actorId})`,
-    );
+    errors.push({
+      code: "movement.pose_change_without_patch",
+      message: `narrative describes standing up/sitting down but no pose patch sets it: include pose ("stand" or "sit") on the acting actor (${action.actorId})`,
+    });
   }
   return errors;
 }
@@ -356,7 +380,7 @@ export function validateObserverSubject(
   world: World,
   normalized: { narrative: string },
   action: Action,
-): string[] {
+): ValidationError[] {
   const observers = world.actors.filter((a) => a.id !== action.actorId);
   if (observers.length === 0) return [];
   const names: Array<{ token: string; id: string }> = [];
@@ -381,7 +405,10 @@ export function validateObserverSubject(
       if (!verbMatch) continue;
       if (OBSERVER_SUBJECT_VERBS.has(verbMatch[1]!)) {
         return [
-          `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
+          {
+            code: "narrative.observer_as_subject",
+            message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
+          },
         ];
       }
       break; // clause starts with this observer's name but no verb — no error

@@ -1,3 +1,13 @@
+/**
+ * F31: per-call LLM usage captured from the chat-completions `usage`
+ * block (token counts, not estimates).
+ */
+export type LlmUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type LogEntry = {
   id: string;
   sessionId: string;
@@ -22,6 +32,13 @@ export type LogEntry = {
   validationErrors?: string[];
   error?: string;
   durationMs?: number;
+  /** F31: per-call LLM usage — set on llm-call records (e.g. <module>_completed). */
+  usage?: LlmUsage;
+  /**
+   * F31: accumulated per-turn LLM usage — set on the turn_completed record
+   * (the engine accumulates per-call `usage` across the turn).
+   */
+  turnUsage?: LlmUsage;
 };
 
 export type LogInput = Omit<LogEntry, "id" | "sessionId" | "timestamp"> & {

@@ -17,7 +17,7 @@ import { LLMProposalEngine } from "../../src/llm/llmProposalEngine.js";
 import { consequenceSuffix } from "../../src/llm/prompts.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import type { LLMProvider } from "../../src/llm/index.js";
-import { makeTinyWorld } from "../helpers.js";
+import { makeTinyWorld, hist, errorText } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
@@ -104,7 +104,7 @@ describe("exp1-2 contact adjacency", () => {
     };
     const vFar = validateConsequence(world, far, action, semantics);
     expect(vFar.valid).toBe(false);
-    expect(vFar.errors.join(" ")).toMatch(/contact|adjacent/i);
+    expect(errorText(vFar.errors)).toMatch(/contact|adjacent/i);
 
     const near: ConsequenceResult = {
       ...baseResult("U shakes hands with N."),
@@ -137,7 +137,7 @@ describe("exp1-3 destination fidelity for landmarks", () => {
     };
     const vAway = validateConsequence(world, away, action, semantics);
     expect(vAway.valid).toBe(false);
-    expect(vAway.errors.join(" ")).toMatch(/coffee_machine|not closer/);
+    expect(errorText(vAway.errors)).toMatch(/coffee_machine|not closer/);
 
     const closer: ConsequenceResult = {
       ...baseResult("U walks to the coffee machine."),
@@ -170,7 +170,7 @@ describe("exp1-4 speech preservation applies to user turns too", () => {
     };
     const v = validateConsequence(world, truncated, action, semantics);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/exact words|truncate/);
+    expect(errorText(v.errors)).toMatch(/exact words|truncate/);
 
     const full: ConsequenceResult = {
       ...baseResult(`U says "Hi, I'm Anton, where is my desk?"`),
@@ -194,7 +194,7 @@ describe("exp1-5 addressee patching", () => {
     };
     const v = validateConsequence(world, missing, action, semantics);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/directly to n|thoughts/);
+    expect(errorText(v.errors)).toMatch(/directly to n|thoughts/);
 
     const patched: ConsequenceResult = {
       ...baseResult("U asks N where his desk is."),
@@ -223,7 +223,7 @@ describe("exp1-5 addressee patching", () => {
 describe("exp1-6/7 questions cue + repetition guard", () => {
   it("surfaces pending questions to proposal and selection", () => {
     const world = makeTinyWorld();
-    world.history.push("U: N, where is my desk?");
+    world.history.push(hist(world, "U: N, where is my desk?"));
     expect(getOpenQuestions(world, "n")).toHaveLength(1);
     expect(buildProposalContext(world, "n")).toContain("where is my desk?");
     const sel = buildSelectionContext(world, "n", ["Greet U warmly."]);
@@ -233,8 +233,8 @@ describe("exp1-6/7 questions cue + repetition guard", () => {
 
   it("lists recent own actions with a do-not-repeat guard", () => {
     const world = makeTinyWorld();
-    world.history.push("N: Walk over to greet U warmly.");
-    world.history.push("N: Walk over to greet U warmly again.");
+    world.history.push(hist(world, "N: Walk over to greet U warmly."));
+    world.history.push(hist(world, "N: Walk over to greet U warmly again."));
     expect(getRecentOwnActions(world, "n")).toHaveLength(2);
     const sel = buildSelectionContext(world, "n", ["Walk over to greet U warmly."]);
     expect(sel).toMatch(/do NOT repeat|Do not pick/i);
@@ -264,8 +264,8 @@ describe("exp1-8/9/10 anchors and nudges", () => {
 
   it("selection context carries identity + repetition + question cues", () => {
     const world = makeTinyWorld();
-    world.history.push("U: N, what is my first task?");
-    world.history.push("N: Welcome to the team!");
+    world.history.push(hist(world, "U: N, what is my first task?"));
+    world.history.push(hist(world, "N: Welcome to the team!"));
     const sel = buildSelectionContext(world, "n", ["Welcome to the team!"]);
     expect(sel).toContain("IDENTITY");
     expect(sel).toMatch(/do NOT repeat/i);

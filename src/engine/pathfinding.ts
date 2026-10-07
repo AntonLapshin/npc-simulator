@@ -15,6 +15,53 @@ export function isCellBlocked(scene: Scene, cx: number, cy: number): boolean {
   return isPointBlocked(scene, { x: cx + 0.5, y: cy + 0.5 });
 }
 
+/** F19: binary heap keyed by f-score. Lazy decrease-key: improved paths
+ * re-push a node; stale pops are skipped via the gScore check. */
+class BinaryHeap {
+  private items: Array<{ x: number; y: number; f: number; g: number }> = [];
+
+  get size(): number {
+    return this.items.length;
+  }
+
+  push(node: { x: number; y: number; f: number; g: number }): void {
+    const a = this.items;
+    a.push(node);
+    let i = a.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (a[p]!.f <= a[i]!.f) break;
+      const tmp = a[p]!;
+      a[p] = a[i]!;
+      a[i] = tmp;
+      i = p;
+    }
+  }
+
+  pop(): { x: number; y: number; f: number; g: number } | undefined {
+    const a = this.items;
+    const top = a[0];
+    const last = a.pop();
+    if (last !== undefined && a.length > 0) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < a.length && a[l]!.f < a[m]!.f) m = l;
+        if (r < a.length && a[r]!.f < a[m]!.f) m = r;
+        if (m === i) break;
+        const tmp = a[m]!;
+        a[m] = a[i]!;
+        a[i] = tmp;
+        i = m;
+      }
+    }
+    return top;
+  }
+}
+
 /** A* over integer cells, 4-directional. Returns cell-center path or null. */
 export function findPath(scene: Scene, from: Point, to: Point): Point[] | null {
   const start = toCell(from);
@@ -27,22 +74,19 @@ export function findPath(scene: Scene, from: Point, to: Point): Point[] | null {
   if (start.x === goal.x && start.y === goal.y) return [{ x: goal.x + 0.5, y: goal.y + 0.5 }];
 
   const key = (x: number, y: number) => `${x},${y}`;
-  const open: Array<{ x: number; y: number; f: number; g: number }> = [
-    { x: start.x, y: start.y, f: 0, g: 0 },
-  ];
+  const open = new BinaryHeap();
+  open.push({ x: start.x, y: start.y, f: 0, g: 0 });
   const cameFrom = new Map<string, string>();
   const gScore = new Map<string, number>([[key(start.x, start.y), 0]]);
   const closed = new Set<string>();
   const h = (x: number, y: number) => Math.abs(x - goal.x) + Math.abs(y - goal.y);
 
-  while (open.length > 0) {
-    let best = 0;
-    for (let i = 1; i < open.length; i++) {
-      if (open[i]!.f < open[best]!.f) best = i;
-    }
-    const current = open.splice(best, 1)[0]!;
+  while (open.size > 0) {
+    const current = open.pop()!;
     const currentKey = key(current.x, current.y);
     if (closed.has(currentKey)) continue;
+    // Skip stale re-pushes (a better g for this cell was found since).
+    if (current.g > (gScore.get(currentKey) ?? Infinity)) continue;
     closed.add(currentKey);
 
     if (current.x === goal.x && current.y === goal.y) {

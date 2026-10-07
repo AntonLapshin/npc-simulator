@@ -1,5 +1,18 @@
 // Graphic engine server — drives the web UI from the real simulation engine.
 //
+// SECURITY POSTURE (F30 — deliberate, owner-approved behavior changes):
+//   * Binds 127.0.0.1 by default (loopback only). Set HOST=0.0.0.0 to expose
+//     on the LAN — do so only on a network you trust, since the API below
+//     spends LLM calls / API budget.
+//   * Optional token auth: when NPC_API_TOKEN is set, POST /action,
+//     POST /reset, and GET /logs require either an `x-api-token` header or
+//     `Authorization: Bearer <token>` and answer 401 otherwise. Unset (the
+//     default) means no auth — same as before.
+//   * CORS Access-Control-Allow-Origin remains `*` on API and static
+//     responses; with loopback binding this is a local browser convenience,
+//     not a LAN exposure.
+// See .env.example (HOST, NPC_API_TOKEN) for the knobs.
+//
 // Run: npm run start:graphic -- [scenario] [--provider <backend>] [--model <id>]
 //        [--base-url <url>] [--mock] [--debug] [--no-autosave] [--port <n>]
 //   scenario defaults to scenarios/office.json (same default as the text UI).
@@ -29,6 +42,7 @@
 // the js/scene/ui.js bridge resolve through the static file serving below.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve, extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,7 +56,7 @@ import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
-import { renderTurnStory } from "../../logging/storyTrace.js";
+import { historyEntryText, renderTurnStory } from "../../logging/storyTrace.js";
 import { loadEnvFile } from "../../util/loadEnv.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -189,6 +203,52 @@ function speechFromAction(text: string): { text: string; kind: string } | null {
   return { text: quoted, kind };
 }
 
+/* ── security helpers (F30) ────────────────────────────────────────── */
+
+/**
+ * Bind address for the HTTP server. Defaults to loopback (127.0.0.1) so the
+ * server is not reachable from the LAN unless the operator opts in with
+ * HOST=0.0.0.0. Exported for unit tests.
+ */
+export function resolveBindHost(env: NodeJS.ProcessEnv = process.env): string {
+  const h = env["HOST"]?.trim();
+  return h ? h : "127.0.0.1";
+}
+
+/**
+ * Optional API token. When set (non-blank), POST /action, POST /reset, and
+ * GET /logs require it; when unset there is no auth. Exported for unit tests.
+ */
+export function resolveApiToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const t = env["NPC_API_TOKEN"]?.trim();
+  return t ? t : undefined;
+}
+
+function tokensEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf-8");
+  const bb = Buffer.from(b, "utf-8");
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+/**
+ * True when the request may proceed: either no API token is configured, or
+ * the request carries it as an `x-api-token` header or an
+ * `Authorization: Bearer <token>` header. Exported for unit tests.
+ */
+export function isAuthorized(
+  headers: Record<string, string | string[] | undefined>,
+  apiToken: string | undefined,
+): boolean {
+  if (!apiToken) return true;
+  const headerToken = headers["x-api-token"];
+  const h = Array.isArray(headerToken) ? headerToken[0] : headerToken;
+  if (typeof h === "string" && tokensEqual(h.trim(), apiToken)) return true;
+  const auth = headers["authorization"];
+  const a = Array.isArray(auth) ? auth[0] : auth;
+  const m = typeof a === "string" ? /^Bearer\s+(.+)$/i.exec(a.trim()) : null;
+  return m !== null && tokensEqual(m[1]!.trim(), apiToken);
+}
+
 /* ── server state ──────────────────────────────────────────────────────── */
 
 type TurnEvent = {
@@ -235,6 +295,10 @@ async function main(): Promise<void> {
   }
 
   const port = opts.port ?? 8123;
+  // F30: loopback by default; HOST opts in to a wider bind. Read after
+  // loadEnvFile so .env can set HOST / NPC_API_TOKEN.
+  const host = resolveBindHost();
+  const apiToken = resolveApiToken();
   const scenarioPath = opts.scenarioPath ? resolve(process.cwd(), opts.scenarioPath) : DEFAULT_SCENARIO;
   const logger = new Logger({
     sessionId: `graphic_${Date.now().toString(36)}`,
@@ -286,6 +350,13 @@ async function main(): Promise<void> {
     res.end(body);
   };
 
+  /** F30: when NPC_API_TOKEN is set, reject unauthenticated API calls with 401. */
+  const requireAuth = (req: IncomingMessage, res: ServerResponse): boolean => {
+    if (isAuthorized(req.headers, apiToken)) return true;
+    sendJson(res, 401, { error: "Unauthorized: provide the API token via x-api-token header or Authorization: Bearer <token>" });
+    return false;
+  };
+
   const readBody = (req: IncomingMessage, limit = 1_000_000): Promise<string> =>
     new Promise((resolveBody, rejectBody) => {
       let size = 0;
@@ -318,7 +389,7 @@ async function main(): Promise<void> {
             };
       const beforeTick = world.tick;
       world = await runTurn(world, deps);
-      const actionText = world.history.at(-1) ?? `${actor.name}: ${forcedUserText ?? ""}`;
+      const actionText = historyEntryText(world.history.at(-1)) ?? `${actor.name}: ${forcedUserText ?? ""}`;
       // Debug story trace (same format as the text UI's `debug on` output:
       // proposal → selection → action → consequence → validation → history).
       let story: string | null = null;
@@ -380,7 +451,7 @@ async function main(): Promise<void> {
         res.writeHead(204, {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
+          "Access-Control-Allow-Headers": "Content-Type, X-Api-Token, Authorization",
         });
         res.end();
         return;
@@ -419,6 +490,7 @@ async function main(): Promise<void> {
       }
 
       if (req.method === "GET" && path === "/logs") {
+        if (!requireAuth(req, res)) return;
         const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 50), 1), 500);
         const module = url.searchParams.get("module") ?? undefined;
         const tickParam = url.searchParams.get("tick");
@@ -433,6 +505,7 @@ async function main(): Promise<void> {
       }
 
       if (req.method === "POST" && path === "/reset") {
+        if (!requireAuth(req, res)) return;
         if (busy) {
           sendJson(res, 409, { error: "A turn is already running" });
           return;
@@ -448,6 +521,7 @@ async function main(): Promise<void> {
       }
 
       if (req.method === "POST" && path === "/action") {
+        if (!requireAuth(req, res)) return;
         if (busy) {
           sendJson(res, 409, { error: "A turn is already running" });
           return;
@@ -520,10 +594,13 @@ async function main(): Promise<void> {
     }
   });
 
-  server.listen(port, () => {
-    console.log(`NPC Simulator UI → http://localhost:${port}/`);
+  // F30: explicit loopback bind by default (server.listen(port) with no host
+  // binds all interfaces — the flaw). HOST overrides.
+  server.listen(port, host, () => {
+    console.log(`NPC Simulator UI → http://${host}:${port}/`);
     console.log(`Scenario: ${world.title} (${scenarioPath}, you play ${world.userActorId})`);
     console.log(`Engines: ${engineLabel}.`);
+    if (apiToken) console.log("API token auth enabled for POST /action, POST /reset, GET /logs.");
     if (opts.debug) console.log("Debug mode ON.");
   });
   await logger.flush().catch(() => {});

@@ -25,7 +25,7 @@ import {
   validateSelectionForActor,
 } from "../../src/engine/contextBuilder.js";
 import { Logger, createTestLogger } from "../../src/logging/logger.js";
-import { makeTestDeps, makeTinyWorld } from "../helpers.js";
+import { makeTestDeps, makeTinyWorld, hist, errorText, triedHist } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult, World } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
@@ -107,8 +107,8 @@ describe("exp5-4 triple-verb semantics (tick 15)", () => {
         { moves: false, speaks: false, quotedSpeech: [] },
       );
       expect(v.valid, text).toBe(false);
-      expect(v.errors.join(" ")).toMatch(/pour\/brew\/open/);
-      expect(v.errors.join(" ")).toMatch(/sit now/);
+      expect(errorText(v.errors)).toMatch(/pour\/brew\/open/);
+      expect(errorText(v.errors)).toMatch(/sit now/);
     }
   });
 
@@ -123,7 +123,7 @@ describe("exp5-4 triple-verb semantics (tick 15)", () => {
       { actorId: "u", text: "Stand there with an open and welcoming demeanor." },
       { moves: false, speaks: false, quotedSpeech: [] },
     );
-    expect(v.errors.join(" ")).not.toMatch(/pour\/brew\/open/);
+    expect(errorText(v.errors)).not.toMatch(/pour\/brew\/open/);
   });
 });
 
@@ -143,7 +143,7 @@ describe("exp5-8 explanation pressure (ticks 14/20)", () => {
       { moves: false, speaks: true, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/topic/);
+    expect(errorText(v.errors)).toMatch(/topic/);
   });
 
   it("an explanation that keeps the topic passes", () => {
@@ -183,31 +183,34 @@ describe("exp5-8 explanation pressure (ticks 14/20)", () => {
       { moves: true, speaks: true, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/topic/);
+    expect(errorText(v.errors)).toMatch(/topic/);
   });
 });
 
 describe("exp5-1 tier-2 salvage (ticks 6/9/12/18)", () => {
   it("isTier2Salvageable covers speech/object wording, not physics/contact/discipline", () => {
+    // F2: codes, not prose.
     expect(
       isTier2Salvageable([
-        "narrative drops the acting actor's exact words (\"hi\")",
-        "action says to pour/brew/open (\"pour\") but no objectPatch/prop patch backs it",
+        { code: "speech.dropped_words", message: "narrative drops the acting actor's exact words" },
+        { code: "action.pour_no_patch", message: "action says to pour/brew/open but no objectPatch/prop patch backs it" },
       ]),
     ).toBe(true);
-    expect(isTier2Salvageable(['narrative keeps none of its topic words (task)'])).toBe(true);
+    expect(
+      isTier2Salvageable([{ code: "speech.topic_dropped", message: "narrative keeps none of its topic words" }]),
+    ).toBe(true);
     expect(isTier2Salvageable([])).toBe(false);
     expect(
-      isTier2Salvageable(["acting actor (u) moves 13.0 cells in one turn"]),
+      isTier2Salvageable([{ code: "movement.over_step_cap", message: "acting actor (u) moves 13.0 cells in one turn" }]),
     ).toBe(false);
     expect(
       isTier2Salvageable([
-        "action implies physical contact with n but ends at (1, 1), 4.2 cells away",
+        { code: "contact.action_too_far", message: "action implies physical contact with n but ends at (1, 1), 4.2 cells away" },
       ]),
     ).toBe(false);
     expect(
       isTier2Salvageable([
-        'narrative casts roster observer "n" as the acting subject',
+        { code: "narrative.observer_as_subject", message: 'narrative casts roster observer "n" as the acting subject' },
       ]),
     ).toBe(false);
   });
@@ -243,7 +246,7 @@ describe("exp5-1 tier-2 salvage (ticks 6/9/12/18)", () => {
     );
     // Addressee reaction repaired deterministically; speech/object wording warned.
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "tanya")).toBe(true);
-    expect(out!.warnings.join(" ")).toMatch(/exact words|says to sit|keeps no question/);
+    expect(errorText(out!.warnings)).toMatch(/exact words|says to sit|keeps no question/);
     expect(getHonestHistoryNote(out!.salvaged)).toMatch(/partial/);
   });
 
@@ -282,9 +285,10 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
       honestHistoryNote: "partial: keeps no question",
     });
     const entry = next.history.at(-1)!;
-    expect(entry).toContain("U greets N.");
-    expect(entry).toContain("(partial)");
-    expect(entry).not.toContain("where my desk is");
+    // F6: entries are { text, perceivers } objects now.
+    expect(entry.text).toContain("U greets N.");
+    expect(entry.text).toContain("(partial)");
+    expect(entry.text).not.toContain("where my desk is");
     expect(isPartialHistoryEntry(entry)).toBe(true);
     // The dropped question never becomes an open question for N.
     expect(getOpenQuestions(next, "n")).toEqual([]);
@@ -317,7 +321,7 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
     expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
     // Narrative-based history: the dropped question is recorded as a
     // warning, not asserted as asked-and-done.
-    expect(next.history.at(-1)).toMatch(/^U: U walks toward N\. \(partial\)/);
+    expect(next.history.at(-1)!.text).toMatch(/^U: U walks toward N\. \(partial\)/);
     expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
   });
 });
@@ -331,7 +335,7 @@ describe("exp5-5/7 selection guard (ticks 4/7/13/16/19/20)", () => {
     expect(
       validateSelectionForActor(world, "dana", "Anton plans to shadow Dana today."),
     ).toMatch(/identity leak/);
-    world.history.push("Tanya: Shake Anton's hand warmly.");
+    world.history.push(hist(world, "Tanya: Shake Anton's hand warmly."));
     expect(
       validateSelectionForActor(world, "tanya", "Stand up and shake Anton's hand."),
     ).toMatch(/repetition/);
@@ -345,7 +349,7 @@ describe("exp5-5/7 selection guard (ticks 4/7/13/16/19/20)", () => {
     const world = makeTinyWorld();
     world.userActorId = "u";
     world.turnIndex = 1; // N's turn
-    world.history.push("N: Shake U's hand warmly.");
+    world.history.push(hist(world, "N: Shake U's hand warmly."));
     const { MockProposalEngine } = await import("../../src/mocks/mockProposalEngine.js");
     const { MockSelectionEngine } = await import("../../src/mocks/mockSelectionEngine.js");
     const { MockConsequenceEngine } = await import("../../src/mocks/mockConsequenceEngine.js");
@@ -364,7 +368,7 @@ describe("exp5-5/7 selection guard (ticks 4/7/13/16/19/20)", () => {
     const next = await runTurn(world, deps);
     expect(logger.store.byEvent("selection_rejected")).toHaveLength(1);
     expect(logger.store.byEvent("selection_substituted")).toHaveLength(1);
-    expect(next.history.at(-1)).toContain("Stay at the desk and continue working.");
+    expect(next.history.at(-1)!.text).toContain("Stay at the desk and continue working.");
   });
 });
 
@@ -374,11 +378,11 @@ describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
     world.userActorId = "u";
     // N fell back 3 consecutive own turns (interleaved with U's applied turns).
     world.history.push(
-      "N tried: Stand up and walk over. (not done)",
-      "U: Wave.",
-      "N tried: Stand up and walk over. (not done)",
-      "U: Wave.",
-      "N tried: Stand up and walk over. (not done)",
+      triedHist(world, "N tried: Stand up and walk over."),
+      hist(world, "U: Wave."),
+      triedHist(world, "N tried: Stand up and walk over."),
+      hist(world, "U: Wave."),
+      triedHist(world, "N tried: Stand up and walk over."),
     );
     return world;
   }
@@ -387,7 +391,7 @@ describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
     const world = fallenWorld();
     expect(consecutiveFallbacks(world, "n")).toBe(3);
     expect(consecutiveFallbacks(world, "u")).toBe(0);
-    world.history.push("N: Stay at the desk and continue working.");
+    world.history.push(hist(world, "N: Stay at the desk and continue working."));
     expect(consecutiveFallbacks(world, "n")).toBe(0);
   });
 
@@ -416,9 +420,9 @@ describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
     const logger = new Logger({ sessionId: "exp5-liveness-user", writeToFile: false });
     const world = fallenWorld();
     world.history.push(
-      "U tried: Walk over. (not done)",
-      "U tried: Walk over. (not done)",
-      "U tried: Walk over. (not done)",
+      triedHist(world, "U tried: Walk over."),
+      triedHist(world, "U tried: Walk over."),
+      triedHist(world, "U tried: Walk over."),
     );
     const bad: ConsequenceResult = {
       narrative: "U ponders.",

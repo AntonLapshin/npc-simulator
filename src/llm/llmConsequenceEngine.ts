@@ -53,14 +53,20 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     return this.lastParsed;
   }
 
-  async resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult> {
+  async resolve(
+    world: World,
+    action: Action,
+    feedback?: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ConsequenceResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
     // Exp-3 item 12: first attempts get the short core prompt (identity +
     // roster + movement + speech + turn discipline + minimal field rules);
     // retries get the full rule text plus validation feedback, where the
     // rarely-firing rules (arrival radius, mask lists) actually help.
-    const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${consequenceSuffix(feedback ? "full" : "short")}`;
+    const suffix = consequenceSuffix(feedback ? "full" : "short");
+    const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${suffix}`;
 
     const result = await completeJson({
       logger: this.logger,
@@ -75,6 +81,11 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       maxRetries,
       schema: consequenceResultSchema,
       schemaText: CONSEQUENCE_OUTPUT_SCHEMA,
+      // F33: protected instruction tail — kept intact if the input cap
+      // truncates the world-dump portion of the prompt.
+      suffix,
+      // F28: turn-deadline signal — aborts the hung provider call on timeout.
+      signal: opts?.signal,
       repairHint:
         "Field rules: actorPatches must be an array of {\"actorId\": ...} (never \"id\", never a quoted string); " +
         "objectPatches must be an array of {\"objectId\": ...} (never \"id\", never a quoted string); " +
@@ -93,6 +104,8 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
         input: { action, feedback },
         prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
         rawResponse: result.lastRaw,
+        // F31: usage from the last attempt, when the backend reported it.
+        usage: result.usage,
         error: `fallback: ${result.error}`,
         durationMs: Date.now() - startedAt,
       });
@@ -111,6 +124,8 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,
+      // F31: per-call usage captured from the chat-completions response.
+      usage: result.usage,
       output: result.value,
       durationMs: Date.now() - startedAt,
     });

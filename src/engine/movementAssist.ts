@@ -1,4 +1,4 @@
-import type { World } from "../types.js";
+import type { ValidationError, World } from "../types.js";
 import { isInsideScene, isPointBlocked } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
 
@@ -40,9 +40,29 @@ export function requiredProgress(oldDist: number): number {
   return Math.min(oldDist / 2, MAX_STEP_DISTANCE);
 }
 
+/**
+ * F19: cap on movement-suggestion candidate scans. The scan is already
+ * bounded to the reachable box around the actor (≤ ~15×15 cells), so this
+ * is a backstop, not the primary bound.
+ */
+export const MAX_SUGGEST_CANDIDATES = 500;
+
 function isFree(world: World, x: number, y: number): boolean {
   const p = { x, y };
   return isInsideScene(world.scene, p) && !isPointBlocked(world.scene, p);
+}
+
+/**
+ * F10: cells occupied by another actor are not movement candidates — the
+ * validator rejects destinations stacked on another actor, so suggesting
+ * them would only burn a repair cycle.
+ */
+function occupiedCells(world: World, actorId: string): Set<string> {
+  const out = new Set<string>();
+  for (const a of world.actors) {
+    if (a.id !== actorId) out.add(`${a.x},${a.y}`);
+  }
+  return out;
 }
 
 /**
@@ -90,10 +110,20 @@ export function suggestMoveTarget(
 
   type Candidate = { x: number; y: number; score: number; distToTarget: number };
   const candidates: Candidate[] = [];
+  const occupied = occupiedCells(world, actorId);
 
-  for (let x = 0; x < world.scene.width; x++) {
-    for (let y = 0; y < world.scene.height; y++) {
+  // F19: scan only the reachable box around the actor instead of the full
+  // scene — the MAX_STEP_DISTANCE filter below rejects everything outside
+  // it anyway, so this is behavior-identical and O(1) in scene size.
+  const scanR = Math.ceil(MAX_STEP_DISTANCE) + 1;
+  const x0 = Math.max(0, Math.floor(actor.x - scanR));
+  const x1 = Math.min(world.scene.width - 1, Math.ceil(actor.x + scanR));
+  const y0 = Math.max(0, Math.floor(actor.y - scanR));
+  const y1 = Math.min(world.scene.height - 1, Math.ceil(actor.y + scanR));
+  for (let x = x0; x <= x1 && candidates.length < MAX_SUGGEST_CANDIDATES; x++) {
+    for (let y = y0; y <= y1 && candidates.length < MAX_SUGGEST_CANDIDATES; y++) {
       if (x === actor.x && y === actor.y) continue;
+      if (occupied.has(`${x},${y}`)) continue; // F10: never suggest stacking
       if (!isFree(world, x, y)) continue;
       // Exp-3 item 4: never suggest a teleport — one step covers at most
       // MAX_STEP_DISTANCE cells.
@@ -129,16 +159,28 @@ export function suggestMoveTarget(
   return null;
 }
 
+/** F2: failure classification switches on stable error codes, not message prose. */
+const MOVEMENT_ONLY_CODES = new Set([
+  "movement.no_position_change",
+  "movement.position_unchanged",
+  "movement.not_closer_actor",
+  "movement.not_closer_object",
+  "movement.declared_without_patch",
+  "movement.narrated_without_patch",
+]);
+
 /** True when every validation error looks like the movement gate. */
-export function isMovementOnlyFailure(errors: string[]): boolean {
+export function isMovementOnlyFailure(errors: ValidationError[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every(
-    (e) =>
-      /no position change|position is unchanged|not closer|implies movement|narrative describes movement|declares moved=true/i.test(
-        e,
-      ),
-  );
+  return errors.every((e) => MOVEMENT_ONLY_CODES.has(e.code));
 }
+
+const CLAMPABLE_CODES = new Set([
+  ...MOVEMENT_ONLY_CODES,
+  "movement.over_step_cap",
+  "movement.no_progress_actor",
+  "movement.no_progress_object",
+]);
 
 /**
  * Exp-4 item 1: is this failure clampable to a partial step? True when the
@@ -150,13 +192,21 @@ export function isMovementOnlyFailure(errors: string[]): boolean {
  * 14-cell entrance→desk walk degrades to capped steps with the question
  * thread intact.
  */
-export function isClampableMovementFailure(errors: string[]): boolean {
+export function isClampableMovementFailure(errors: ValidationError[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every(
-    (e) =>
-      /no position change|position is unchanged|not closer|implies movement|narrative describes movement|declares moved=true|at most 6 cells|make real progress|token shuffle/i.test(
-        e,
-      ),
+  return errors.every((e) => CLAMPABLE_CODES.has(e.code));
+}
+
+/**
+ * F24: does the error set include a "make real progress"/token-shuffle
+ * failure? The in-loop deterministic repair extends to these (try
+ * suggestMoveTarget, then clampMoveToCap) — previously they only got a
+ * feedback hint.
+ */
+export function isRealProgressFailure(errors: ValidationError[]): boolean {
+  if (errors.length === 0) return false;
+  return errors.some(
+    (e) => e.code === "movement.no_progress_actor" || e.code === "movement.no_progress_object",
   );
 }
 
@@ -185,6 +235,7 @@ export function clampMoveToCap(
   const cy = actor.y + dy * scale;
   type Candidate = { x: number; y: number; d: number };
   const candidates: Candidate[] = [];
+  const occupied = occupiedCells(world, actorId);
   const radius = Math.ceil(MAX_STEP_DISTANCE) + 1;
   for (
     let x = Math.max(0, Math.floor(cx - radius));
@@ -197,6 +248,7 @@ export function clampMoveToCap(
       y++
     ) {
       if (x === actor.x && y === actor.y) continue;
+      if (occupied.has(`${x},${y}`)) continue; // F10: never suggest stacking
       if (!isFree(world, x, y)) continue;
       if (Math.hypot(x - actor.x, y - actor.y) > MAX_STEP_DISTANCE + 1e-9) continue;
       candidates.push({ x, y, d: Math.hypot(x - cx, y - cy) });

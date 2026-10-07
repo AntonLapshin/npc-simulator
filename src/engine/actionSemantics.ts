@@ -157,13 +157,17 @@ export function mergeSemantics(
  *   addressees). A judge that can invent Jeff — or promote a "Thanks
  *   Tanya!" addressee to a destination — cannot ground such requirements.
  * - contactActorId stays LLM-owned: roster/object validity only.
- * - moves (Phase 2 / exp-3 item 3): requires a destination-or-displacement
- *   token in the action text (explicit displacement verb or proximity
- *   phrase). A `moves=true` verdict on "glance up" / "ask" / "sip" /
- *   "review" / "prepare" / "type" text is ungrounded — perception and
- *   cognition are never locomotion — so it is downgraded to false and any
- *   destination requirement goes with it (destinations are meaningless
- *   without movement). speaks/contact are untouched.
+ * - moves (Phase 2 / exp-3 item 3, F1): the deterministic token check may
+ *   ASSERT movement but never downgrade a true merged verdict to false:
+ *   `moves = tokenMoves || merged.moves`. An action with a displacement
+ *   token moves even when both sides declare false (no verb-drop dodge),
+ *   and a merged moves=true verdict stands even without a recognized
+ *   token (the fixed verb ontology is not the whole language — an
+ *   unrecognized real verb keeps the merged verdict, status quo). Same
+ *   for `speaks` via the speech-token check (Exp-4 item 3): unquoted
+ *   explaining/telling/nodding verbs force speaks=true so hollow look-ups
+ *   cannot pass. Disagreements between token evidence and the merged
+ *   verdict are still logged.
  *
  * Returns the grounded semantics plus a disagreement list (empty when
  * everything agreed).
@@ -300,11 +304,11 @@ export function applyDeterministicGrounding(
   // Contact stays LLM-owned (moves/speaks/contact role): roster validity only.
   const contactActorId = groundActorId("contactActorId", merged.contactActorId);
 
-  // Exp-4 item 7: the deterministic parse wins over the LLM union.
-  // `moves` is the token check itself (not OR): an action with a
-  // displacement token moves even when both sides declare false (no
-  // verb-drop dodge), and an action without one never moves even when the
-  // judge hallucinates it (no forced teleport). Same for `speaks` via the
+  // Exp-4 item 7 (as amended by F1): the deterministic token check and the
+  // LLM union combine with OR. An action with a displacement token moves
+  // even when both sides declare false (no verb-drop dodge); a merged
+  // moves=true verdict stands even without a recognized token (the fixed
+  // verb ontology is not the whole language). Same for `speaks` via the
   // speech-token check (Exp-4 item 3): unquoted explaining/telling/nodding
   // verbs force speaks=true so hollow look-ups cannot pass.
   // Destination conflicts: Exp-6 item 1 flipped the Exp-4 tick-10 rule for
@@ -318,18 +322,19 @@ export function applyDeterministicGrounding(
   // Computed below after the id grounding.
   const tokenMoves = hasDisplacementToken(action.text);
   const tokenSpeaks = hasSpeechToken(action.text);
-  const moves = tokenMoves;
+  // F1: token evidence ASSERTS movement but never downgrades a true merged
+  // verdict to false. `moves = tokenMoves || merged.moves`.
+  const moves = tokenMoves || merged.moves;
   const speaks = merged.speaks || tokenSpeaks;
   if (merged.moves && !tokenMoves) {
-    const moveDestinationsDropped =
-      merged.destinationActorId !== undefined || merged.destinationObjectId !== undefined;
+    // No longer dropped (F1) — but the token/merged disagreement is still
+    // logged so the session disagreement rate stays computable.
     disagreements.push(
-      "dropped moves=true (no displacement verb or destination token in the action text; perception/cognition is never locomotion)" +
-        (moveDestinationsDropped ? " — destination requirement(s) dropped with it" : ""),
+      "moves=true kept from the merged verdict despite no displacement token in the action text (token evidence asserts movement but never downgrades it)",
     );
   } else if (merged.moves !== moves) {
     disagreements.push(
-      `moves deterministic override: merged=${merged.moves} token=${tokenMoves} (kept token)`,
+      `moves deterministic override: merged=${merged.moves} token=${tokenMoves} (kept OR)`,
     );
   }
   if (merged.speaks !== speaks) {
@@ -422,11 +427,13 @@ export function applyDeterministicGrounding(
  * cannot talk its way out of movement/speech/addressee gates by declaring
  * moved=false/spoke=false — then deterministically grounded against the
  * action text itself (exp-3 items 1+8), so neither side can invent quotes
- * or ids the validator then enforces. The judge runs on every turn with
- * effects — one compact classification call — because deterministic gates
- * on every turn (user turns included) matter more than saving that call.
- * Judge failure degrades to effects-only; with neither, fail-open to
- * physics-only validation.
+ * or ids the validator then enforces.
+ *
+ * Q2 (lazy semantic judge): the judge is only consulted when the
+ * consequence provides no `effects` (pass `judge` as undefined otherwise) —
+ * classification exists to ground the semantic gates, and `effects` alone
+ * already grounds them. Judge failure degrades to effects-only; with
+ * neither, fail-open to physics-only validation.
  */
 export async function resolveActionSemantics(
   world: World,

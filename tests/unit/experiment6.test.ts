@@ -36,7 +36,7 @@ import {
   resolveLlmEnv,
 } from "../../src/llm/provider.js";
 import { createTestLogger } from "../../src/logging/logger.js";
-import { makeTestDeps, makeTinyWorld } from "../helpers.js";
+import { makeTestDeps, makeTinyWorld, errorText } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult, World } from "../../src/types.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
 import type { ConsequenceEngine } from "../../src/intelligence/types.js";
@@ -322,7 +322,7 @@ describe("exp6-5 state/pose/position coherence (tick 1)", () => {
       { moves: true, speaks: false, quotedSpeech: [] },
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/state still reads/);
+    expect(errorText(v.errors)).toMatch(/state still reads/);
   });
 
   it("rejects a stale working-on-laptop state when the prop is put down", () => {
@@ -338,7 +338,7 @@ describe("exp6-5 state/pose/position coherence (tick 1)", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/prop changed/);
+    expect(errorText(v.errors)).toMatch(/prop changed/);
   });
 
   it("accepts a release phrasing that already describes the put-down", () => {
@@ -374,7 +374,7 @@ describe("exp6-5 state/pose/position coherence (tick 1)", () => {
 });
 
 describe("exp6-6 throughput engineering", () => {
-  it("the semantic judge is classified once per turn, not per retry attempt", async () => {
+  it("the semantic judge is lazy: never runs when effects are present, once per turn otherwise", async () => {
     const logger = createTestLogger();
     const world = makeTinyWorld();
     let judgeCalls = 0;
@@ -406,7 +406,43 @@ describe("exp6-6 throughput engineering", () => {
     const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
     expect(out.narrative).toContain("Hello there");
     expect(engineCalls).toBe(2); // one retry happened…
-    expect(judgeCalls).toBe(1); // …but the judge ran only once
+    // Q2: both consequences declared effects, so the judge never ran.
+    expect(judgeCalls).toBe(0);
+  });
+
+  it("the lazy judge still runs once per turn when effects are absent", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    let judgeCalls = 0;
+    let engineCalls = 0;
+    const invalidThenValid: ConsequenceResult[] = [
+      {
+        ...baseResult("U waves."),
+        actorPatches: [],
+        // no effects: judge needed for grounding
+      },
+      {
+        ...baseResult('U says "Hello there."'),
+        actorPatches: [{ actorId: "u", thoughts: "Friendly." }],
+        // no effects
+      },
+    ];
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: {
+        resolve: async () => structuredClone(invalidThenValid[Math.min(engineCalls++, 1)]!),
+      } as unknown as ConsequenceEngine,
+      semanticJudge: {
+        classify: async (): Promise<ActionSemantics> => {
+          judgeCalls++;
+          return { moves: false, speaks: true, quotedSpeech: ["Hello there"] };
+        },
+      },
+      config: { ...makeTestDeps(logger).config!, maxRetries: 3, autosaveEnabled: false },
+    });
+    const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
+    expect(out.narrative).toContain("Hello there");
+    expect(engineCalls).toBe(2); // one retry happened…
+    expect(judgeCalls).toBe(1); // …but the judge ran only once per turn
   });
 
   it("probeLlmEndpoint reports healthy vs dead endpoints", async () => {
@@ -505,15 +541,37 @@ describe("exp6-7 reasoning-leak guard", () => {
     expect(json.captured()["response_format"]).toEqual({ type: "json_object" });
 
     const plain = captureFetch();
-    const plainProvider = new JoinGonkaProvider({ apiKey: "gk-test", fetchImpl: plain.fetchImpl });
+    const plainProvider = new JoinGonkaProvider({ apiKey: "gk-test", jsonMode: false, fetchImpl: plain.fetchImpl });
     await plainProvider.complete("s", "u");
     expect("response_format" in plain.captured()).toBe(false);
+  });
+
+  it("json mode is on by default; LLM_JSON_MODE=0 disables it", async () => {
+    // F13: default flipped from opt-in to opt-out.
+    const captureFetch = (): { fetchImpl: typeof fetch; captured: () => Record<string, unknown> } => {
+      let captured: Record<string, unknown> = {};
+      const fetchImpl = (async (_url: unknown, init: unknown) => {
+        captured = JSON.parse((init as { body: string }).body) as Record<string, unknown>;
+        return {
+          ok: true,
+          json: async () => ({ choices: [{ message: { content: '{"a":1}' } }] }),
+        };
+      }) as unknown as typeof fetch;
+      return { fetchImpl, captured: () => captured };
+    };
+    const dflt = captureFetch();
+    const defaultProvider = new JoinGonkaProvider({ apiKey: "gk-test", fetchImpl: dflt.fetchImpl });
+    await defaultProvider.complete("s", "u");
+    expect(dflt.captured()["response_format"]).toEqual({ type: "json_object" });
   });
 
   it("LLM_JSON_MODE env enables json mode", () => {
     const cfg = resolveLlmEnv({ LLM_JSON_MODE: "1" } as NodeJS.ProcessEnv);
     expect(cfg.jsonMode).toBe(true);
-    expect(resolveLlmEnv({} as NodeJS.ProcessEnv).jsonMode).toBe(false);
+    // F13: on by default now; explicit opt-out only.
+    expect(resolveLlmEnv({} as NodeJS.ProcessEnv).jsonMode).toBe(true);
+    expect(resolveLlmEnv({ LLM_JSON_MODE: "0" } as NodeJS.ProcessEnv).jsonMode).toBe(false);
+    expect(resolveLlmEnv({ LLM_JSON_MODE: "false" } as NodeJS.ProcessEnv).jsonMode).toBe(false);
   });
 });
 

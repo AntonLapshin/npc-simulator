@@ -9,7 +9,9 @@
 import type { z } from "zod";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
+import type { LlmUsage } from "../logging/logTypes.js";
 import { formatRepairPrompt, parseJsonObject } from "./json.js";
+import { takeConsequenceRepairNotes } from "../schemas.js";
 import { errorMessage } from "../util/errors.js";
 
 export type LlmModule = "proposal" | "selection" | "consequence" | "semantic";
@@ -39,10 +41,29 @@ export type CompleteJsonOptions<T> = {
   identicalErrorAbortAfter?: number;
   /** Expected output shape text, used to build the minimal repair prompt. */
   schemaText?: string;
+  /**
+   * F33: protected instruction tail of the user prompt (output schema +
+   * rules), kept intact when the input cap truncates the world dump.
+   * Engines pass the suffix they appended; when absent, a trailing
+   * instruction window is protected heuristically.
+   */
+  suffix?: string;
+  /**
+   * F33: input char cap for the rendered prompt (env LLM_MAX_INPUT_CHARS,
+   * default 60000). When exceeded, the world-dump portion is truncated
+   * with a note and a warning is logged.
+   */
+  maxInputChars?: number;
+  /**
+   * F28: turn-deadline AbortSignal. Forwarded to the provider so a hung
+   * request is actually cancelled on timeout instead of burning tokens in
+   * the background after the turn moved on.
+   */
+  signal?: AbortSignal;
 };
 
 export type CompleteJsonResult<T> =
-  | { ok: true; raw: string; value: T; attempts: number }
+  | { ok: true; raw: string; value: T; attempts: number; usage?: LlmUsage }
   | {
       ok: false;
       error: string;
@@ -50,6 +71,8 @@ export type CompleteJsonResult<T> =
       attempts: number;
       /** Raw LLM outputs from every failed parse attempt, in order (Exp-6 item 4). */
       rawAttempts: string[];
+      /** F31: usage reported for the last attempt, when the backend reports it. */
+      usage?: LlmUsage;
     };
 
 /**
@@ -78,10 +101,118 @@ function fullPrompt(systemPrompt: string, userPrompt: string): string {
   return `${systemPrompt}\n\n${userPrompt}`;
 }
 
+/** F33: default input char cap for a rendered prompt (env LLM_MAX_INPUT_CHARS). */
+export const DEFAULT_MAX_INPUT_CHARS = 60_000;
+
+function resolveMaxInputChars(override?: number): number {
+  if (override !== undefined && Number.isFinite(override) && override > 0) {
+    return Math.floor(override);
+  }
+  const raw = process.env["LLM_MAX_INPUT_CHARS"];
+  const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return DEFAULT_MAX_INPUT_CHARS;
+}
+
+/**
+ * F33: enforce the input cap on the rendered prompt. Truncates the
+ * world-dump portion (the head of the user prompt) and keeps the trailing
+ * instruction tail intact: the engine-supplied `suffix` when the user
+ * prompt ends with it, otherwise a trailing instruction window
+ * (the schema/rules tail lives at the end of every engine prompt).
+ */
+export function applyInputCap(
+  systemPrompt: string,
+  userPrompt: string,
+  suffix: string | undefined,
+  maxInputChars: number,
+): { systemPrompt: string; userPrompt: string; truncated: boolean; originalChars: number } {
+  const originalChars = systemPrompt.length + 2 + userPrompt.length;
+  if (originalChars <= maxInputChars) {
+    return { systemPrompt, userPrompt, truncated: false, originalChars };
+  }
+  const note = `[truncated: prompt exceeded LLM_MAX_INPUT_CHARS=${maxInputChars}]`;
+  let head = userPrompt;
+  let tail = "";
+  if (suffix && suffix.length > 0 && userPrompt.endsWith(suffix)) {
+    head = userPrompt.slice(0, userPrompt.length - suffix.length);
+    tail = suffix;
+  } else {
+    const PROTECTED_TAIL_CHARS = 2000;
+    if (userPrompt.length > PROTECTED_TAIL_CHARS) {
+      tail = userPrompt.slice(userPrompt.length - PROTECTED_TAIL_CHARS);
+      head = userPrompt.slice(0, userPrompt.length - PROTECTED_TAIL_CHARS);
+    }
+  }
+  const keep = Math.max(
+    0,
+    maxInputChars - (systemPrompt.length + 2 + note.length + 4 + tail.length),
+  );
+  return {
+    systemPrompt,
+    userPrompt: `${head.slice(0, keep)}\n\n${note}\n${tail}`,
+    truncated: true,
+    originalChars,
+  };
+}
+
+/**
+ * F11: exponential backoff with jitter between completeJson attempts:
+ * min(1000 * 2^attempt, 8000)ms + up-to-1s jitter. HTTP 429 honors the
+ * Retry-After header (surfaced by the provider as "retry after Ns" in the
+ * error text), capped at 30s; a 429 without the header backs off up to 30s.
+ * Only transport failures back off — parse failures get repair prompts,
+ * not delays.
+ */
+export function backoffDelayMs(attempt: number, err: unknown): number {
+  const jitter = Math.random() * 1000;
+  const msg = err instanceof Error ? err.message : String(err);
+  const isRateLimited = /HTTP 429|rate limited/i.test(msg);
+  const retryAfter = /retry after (\d+(?:\.\d+)?)s/i.exec(msg);
+  if (retryAfter) {
+    const secs = Number(retryAfter[1]);
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, 30_000) + jitter;
+  }
+  const cap = isRateLimited ? 30_000 : 8_000;
+  return Math.min(1000 * 2 ** attempt, cap) + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** F15: short fingerprint of the raw payload for the lenient-repair log. */
+function payloadFingerprint(raw: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < raw.length; i++) {
+    h ^= raw.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
 export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<CompleteJsonResult<T>> {
   const { logger, provider, module } = opts;
   const startedEvent = `${module}_started` as const;
   const failedEvent = `${module}_failed` as const;
+
+  // F33: cap the rendered prompt BEFORE logging/sending it.
+  const maxInputChars = resolveMaxInputChars(opts.maxInputChars);
+  const capped = applyInputCap(opts.systemPrompt, opts.userPrompt, opts.suffix, maxInputChars);
+  if (capped.truncated) {
+    logger.log({
+      module,
+      event: `${module}_prompt_truncated`,
+      tick: opts.tick,
+      turnIndex: opts.turnIndex,
+      actorId: opts.actorId,
+      input: opts.input,
+      promptChars: capped.originalChars,
+      error:
+        `prompt was ${capped.originalChars} chars (LLM_MAX_INPUT_CHARS=${maxInputChars}); ` +
+        `world-dump portion truncated, instruction tail kept intact`,
+    });
+  }
 
   logger.log({
     module,
@@ -90,10 +221,11 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
     turnIndex: opts.turnIndex,
     actorId: opts.actorId,
     input: opts.input,
-    prompt: fullPrompt(opts.systemPrompt, opts.userPrompt),
+    prompt: fullPrompt(capped.systemPrompt, capped.userPrompt),
+    promptChars: capped.systemPrompt.length + 2 + capped.userPrompt.length,
   });
 
-  const baseUserPrompt = opts.userPrompt;
+  const baseUserPrompt = capped.userPrompt;
   let userPrompt = baseUserPrompt;
   let lastRaw: string | undefined;
   const rawAttempts: string[] = [];
@@ -102,14 +234,17 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
   let lastErrorSignature: string | undefined;
   let identicalStreak = 0;
   let variedStrategy = false;
+  /** F31: usage from the most recent attempt that received a response. */
+  let lastUsage: LlmUsage | undefined;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let raw: string;
     try {
-      raw = await provider.complete(opts.systemPrompt, userPrompt);
+      raw = await provider.complete(capped.systemPrompt, userPrompt, { signal: opts.signal });
     } catch (err) {
       // Transport failure: network, timeout, rate limit, empty provider
-      // response (§16.4). Nothing to repair — retry with the same prompt.
+      // response (§16.4). Nothing to repair — back off, then retry with
+      // the same prompt.
       logger.log({
         module,
         event: failedEvent,
@@ -117,16 +252,30 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
         turnIndex: opts.turnIndex,
         actorId: opts.actorId,
         input: { ...(opts.input as Record<string, unknown>), attempt },
-        prompt: fullPrompt(opts.systemPrompt, userPrompt),
+        prompt: fullPrompt(capped.systemPrompt, userPrompt),
         error: errorMessage(err),
       });
+      // F11: exponential backoff with jitter between attempts — no more
+      // immediate retries (Exp-6's retry-amplification: 37 timeouts in
+      // 9 turns). No sleep after the final attempt.
+      if (attempt < attempts) {
+        await sleep(backoffDelayMs(attempt, err));
+      }
       continue;
     }
     lastRaw = raw;
+    // F31: per-call usage for THIS attempt (drained — one read per request).
+    const usage = provider.takeLastUsage?.();
+    lastUsage = usage;
 
     try {
       const parsed: unknown = parseJsonObject(raw);
+      // F15: bracket the schema parse so lenient-repair notes belong to
+      // exactly this parse (direct safeParse calls elsewhere leave notes
+      // pending until the next drain).
+      takeConsequenceRepairNotes();
       const validation = opts.schema.safeParse(parsed);
+      const repairNotes = takeConsequenceRepairNotes();
       if (!validation.success) {
         throw new Error(
           `schema mismatch: ${validation.error.issues
@@ -136,7 +285,26 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
       }
       const extra = opts.extraCheck?.(validation.data);
       if (extra) throw new Error(extra);
-      return { ok: true, raw, value: validation.data, attempts: attempt };
+      if (repairNotes.length > 0) {
+        // F15: lenient repairs are logged LOUDLY — what was
+        // repaired/defaulted/dropped, with a payload fingerprint.
+        // (LogEntry carries no severity field; the dedicated event is the
+        // warning signal.)
+        logger.log({
+          module,
+          event: `${module}_lenient_repair`,
+          tick: opts.tick,
+          turnIndex: opts.turnIndex,
+          actorId: opts.actorId,
+          input: opts.input,
+          rawResponse: raw,
+          usage,
+          error:
+            `lenient normalization repaired/defaulted/dropped ${repairNotes.length} item(s): ` +
+            `${repairNotes.join("; ")} | payload fingerprint: ${payloadFingerprint(raw)}`,
+        });
+      }
+      return { ok: true, raw, value: validation.data, attempts: attempt, usage };
     } catch (err) {
       // Malformed JSON, truncated response, or schema mismatch (§16.3):
       // retry with a formatting-correction prompt appended.
@@ -152,8 +320,9 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
         turnIndex: opts.turnIndex,
         actorId: opts.actorId,
         input: { ...(opts.input as Record<string, unknown>), attempt },
-        prompt: fullPrompt(opts.systemPrompt, userPrompt),
+        prompt: fullPrompt(capped.systemPrompt, userPrompt),
         rawResponse: raw,
+        usage,
         error: message,
       });
       if (identicalStreak >= abortAfter && !variedStrategy) {
@@ -184,11 +353,12 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
           lastRaw,
           attempts: attempt,
           rawAttempts,
+          usage: lastUsage,
         };
       }
       userPrompt = `${baseUserPrompt}\n\n${formatRepairPrompt(raw, message, opts.repairHint)}`;
     }
   }
 
-  return { ok: false, error: "max retries exceeded", lastRaw, attempts, rawAttempts };
+  return { ok: false, error: "max retries exceeded", lastRaw, attempts, rawAttempts, usage: lastUsage };
 }

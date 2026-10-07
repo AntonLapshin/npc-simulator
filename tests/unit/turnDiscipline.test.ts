@@ -9,7 +9,7 @@ import {
 } from "../../src/engine/contextBuilder.js";
 import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import type { TurnProgressEvent } from "../../src/engine/turnOrchestrator.js";
-import { makeTestDeps, makeTinyWorld } from "../helpers.js";
+import { makeTestDeps, makeTinyWorld, errorText } from "../helpers.js";
 import { Logger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import type { ConsequenceResult } from "../../src/types.js";
@@ -67,7 +67,7 @@ describe("turn discipline", () => {
 
     const bad = validateConsequence(world, observerMoveResult(), action);
     expect(bad.valid).toBe(false);
-    expect(bad.errors.join(" ")).toMatch(/only the acting actor/);
+    expect(errorText(bad.errors)).toMatch(/only the acting actor/);
 
     const observerStateOnly: ConsequenceResult = {
       narrative: "U waves.",
@@ -129,7 +129,7 @@ describe("turn discipline", () => {
     const world = await runTurn(makeTinyWorld(), deps);
     expect(logger.store.byEvent("validation_failed").length).toBeGreaterThanOrEqual(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    expect(world.history[world.history.length - 1]).toContain("Hi!");
+    expect(world.history[world.history.length - 1]!.text).toContain("Hi!");
     expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
   });
 });

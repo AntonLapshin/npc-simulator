@@ -14,6 +14,16 @@ import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT } from "./prompts.js";
 import { completeJson } from "./complete.js";
 
+/**
+ * F33: the protected instruction tail of the semantic-judge prompt
+ * (output schema + compactness rule) — kept intact if the input cap
+ * truncates the prompt. buildSemanticJudgePrompt ends with exactly this.
+ */
+export const SEMANTIC_JUDGE_TAIL = [
+  'Output Schema: {"moves": boolean, "destinationActorId"?: string, "destinationObjectId"?: string, "speaks": boolean, "quotedSpeech": string[], "addresseeActorId"?: string, "contactActorId"?: string}',
+  "Return COMPACT single-line JSON (no pretty-print, no markdown).",
+].join("\n");
+
 /** Compact classification prompt: positions + roster + action text only. */
 export function buildSemanticJudgePrompt(world: World, action: Action): string {
   const actor = world.actors.find((a) => a.id === action.actorId);
@@ -71,8 +81,7 @@ export function buildSemanticJudgePrompt(world: World, action: Action): string {
     "pat on the shoulder/back, handing coffee/a cup, giving an object). Omit when no touch/handover occurs.",
     "It MUST be an exact id from the roster above.",
     "",
-    'Output Schema: {"moves": boolean, "destinationActorId"?: string, "destinationObjectId"?: string, "speaks": boolean, "quotedSpeech": string[], "addresseeActorId"?: string, "contactActorId"?: string}',
-    "Return COMPACT single-line JSON (no pretty-print, no markdown).",
+    SEMANTIC_JUDGE_TAIL,
   ].join("\n");
 }
 
@@ -109,6 +118,9 @@ export class LLMSemanticJudge implements SemanticJudge {
       schema: actionSemanticsSchema,
       schemaText:
         '{"moves": boolean, "destinationActorId"?: string, "destinationObjectId"?: string, "speaks": boolean, "quotedSpeech": string[], "addresseeActorId"?: string, "contactActorId"?: string}',
+      // F33: protected instruction tail — kept intact if the input cap
+      // truncates the prompt.
+      suffix: SEMANTIC_JUDGE_TAIL,
       extraCheck: (value) => {
         if (value.destinationActorId !== undefined && !rosterIds.has(value.destinationActorId))
           return `unknown destinationActorId: ${value.destinationActorId}`;
@@ -143,6 +155,8 @@ export class LLMSemanticJudge implements SemanticJudge {
         input: { action },
         prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
         rawResponse: result.lastRaw,
+        // F31: usage from the last attempt, when the backend reported it.
+        usage: result.usage,
         error: `judge unavailable: ${result.error}`,
         durationMs: Date.now() - startedAt,
       });
@@ -159,6 +173,8 @@ export class LLMSemanticJudge implements SemanticJudge {
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: `moves=${result.value.moves} speaks=${result.value.speaks}`,
+      // F31: per-call usage captured from the chat-completions response.
+      usage: result.usage,
       output: result.value,
       durationMs: Date.now() - startedAt,
     });

@@ -15,8 +15,12 @@ import type {
 } from "../intelligence/types.js";
 import {
   createProviderForTask,
+  createProviderForTaskWithFailover,
   createProviderFromEnv,
+  FailoverProvider,
+  parseBackend,
   type LlmBackend,
+  type LlmCallOptions,
   type LLMProvider,
   type LlmTask,
 } from "./provider.js";
@@ -25,20 +29,24 @@ import { LLMProposalEngine } from "./llmProposalEngine.js";
 import { LLMSelectionEngine } from "./llmSelectionEngine.js";
 import { LLMSemanticJudge } from "./llmSemanticJudge.js";
 
-export type { LLMProvider, LlmBackend, LlmTask };
+export type { LLMProvider, LlmBackend, LlmCallOptions, LlmTask };
 export {
   HARD_LLM_TASKS,
   SIMPLE_LLM_TASKS,
+  DEFAULT_TASK_TEMPERATURES,
   JoinGonkaProvider,
   LocalLayaProvider,
   OllamaProvider,
+  FailoverProvider,
   createProviderForTask,
+  createProviderForTaskWithFailover,
   createProviderFromEnv,
   isSimpleLlmTask,
   knownBackends,
   ollamaApiRoot,
   resolveLlmEnv,
   resolveTaskBackend,
+  resolveTaskTemperature,
 } from "./provider.js";
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
 export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
@@ -83,6 +91,11 @@ export type CreateLlmEnginesOptions = {
  * Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC},
  * LLM_SIMPLE_MODEL (model override for simple tasks), or the `backends` /
  * `providers` options (explicit option wins over env).
+ *
+ * F12: when the LLM_FAILOVER_BACKEND env var names a backend, every
+ * non-explicit provider is wrapped in a FailoverProvider that fails over
+ * to it on transport errors (via createProviderForTaskWithFailover).
+ * Explicit `providers` are used as-is (the caller owns them).
  */
 export function createLlmEngines(
   logger: Logger,
@@ -99,7 +112,19 @@ export function createLlmEngines(
       which === "semantic"
         ? options.backends?.semantic
         : options.backends?.[which as "proposal" | "selection" | "consequence"];
-    if (backendOverride !== undefined) return createProviderFromEnv(env, backendOverride);
+    // F12: LLM_FAILOVER_BACKEND wraps the primary with failover to the
+    // named backend (transport errors only — content errors stay local).
+    const failoverBackend = parseBackend(env["LLM_FAILOVER_BACKEND"]);
+    if (backendOverride !== undefined) {
+      const primary = createProviderFromEnv(env, backendOverride);
+      if (failoverBackend !== undefined && failoverBackend !== backendOverride) {
+        return new FailoverProvider(primary, createProviderFromEnv(env, failoverBackend));
+      }
+      return primary;
+    }
+    if (failoverBackend !== undefined) {
+      return createProviderForTaskWithFailover(env, which, failoverBackend);
+    }
     return createProviderForTask(env, which);
   };
   const engineOptions = { maxRetries: options.maxRetries };

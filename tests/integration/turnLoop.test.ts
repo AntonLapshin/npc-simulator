@@ -31,7 +31,7 @@ describe("turn loop", () => {
     const deps = makeTestDeps(logger, { getUserAction });
     const world = await runTurn(makeTinyWorld(), deps);
     expect(getUserAction).toHaveBeenCalledOnce();
-    expect(world.history[0]).toContain("Free-form user text.");
+    expect(world.history[0]!.text).toContain("Free-form user text.");
     expect(logger.store.byEvent("useractionsubmitted")).toHaveLength(1);
     expect(logger.store.byEvent("proposal_skipped")).toHaveLength(1);
     expect(logger.store.byEvent("proposal_completed")).toHaveLength(0);
@@ -48,7 +48,7 @@ describe("turn loop", () => {
     expect(logger.store.byEvent("proposal_skipped")).toHaveLength(1);
     expect(logger.store.byEvent("proposal_completed").length).toBeGreaterThanOrEqual(1);
     expect(logger.store.byEvent("selection_completed").length).toBeGreaterThanOrEqual(1);
-    expect(world.history.join("\n")).toContain("N:");
+    expect(world.history.map((e) => e.text).join("\n")).toContain("N:");
   });
 
   it("invalid consequence retries with feedback then falls back safely", async () => {
@@ -73,7 +73,7 @@ describe("turn loop", () => {
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
     // History records the attempted action (single tickless entry per turn);
     // the "Nothing changes." fallback narrative lives in the logs, not history.
-    expect(world.history[world.history.length - 1]).toContain("User does something.");
+    expect(world.history[world.history.length - 1]!.text).toContain("User does something.");
     expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
   });
 
@@ -82,8 +82,8 @@ describe("turn loop", () => {
     const deps = makeTestDeps(logger, { getUserAction: async () => "Say hello." });
     const world = await runTurn(makeTinyWorld(), deps);
     expect(world.history).toHaveLength(1);
-    expect(world.history[0]).toContain("Say hello.");
-    expect(world.history[0]).not.toMatch(/^Tick \d+ - /);
+    expect(world.history[0]!.text).toContain("Say hello.");
+    expect(world.history[0]!.text).not.toMatch(/^Tick \d+ - /);
   });
 
   it("resolveWithValidation returns valid output without retry", async () => {

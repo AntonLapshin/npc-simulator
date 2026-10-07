@@ -61,6 +61,17 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
   return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
 }
 
+/**
+ * World.history entries are `{ text, perceivers }` objects in the new shape;
+ * tolerate legacy plain-string entries defensively (old saves, mock adapters).
+ */
+export function historyEntryText(entry: unknown): string | undefined {
+  if (typeof entry === "string") return entry;
+  const rec = asRecord(entry);
+  const text = rec?.["text"];
+  return typeof text === "string" ? text : undefined;
+}
+
 function findEntry(entries: LogEntry[], module: string, event: string): LogEntry | undefined {
   return entries.find((e) => e.module === module && e.event === event);
 }
@@ -331,7 +342,8 @@ export function renderTurnStory(
   const historyTail = asRecord(patchApplied?.output) as { historyTail?: unknown } | undefined;
   const tailArr = Array.isArray(historyTail?.historyTail) ? historyTail!.historyTail : undefined;
   if (tailArr && tailArr.length > 0) {
-    lines.push(ok(`history: "${flat(tailArr[tailArr.length - 1], 200)}"`));
+    const last = tailArr[tailArr.length - 1];
+    lines.push(ok(`history: "${flat(historyEntryText(last) ?? last, 200)}"`));
   } else if (actionText) {
     lines.push(ok(`history: (entry appended for ${shortName(actorId, actors)})`));
   }

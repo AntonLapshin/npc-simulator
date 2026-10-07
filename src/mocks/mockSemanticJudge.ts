@@ -10,7 +10,13 @@
 // judge (real runs).
 //
 // Faithful paraphrase understanding ("saunter over", "go the extra mile")
-// belongs to the LLM judge; the mock intentionally stays keyword-based.
+// belongs to the LLM judge; the mock intentionally stays keyword-based,
+// with ONE deliberate exception: a small hand-maintained idiom map (F16)
+// for the most common movement/speech idioms the keyword lists miss
+// ("heads over", "makes her way", "sidles up" → movement; "mutters",
+// "whispers", "calls out" → speech). This keeps offline/test runs from
+// diverging on everyday phrasing, but anything subtler still belongs to
+// the LLM judge — the mock is not a paraphrase engine.
 
 import type { Action, ActionSemantics, World } from "../types.js";
 import type { SemanticJudge } from "../intelligence/types.js";
@@ -30,14 +36,52 @@ function quotedSegments(text: string): string[] {
 }
 
 /**
+ * F16: mock-only common-idiom map. The canonical keyword lists
+ * (engine/deterministicSemantics.ts) miss everyday idioms the production
+ * LLM judge handles natively: "heads over" (HEAD_TO_RE only covers bare
+ * "head"), "makes his/her way" (no displacement verb at all), "sidles up".
+ * A couple are already covered by the verb lists ("sidles" is a
+ * displacement verb) — they are listed anyway so the idiom coverage is
+ * explicit in one place rather than accidental.
+ */
+const IDIOM_MOVEMENT_RES: RegExp[] = [
+  /\bheads?\s+over\b/i,
+  /\bmakes?\s+(his|her|their|its)\s+way\b/i,
+  /\bsidles?\s+up\b/i,
+];
+
+/**
+ * F16: mock-only speech-idiom map. "whispers"/"calls out" overlap the
+ * canonical speech-verb list (listed for explicitness); "mutters" and
+ * "whispering" are genuinely missing there.
+ */
+const IDIOM_SPEECH_RES: RegExp[] = [
+  /\bmutter(s|ed|ing)?\b/i,
+  /\bwhisper(s|ed|ing)?\b/i,
+  /\bcalls?\s+out\b/i,
+];
+
+function matchesAny(text: string, res: RegExp[]): boolean {
+  return res.some((re) => re.test(text));
+}
+
+/**
  * Mock-only movement heuristic: the canonical displacement-token check
  * (engine/deterministicSemantics.ts) — body-part "head" masked,
  * non-locomotion clauses masked, subordinate someone-else clauses dropped.
  * Phase 2 moved the logic to the shared module so the mock and the
  * production moves-grounding classify identically.
+ *
+ * F16: plus the idiom map above — the ONE intentional divergence from the
+ * production grounding, documented in the file header.
  */
 function mockLooksLikeMovement(text: string): boolean {
-  return hasDisplacementToken(text);
+  if (hasDisplacementToken(text)) return true;
+  // Body-part "head" is not locomotion ("shakes his head over the
+  // report") — same masking as the canonical check, applied to the raw
+  // text before idiom matching.
+  const deheaded = text.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
+  return matchesAny(deheaded, IDIOM_MOVEMENT_RES);
 }
 
 /**
@@ -53,9 +97,10 @@ export const maskNonLocomotion = canonicalMaskNonLocomotion;
  * speech-token check (engine/deterministicSemantics.ts) so the mock and
  * the production speaks-grounding classify identically — including
  * unquoted explaining/describing/nodding/thanking (Exp-4 item 3, tick 14).
+ * F16: plus the speech-idiom map (see IDIOM_SPEECH_RES).
  */
 function mockLooksLikeSpeech(text: string): boolean {
-  return hasSpeechToken(text);
+  return hasSpeechToken(text) || matchesAny(text, IDIOM_SPEECH_RES);
 }
 
 /** Mock-only name resolution by id/name substring (pronouns not resolved offline). */

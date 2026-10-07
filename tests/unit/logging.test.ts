@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Logger } from "../../src/logging/logger.js";
 import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
@@ -62,6 +65,111 @@ describe("logging", () => {
       expect(typeof entry.module).toBe("string");
       expect(typeof entry.event).toBe("string");
     }
+  });
+});
+
+describe("NPC_LOG_PROMPTS (F29)", () => {
+  afterEach(() => {
+    delete process.env["NPC_LOG_PROMPTS"];
+  });
+
+  function llmEntry() {
+    return {
+      module: "consequence",
+      event: "consequence_completed",
+      tick: 1,
+      turnIndex: 0,
+      prompt: "FULL SYSTEM + USER PROMPT",
+      rawResponse: "RAW MODEL OUTPUT",
+      parsedResponse: { narrative: "x" },
+      reasoning: "because reasons",
+      promptChars: 1234,
+      promptTokensEstimate: 308,
+      durationMs: 42,
+      input: { model: "test-model", backend: "test-backend" },
+    };
+  }
+
+  it("strips prompt/response bodies from llm-call records when NPC_LOG_PROMPTS=0", () => {
+    process.env["NPC_LOG_PROMPTS"] = "0";
+    const logger = new Logger({ sessionId: "noprompts", writeToFile: false });
+    const entry = logger.log(llmEntry());
+    expect(entry.prompt).toBeUndefined();
+    expect(entry.rawResponse).toBeUndefined();
+    expect(entry.parsedResponse).toBeUndefined();
+    expect(entry.reasoning).toBeUndefined();
+    // Metadata is kept.
+    expect(entry.promptChars).toBe(1234);
+    expect(entry.promptTokensEstimate).toBe(308);
+    expect(entry.durationMs).toBe(42);
+    expect(entry.input).toMatchObject({ model: "test-model", backend: "test-backend" });
+  });
+
+  it("keeps prompt bodies by default (NPC_LOG_PROMPTS unset)", () => {
+    const logger = new Logger({ sessionId: "prompts", writeToFile: false });
+    const entry = logger.log(llmEntry());
+    expect(entry.prompt).toBe("FULL SYSTEM + USER PROMPT");
+    expect(entry.rawResponse).toBe("RAW MODEL OUTPUT");
+  });
+
+  it("does not strip non-llm modules even when NPC_LOG_PROMPTS=0", () => {
+    process.env["NPC_LOG_PROMPTS"] = "0";
+    const logger = new Logger({ sessionId: "noprompts2", writeToFile: false });
+    const entry = logger.log({
+      module: "turn",
+      event: "turn_started",
+      tick: 1,
+      turnIndex: 0,
+      prompt: "not an llm call",
+    });
+    expect(entry.prompt).toBe("not an llm call");
+  });
+
+  it("logPromptBodies option overrides the env var", () => {
+    process.env["NPC_LOG_PROMPTS"] = "0";
+    const logger = new Logger({ sessionId: "override", writeToFile: false, logPromptBodies: true });
+    expect(logger.log(llmEntry()).prompt).toBe("FULL SYSTEM + USER PROMPT");
+  });
+});
+
+describe("log rotation (F29)", () => {
+  it("rotates the JSONL file at the size cap, keeping 3 rotations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "npc-logs-"));
+    const logger = new Logger({
+      sessionId: "rotate",
+      logDir: dir,
+      maxLogFileBytes: 300, // tiny cap to force several rotations quickly
+    });
+    for (let i = 0; i < 40; i++) {
+      logger.log({
+        module: "consequence",
+        event: "consequence_completed",
+        tick: i,
+        turnIndex: 0,
+        promptChars: 99999,
+        durationMs: i,
+      });
+    }
+    await logger.flush();
+    const names = readdirSync(dir).sort();
+    expect(names).toContain("rotate.jsonl");
+    expect(names).toContain("rotate.jsonl.1");
+    // Never more than live file + 3 rotations.
+    expect(names.filter((n) => n.startsWith("rotate.jsonl"))).toHaveLength(4);
+    expect(names).not.toContain("rotate.jsonl.4");
+    // The live file still receives new entries after rotation.
+    const live = readFileSync(join(dir, "rotate.jsonl"), "utf-8").trim().split("\n");
+    expect(live.length).toBeGreaterThan(0);
+    const last = JSON.parse(live[live.length - 1]!);
+    expect(last.tick).toBe(39);
+  });
+
+  it("does not rotate below the size cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "npc-logs-"));
+    const logger = new Logger({ sessionId: "norotate", logDir: dir });
+    logger.log({ module: "turn", event: "turn_started", tick: 0, turnIndex: 0 });
+    await logger.flush();
+    expect(readdirSync(dir)).toEqual(["norotate.jsonl"]);
   });
 });
 

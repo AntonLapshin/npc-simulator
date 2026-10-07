@@ -8,6 +8,7 @@
 import type { Actor, SceneObject, World } from "../../types.js";
 import type { LogEntry } from "../../logging/logTypes.js";
 import { actorColorCode, paint, paintError } from "../../logging/colors.js";
+import { historyEntryText } from "../../logging/storyTrace.js";
 
 export type Command =
   | { kind: "start"; path?: string }
@@ -267,7 +268,11 @@ export function renderSuggestions(suggestions: string[]): string {
 
 /** World history (most recent last; limit defaults to 10). */
 export function renderHistory(world: World, limit = 10): string {
-  const entries = world.history.slice(-limit).map(stripTickPrefix);
+  // F6: history entries are { text, perceivers } objects (legacy plain
+  // strings tolerated) — render the text.
+  const entries = world.history
+    .slice(-limit)
+    .map((e) => stripTickPrefix(historyEntryText(e) ?? ""));
   if (entries.length === 0) return "(no history yet)";
   return entries.map((h) => `  ${h}`).join("\n");
 }

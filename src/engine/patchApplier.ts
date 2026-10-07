@@ -1,6 +1,8 @@
-import type { Action, ConsequenceResult, EngineConfig, World } from "../types.js";
+import type { Action, ConsequenceResult, EngineConfig, HistoryEntry, World } from "../types.js";
+import { NOT_DONE_SENTINEL, normalizeHistoryEntry } from "../types.js";
 import { defaultConfig } from "../config.js";
 import { cloneWorld } from "./worldStore.js";
+import { perceiverIds } from "./validate/narrative.js";
 
 /**
  * Apply a validated ConsequenceResult to produce the next World:
@@ -28,18 +30,24 @@ export type ApplyConsequenceOptions = {
   honestHistoryNote?: string;
 };
 
-/** Marker suffix for un-applied fallback history entries (Exp-4 item 6). */
+/** Marker suffix for un-applied fallback history entries (Exp-4 item 6). Kept human-readable; F22: only the sentinel is parsed. */
 export const FALLBACK_HISTORY_MARKER = "(not done)";
 
 /** Marker for salvaged/liveness history entries recorded from the narrative (Exp-5 item 2). */
 export const PARTIAL_HISTORY_MARKER = "(partial)";
 
-export function isFallbackHistoryEntry(entry: string): boolean {
-  return entry.includes(FALLBACK_HISTORY_MARKER);
+function entryText(entry: HistoryEntry | string): string {
+  return typeof entry === "string" ? entry : entry.text;
 }
 
-export function isPartialHistoryEntry(entry: string): boolean {
-  return !isFallbackHistoryEntry(entry) && entry.includes(PARTIAL_HISTORY_MARKER);
+/** F22: fallback entries are detected via NOT_DONE_SENTINEL, never the "(not done)" substring. */
+export function isFallbackHistoryEntry(entry: HistoryEntry | string): boolean {
+  return entryText(entry).includes(NOT_DONE_SENTINEL);
+}
+
+export function isPartialHistoryEntry(entry: HistoryEntry | string): boolean {
+  const text = entryText(entry);
+  return !text.includes(NOT_DONE_SENTINEL) && text.includes(PARTIAL_HISTORY_MARKER);
 }
 
 export function applyConsequence(
@@ -48,8 +56,16 @@ export function applyConsequence(
   action: Action,
   config: EngineConfig = defaultConfig,
   opts: ApplyConsequenceOptions = {},
+  /**
+   * F18: optional pre-cloned mutation base. When provided (the turn-start
+   * snapshot from runTurn), the applier mutates it in place instead of
+   * cloning again — the caller owns the aliasing (the turn_started log
+   * input references the same object; the JSONL file write stringifies
+   * synchronously at log time, so it is unaffected).
+   */
+  snapshot?: World,
 ): World {
-  const next = cloneWorld(world);
+  const next = snapshot ?? cloneWorld(world);
   const actorById = new Map(next.actors.map((a) => [a.id, a]));
   const objectById = new Map(next.scene.objects.map((o) => [o.id, o]));
 
@@ -99,21 +115,32 @@ export function applyConsequence(
   }
 
   const actorName = actorById.get(action.actorId)?.name ?? action.actorId;
-  // Single history entry per turn: the acting actor's action text, with no
-  // tick prefix. The consequence narrative is logged (consequence_completed)
-  // but not duplicated here — it must describe only the acting actor
-  // (see TURN DISCIPLINE) so repeating it would double-report the turn.
+  // F6: every history entry records its perceivers (computed from the
+  // PRE-patch world — the event happened at the acting actor's position
+  // before the patches moved anything).
+  const perceivers = [...perceiverIds(world, action.actorId, config)];
+  const pushEntry = (text: string): void => {
+    const entry: HistoryEntry = normalizeHistoryEntry({ text, perceivers }, []);
+    next.history.push(entry);
+  };
+  // Single history entry per turn.
+  // Q1: clean turns record the NARRATIVE (what happened), not the action
+  // text (the wish) — salvaged/liveness turns already did; now all applied
+  // turns agree, and getOpenQuestions/proposal grounding treat them alike.
   // UI layers show this entry only when the viewer can perceive the actor.
   // Exp-4 item 6: fallback attempts are marked as un-applied so later
   // proposals don't assume Anton sits at his desk / the task was explained.
+  // F22: the sentinel (not the "(not done)" substring) marks fallbacks.
   // Exp-5 item 2: salvaged/liveness turns record the narrative + note so
   // later turns don't assume a dropped question was asked.
   if (opts.fallback) {
-    next.history.push(`${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}`);
+    pushEntry(
+      `${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}${NOT_DONE_SENTINEL}`,
+    );
   } else if (opts.honestHistoryNote !== undefined) {
-    next.history.push(`${actorName}: ${result.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);
+    pushEntry(`${actorName}: ${result.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);
   } else {
-    next.history.push(`${actorName}: ${action.text}`);
+    pushEntry(`${actorName}: ${result.narrative}`);
   }
   if (next.history.length > config.maxHistoryEntries) {
     next.history.splice(0, next.history.length - config.maxHistoryEntries);

@@ -45,7 +45,7 @@ import {
   renderHistory,
   formatLogEntry,
 } from "./commands.js";
-import { loggedTicks, renderStoryRange, renderTurnStory } from "../../logging/storyTrace.js";
+import { historyEntryText, loggedTicks, renderStoryRange, renderTurnStory } from "../../logging/storyTrace.js";
 import { loadEnvFile } from "../../util/loadEnv.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -334,11 +334,11 @@ async function runSingleTurn(
   }
   stopIndicator();
   const entries = session.logger.store.all();
-  // Single history entry per turn ("Name: action text", no ticks). The
+  // Single history entry per turn ("Name: narrative", no ticks). The
   // consequence narrative is logged but never echoed — it must describe
   // only the acting actor, and any observer reaction belongs to that
   // observer's own future turn.
-  const historyEntry = session.world.history.at(-1) ?? "";
+  const historyEntry = historyEntryText(session.world.history.at(-1)) ?? "";
   session.lastNarrative = historyEntry;
   session.lastAction = { actorId: actor.id, text: historyEntry };
 

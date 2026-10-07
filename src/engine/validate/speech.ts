@@ -1,7 +1,14 @@
 // Speech and narrative-prose validation checks (extracted from physicalValidator.ts).
 
-import type { Action, ActionSemantics } from "../../types.js";
-import { normalizeQuotes } from "../deterministicSemantics.js";
+import type { Action, ActionSemantics, ValidationError } from "../../types.js";
+import { maskResumedActivity, normalizeQuotes } from "../deterministicSemantics.js";
+
+/**
+ * F35: the canonical "resumed activity" mask lives in
+ * deterministicSemantics.ts (shared with maskNonLocomotion) — re-exported
+ * here so existing import paths keep working.
+ */
+export { maskResumedActivity };
 
 /**
  * Placeholder/schema-leak gate (exp-2 item 1, tick 4 repro): a narrative of
@@ -24,45 +31,26 @@ export function stripForCompare(s: string): string {
     .toLowerCase();
 }
 
-export function validateNarrativePlaceholder(narrative: string, action?: Action): string[] {
+export function validateNarrativePlaceholder(
+  narrative: string,
+  action?: Action,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   const stripped = stripForCompare(narrative);
   if (PLACEHOLDER_NARRATIVES.has(stripped)) {
-    return [
-      `narrative is a placeholder ("${narrative.slice(0, 80)}"): describe ONLY what the acting actor observably does, grounded in the action text — never emit schema filler`,
-    ];
+    errors.push({
+      code: "narrative.placeholder",
+      message: `narrative is a placeholder ("${narrative.slice(0, 80)}"): describe ONLY what the acting actor observably does, grounded in the action text — never emit schema filler`,
+    });
+    return errors;
   }
   if (action && stripped.length > 0 && stripped === stripForCompare(action.text)) {
-    return [
-      `narrative echoes the action text verbatim instead of describing the outcome: narrate what observably happens as a result of the action`,
-    ];
+    errors.push({
+      code: "narrative.echoes_action",
+      message: `narrative echoes the action text verbatim instead of describing the outcome: narrate what observably happens as a result of the action`,
+    });
   }
-  return [];
-}
-
-/**
- * Mask "return/back to <activity>" so resuming a task ("returns to typing")
- * is not read as starting an object interaction.
- */
-export function maskResumedActivity(t: string): string {
-  let out = t;
-  out = out.replace(
-    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  out = out.replace(
-    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
-    " ",
-  );
-  out = out.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  out = out.replace(
-    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  out = out.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
-  return out;
+  return errors;
 }
 
 /** Double- and single-quoted segments (content length >= 2). */
@@ -115,8 +103,11 @@ export function questionPreserved(actionQuote: string, narrative: string): boole
 }
 
 /** Action implies speech even without quotes — judged by Decision AI, never regex. */
-export function validateSpeechPreservation(semantics: ActionSemantics, narrative: string): string[] {
-  const errors: string[] = [];
+export function validateSpeechPreservation(
+  semantics: ActionSemantics,
+  narrative: string,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
   // Ground truth for uttered words comes from the judge/declaration —
   // never from regex-extracting quotes out of the raw action text.
   // Narrative-side quote parsing stays: it reads structured output
@@ -140,9 +131,10 @@ export function validateSpeechPreservation(semantics: ActionSemantics, narrative
     const kept = words.filter((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
     const need = words.length <= 3 ? Math.ceil(words.length / 2) : Math.floor(words.length / 2);
     if (kept.length < need && !questionPreserved(q, narrative)) {
-      errors.push(
-        `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — quote or closely paraphrase the FULL utterance, never invent different dialogue or truncate it to a fragment`,
-      );
+      errors.push({
+        code: "speech.dropped_words",
+        message: `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — quote or closely paraphrase the FULL utterance, never invent different dialogue or truncate it to a fragment`,
+      });
     }
   }
 
@@ -162,9 +154,10 @@ export function validateSpeechPreservation(semantics: ActionSemantics, narrative
     // in the judged utterances (single-word quotes require the one word).
     const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);
     if (grounded.length < need) {
-      errors.push(
-        `narrative invents dialogue ("${q.slice(0, 80)}") not present in the action text: describe ONLY what the acting actor observably does, preserving its exact wording`,
-      );
+      errors.push({
+        code: "speech.invented_dialogue",
+        message: `narrative invents dialogue ("${q.slice(0, 80)}") not present in the action text: describe ONLY what the acting actor observably does, preserving its exact wording`,
+      });
       break; // one dialogue error per turn is enough feedback
     }
   }

@@ -58,6 +58,9 @@ export function proposalSuffix(): string {
     "",
     "Write every suggestion from the deciding actor's own point of view (never cast another roster actor as the subject, never pursue their goals).",
     "Do not repeat a recent own action listed above unless the situation clearly changed (same verb+noun core counts as a repeat).",
+    // Q7: zero object-interaction across 4 experiments — elicit it at the
+    // proposal stage so object manipulation becomes a real option.
+    "OBJECT INTERACTION: notice the objects listed in the context (desks, mugs, laptops, chairs, papers, …) — include suggestions that naturally use them (pick up the mug, open the laptop, move the papers, sit on the chair) whenever they fit the actor's goal; interacting with the world is a core part of the simulation, not decoration.",
     "Return JSON only, matching the schema above.",
     "Return COMPACT single-line JSON (no pretty-print, no markdown).",
   ].join("\n");

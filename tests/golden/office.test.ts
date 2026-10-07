@@ -60,7 +60,8 @@ describe("golden office scenario", () => {
           {
             actorId: "ana",
             emotion: "curious",
-            goal: "Welcome the new coworker.",
+            // F5: observers may update their OWN goal, never another
+            // actor's — no goal patch for Ana on Jeff's turn.
             memoriesAppend: ["Heard Jeff introduce himself as a new team member."],
             beliefsAppend: ["Jeff is a new team member.", "Jeff's name is Jeff."],
             relationshipsAppend: ["Ana has just become aware of Jeff."],
@@ -150,7 +151,9 @@ describe("golden office scenario", () => {
     // Final emotions / goals / states.
     expect(jeff.emotion).toBe("hopeful");
     expect(ana.emotion).toBe("friendly");
-    expect(ana.goal).toBe("Welcome the new coworker.");
+    // F5: Ana's goal patch from Jeff's turn is rejected — she keeps her
+    // scenario goal; observers update only their own goal.
+    expect(ana.goal).toBe("Finish a small engineering task before lunch.");
     expect(ana.state).toBe("standing near Jeff");
     expect(dan.emotion).toBe("stressed");
     expect(dan.state).toBe("sitting at his desk and continuing to work");
@@ -168,11 +171,12 @@ describe("golden office scenario", () => {
     expect(door.description).toBe("The office entrance door. It is open.");
 
     // World history: 1 tickless entry per turn x 3 turns.
+    // Q1: clean turns record the consequence narrative, not the action text.
     expect(final.history).toHaveLength(3);
-    expect(final.history[0]).toContain("Jeff: Hey guys, I'm a new team member");
-    expect(final.history[0]).not.toMatch(/^Tick \d+ - /);
-    expect(final.history[1]).toContain("Ana: Walk over to Jeff and welcome him.");
-    expect(final.history[2]).toContain("Dan: Keep working");
+    expect(final.history[0]!.text).toContain("Jeff: Jeff speaks aloud to the office:");
+    expect(final.history[0]!.text).not.toMatch(/^Tick \d+ - /);
+    expect(final.history[1]!.text).toContain("Ana: Ana stands up from her desk, walks toward Jeff");
+    expect(final.history[2]!.text).toContain("Dan: Dan remains at his desk and continues working.");
 
     // Tick / turn advancement: 3 ticks, wraps back to jeff.
     expect(final.tick).toBe(3);

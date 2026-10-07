@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateConsequence } from "../../src/engine/physicalValidator.js";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
-import { makeTinyWorld } from "../helpers.js";
+import { makeTinyWorld, errorText } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult } from "../../src/types.js";
 
 function baseResult(): ConsequenceResult {
@@ -26,7 +26,7 @@ describe("physicalValidator", () => {
     result.actorPatches = [{ actorId: "u", x: 99, y: 99 }];
     const v = validateConsequence(world, result);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/outside scene/);
+    expect(errorText(v.errors)).toMatch(/outside scene/);
   });
 
   it("rejects movement into non-passable object", () => {
@@ -39,7 +39,7 @@ describe("physicalValidator", () => {
     result.actorPatches = [{ actorId: "u", x: 2, y: 1 }];
     const v = validateConsequence(world, result);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/non-passable/);
+    expect(errorText(v.errors)).toMatch(/non-passable/);
   });
 
   it("rejects unreachable movement (walled off)", () => {
@@ -50,10 +50,11 @@ describe("physicalValidator", () => {
       x: 3, y: 0, w: 1, h: 6, passable: false, blocksVision: true, blocksSound: true,
     });
     const result = baseResult();
-    result.actorPatches = [{ actorId: "u", x: 4, y: 4 }];
+    // F10: (4,4) is occupied by n now — use a free cell across the wall.
+    result.actorPatches = [{ actorId: "u", x: 5, y: 1 }];
     const v = validateConsequence(world, result);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/no valid path/);
+    expect(errorText(v.errors)).toMatch(/no valid path/);
   });
 
   it("rejects unknown actor id", () => {
@@ -62,7 +63,7 @@ describe("physicalValidator", () => {
     result.actorPatches = [{ actorId: "ghost", emotion: "happy" }];
     const v = validateConsequence(world, result);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/unknown actor id/);
+    expect(errorText(v.errors)).toMatch(/unknown actor id/);
   });
 
   it("rejects unknown object id", () => {
@@ -71,7 +72,7 @@ describe("physicalValidator", () => {
     result.objectPatches = [{ objectId: "ghost", description: "x" }];
     const v = validateConsequence(world, result);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/unknown object id/);
+    expect(errorText(v.errors)).toMatch(/unknown object id/);
   });
 
   it("rejects invalid boolean flags", () => {
@@ -117,7 +118,7 @@ describe("physicalValidator", () => {
     };
     const v = validateConsequence(world, invented, action, semantics);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/invent/);
+    expect(errorText(v.errors)).toMatch(/invent/);
   });
 
   it("accepts narratives that preserve the judged utterances", () => {
@@ -159,7 +160,7 @@ describe("physicalValidator", () => {
     };
     const vMissing = validateConsequence(world, missing, { actorId: "u", text: "Walk." }, moving);
     expect(vMissing.valid).toBe(false);
-    expect(vMissing.errors.join(" ")).toMatch(/no position change/);
+    expect(errorText(vMissing.errors)).toMatch(/no position change/);
 
     // Unchanged position.
     const same: ConsequenceResult = {
@@ -210,7 +211,7 @@ describe("physicalValidator", () => {
     };
     const vAway = validateConsequence(world, away, action, towardN);
     expect(vAway.valid).toBe(false);
-    expect(vAway.errors.join(" ")).toMatch(/not closer/);
+    expect(errorText(vAway.errors)).toMatch(/not closer/);
   });
 
   it("skips the closer-to check for unknown destination ids", () => {
@@ -255,7 +256,7 @@ describe("physicalValidator", () => {
     };
     const v = validateConsequence(world, declaredMoved, action);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/no position change/);
+    expect(errorText(v.errors)).toMatch(/no position change/);
   });
 
   it("fails open to physics-only without effects or injected semantics", () => {
@@ -399,7 +400,7 @@ describe("physicalValidator", () => {
     };
     const v = validateConsequence(world, invented, action, semantics);
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/invent/);
+    expect(errorText(v.errors)).toMatch(/invent/);
   });
 
   it("names the blocking object when coordinates land inside furniture", () => {
@@ -417,7 +418,7 @@ describe("physicalValidator", () => {
     };
     const v = validateConsequence(world, result, { actorId: "u", text: "Walk to the desk" });
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/desk/);
+    expect(errorText(v.errors)).toMatch(/desk/);
   });
 
   it("still reports stillness without semantics (fail-open physics check)", () => {
@@ -456,6 +457,6 @@ describe("physicalValidator", () => {
       stillSemantics(),
     );
     expect(v.valid).toBe(false);
-    expect(v.errors.join(" ")).toMatch(/sipping\/drinking\/typing|prop/);
+    expect(errorText(v.errors)).toMatch(/sipping\/drinking\/typing|prop/);
   });
 });

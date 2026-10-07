@@ -124,8 +124,9 @@ describe("golden office-anton replay", () => {
     expect([byId["dana"]!.x, byId["dana"]!.y]).toEqual([15, 11]);
 
     expect(final.history).toHaveLength(3);
-    expect(final.history[1]).toContain("Call out a friendly");
-    expect(final.history[2]).toContain("few more minutes");
+    // Q1: history records the consequence narrative, not the action text.
+    expect(final.history[1]!.text).toContain("Tanya: Tanya calls out a friendly 'Hey!'");
+    expect(final.history[2]!.text).toContain("Dana: Dana sighs, rubs his temples");
 
     // Zero retries: every tick validated on attempt 1.
     const events = logger.store.events();
