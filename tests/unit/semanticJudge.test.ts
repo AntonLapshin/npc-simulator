@@ -94,7 +94,7 @@ describe("resolveActionSemantics", () => {
       disagreements: ["moves conflict: effects=true judge=false (kept OR)"],
     });
     expect(logger.store.events()).toContain("semantic_resolved");
-    expect(logger.store.events()).toContain("judge_disagreement");
+    expect(logger.store.events()).toContain("judge_vs_effects_disagreement");
   });
 
   it("widens lying effects via the judge (merged source)", async () => {

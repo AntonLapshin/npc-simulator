@@ -11,30 +11,15 @@
 import type { Action, ActionSemantics, ConsequenceResult, World } from "../types.js";
 import type { SemanticJudge } from "../intelligence/types.js";
 import type { Logger } from "../logging/logger.js";
+import {
+  isActorMentioned,
+  parseActionQuotes,
+  resolveDeterministicSemantics,
+} from "./deterministicSemantics.js";
+
+export { parseActionQuotes };
 
 export type SemanticsSource = "effects" | "judge" | "merged" | "fail-open";
-
-/** Double- and single-quoted segments (content length >= 2). Format parsing, not a verb ontology. */
-export function parseActionQuotes(text: string): string[] {
-  const out: string[] = [];
-  const doubleRe = /"([^"]{2,})"/g;
-  let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(text)) !== null) out.push(m[1]!);
-  // Single quotes: avoid matching apostrophes inside words (don't, I'm).
-  const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(text)) !== null) out.push(m[2]!);
-  return out;
-}
-
-/** Content words (len >= 4) lowercased for overlap checks. */
-function quoteContentWords(s: string): string[] {
-  return (s.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []);
-}
-
-/** True when two words share a stem (first 4 letters equal). */
-function quoteSameStem(a: string, b: string): boolean {
-  return a.slice(0, 4) === b.slice(0, 4);
-}
 
 function normActionText(s: string): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
@@ -42,21 +27,18 @@ function normActionText(s: string): string {
 
 /**
  * Exp-3 item 1: is a declared/judged quote grounded in the ACTION text?
- * A quote appearing in neither the action text nor its close paraphrase
- * ("Good to see you again, Jeff" for a desk question) is a hallucination
- * and must never become a validation requirement. Grounding holds when the
- * quote is a (normalized) substring of the action text, or when at least
- * half its content words share stems with the action text.
+ * Ground truth comes from parsing the action text itself — a judge/effects
+ * quote counts only when it is a (normalized) substring of the action
+ * text. A quote appearing in neither ("Good to see you again, Jeff" for a
+ * desk question) is a hallucination and must never become a validation
+ * requirement. Paraphrases do NOT count here: how the narrative renders
+ * speech is judged leniently downstream (validateSpeechPreservation), but
+ * what counts as *said* is exact.
  */
 export function isQuoteGroundedInAction(quote: string, actionText: string): boolean {
   const q = normActionText(quote);
   if (q.length === 0) return false;
-  if (normActionText(actionText).includes(q)) return true;
-  const words = quoteContentWords(quote);
-  if (words.length === 0) return false;
-  const actionWords = quoteContentWords(actionText);
-  const kept = words.filter((w) => actionWords.some((aw) => quoteSameStem(w, aw)));
-  return kept.length >= Math.ceil(words.length / 2);
+  return normActionText(actionText).includes(q);
 }
 
 /** Deterministic projection of a self-declared `effects` block to ActionSemantics. */
@@ -81,9 +63,10 @@ export type ResolvedSemantics = {
   /**
    * Exp-3 item 8c: per-turn judge-vs-effects disagreement notes. Non-empty
    * when quotes were dropped as ungrounded, non-roster ids were filtered,
-   * or effects and judge conflicted on moves/speaks — logged as a
-   * `judge_disagreement` event so the session disagreement rate is
-   * computable from the JSONL trace.
+   * judge-only ids failed deterministic resolution, or effects and judge
+   * conflicted on moves/speaks — always logged as a
+   * `judge_vs_effects_disagreement` event (even when empty) so the session
+   * disagreement rate is computable from the JSONL trace.
    */
   disagreements?: string[];
 };
@@ -133,14 +116,28 @@ export function mergeSemantics(
 
 /**
  * Exp-3 items 1+8: deterministic grounding of merged semantics against the
- * ACTION text (no LLM). The judge runs on the same weak model as the
- * consequence engine and invents quotes ("Good to see you again, Jeff") and
- * destinations (tanya-as-destination for a desk walk) that merged-OR then
- * forces the validator to demand — circular grading. Ground truth for
- * quotes comes from parsing the action text itself; judge/effects quotes
- * survive only when grounded in it. Id fields survive only when they name
- * a roster actor / scene object. Returns the grounded semantics plus a
- * disagreement list (empty when everything agreed).
+ * ACTION text (no LLM). Role split: the deterministic judge owns quotes
+ * and destinations (parsed from the action text + roster/landmark lookup);
+ * the LLM/effects own only the moves/speaks/contact flags. The judge runs
+ * on the same weak model as the consequence engine and invents quotes
+ * ("Good to see you again, Jeff") and destinations (tanya-as-destination
+ * for a desk walk, Jeff-as-destination for a coffee run) that merged-OR
+ * then forces the validator to demand — circular grading.
+ *
+ * Grounding rules:
+ * - Quotes: action-text parse is ground truth; declared/judged quotes
+ *   survive only as substrings of the action text.
+ * - Ids from `effects`: must name a roster actor / scene object. (The
+ *   consequence describes what it did; the validator then verifies the
+ *   patches match, so a valid id only strengthens checks.)
+ * - Ids from the judge alone: must additionally match the deterministic
+ *   resolution (movement-toward mention for destinations, any mention for
+ *   addressees). A judge that can invent Jeff — or promote a "Thanks
+ *   Tanya!" addressee to a destination — cannot ground such requirements.
+ * - contactActorId stays LLM-owned: roster/object validity only.
+ *
+ * Returns the grounded semantics plus a disagreement list (empty when
+ * everything agreed).
  */
 export function applyDeterministicGrounding(
   world: World,
@@ -154,10 +151,11 @@ export function applyDeterministicGrounding(
 
   const rosterIds = new Set(world.actors.map((a) => a.id));
   const objectIds = new Set(world.scene.objects.map((o) => o.id));
+  const det = resolveDeterministicSemantics(world, action);
 
   // Quotes: action-text parse is ground truth; keep declared/judged quotes
-  // only when grounded in the action text.
-  const actionQuotes = parseActionQuotes(action.text);
+  // only when they are substrings of the action text.
+  const actionQuotes = det.quotedSpeech;
   const groundedQuotes: string[] = [...actionQuotes];
   for (const q of merged.quotedSpeech) {
     if (groundedQuotes.includes(q)) continue;
@@ -179,14 +177,85 @@ export function applyDeterministicGrounding(
     disagreements.push(`dropped unknown ${label} "${value}" (not on roster)`);
     return undefined;
   };
-  const destinationActorId = groundActorId("destinationActorId", merged.destinationActorId);
-  const addresseeActorId = groundActorId("addresseeActorId", merged.addresseeActorId);
+  const groundObjectId = (
+    label: string,
+    value: string | undefined,
+  ): string | undefined => {
+    if (value === undefined) return undefined;
+    if (objectIds.has(value)) return value;
+    disagreements.push(`dropped unknown ${label} "${value}" (not in scene)`);
+    return undefined;
+  };
+
+  // Judge-only ids must match the deterministic resolution: the judge may
+  // not promote unmentioned actors (or mere addressees) to destinations.
+  // Effects-corroborated ids skip this check — effects describes what the
+  // consequence did, and the validator verifies the patches match.
+  const groundJudgeActorDestination = (
+    value: string | undefined,
+  ): string | undefined => {
+    if (value === undefined) return undefined;
+    if (!rosterIds.has(value)) {
+      disagreements.push(`dropped unknown destinationActorId "${value}" (not on roster)`);
+      return undefined;
+    }
+    if (fromEffects?.destinationActorId === value) return value; // corroborated
+    if (det.destinationActorId === value) return value;
+    disagreements.push(
+      `dropped judge destinationActorId "${value}" (not named as a movement target in the action text)`,
+    );
+    return undefined;
+  };
+  const groundJudgeObjectDestination = (
+    value: string | undefined,
+  ): string | undefined => {
+    if (value === undefined) return undefined;
+    if (!objectIds.has(value)) {
+      disagreements.push(`dropped unknown destinationObjectId "${value}" (not in scene)`);
+      return undefined;
+    }
+    if (fromEffects?.destinationObjectId === value) return value; // corroborated
+    if (det.destinationObjectId === value) return value;
+    disagreements.push(
+      `dropped judge destinationObjectId "${value}" (not named as a movement target in the action text)`,
+    );
+    return undefined;
+  };
+  const groundJudgeAddressee = (
+    value: string | undefined,
+  ): string | undefined => {
+    if (value === undefined) return undefined;
+    if (!rosterIds.has(value)) {
+      disagreements.push(`dropped unknown addresseeActorId "${value}" (not on roster)`);
+      return undefined;
+    }
+    if (fromEffects?.addresseeActorId === value) return value; // corroborated
+    if (det.addresseeActorId === value) return value;
+    if (merged.speaks && isActorMentioned(world, action.text, value)) return value;
+    disagreements.push(
+      `dropped judge addresseeActorId "${value}" (not addressed in the action text)`,
+    );
+    return undefined;
+  };
+
+  const useJudgeDestination =
+    fromEffects?.destinationActorId === undefined && fromJudge?.destinationActorId !== undefined;
+  const useJudgeObjectDestination =
+    fromEffects?.destinationObjectId === undefined && fromJudge?.destinationObjectId !== undefined;
+  const useJudgeAddressee =
+    fromEffects?.addresseeActorId === undefined && fromJudge?.addresseeActorId !== undefined;
+
+  const destinationActorId = useJudgeDestination
+    ? groundJudgeActorDestination(merged.destinationActorId)
+    : groundActorId("destinationActorId", merged.destinationActorId);
+  const destinationObjectId = useJudgeObjectDestination
+    ? groundJudgeObjectDestination(merged.destinationObjectId)
+    : groundObjectId("destinationObjectId", merged.destinationObjectId);
+  const addresseeActorId = useJudgeAddressee
+    ? groundJudgeAddressee(merged.addresseeActorId)
+    : groundActorId("addresseeActorId", merged.addresseeActorId);
+  // Contact stays LLM-owned (moves/speaks/contact role): roster validity only.
   const contactActorId = groundActorId("contactActorId", merged.contactActorId);
-  let destinationObjectId = merged.destinationObjectId;
-  if (destinationObjectId !== undefined && !objectIds.has(destinationObjectId)) {
-    disagreements.push(`dropped unknown destinationObjectId "${destinationObjectId}" (not in scene)`);
-    destinationObjectId = undefined;
-  }
 
   // Requirement flags stay merged-OR, but record effects-vs-judge conflict.
   if (fromEffects && fromJudge) {
@@ -198,6 +267,15 @@ export function applyDeterministicGrounding(
     if (fromEffects.speaks !== fromJudge.speaks) {
       disagreements.push(
         `speaks conflict: effects=${fromEffects.speaks} judge=${fromJudge.speaks} (kept OR)`,
+      );
+    }
+    if (
+      fromEffects.destinationActorId !== undefined &&
+      fromJudge.destinationActorId !== undefined &&
+      fromEffects.destinationActorId !== fromJudge.destinationActorId
+    ) {
+      disagreements.push(
+        `destination conflict: effects=${fromEffects.destinationActorId} judge=${fromJudge.destinationActorId} (kept effects)`,
       );
     }
   }
@@ -261,17 +339,24 @@ export async function resolveActionSemantics(
     fromEffects,
     fromJudge,
   );
-  if (disagreements.length > 0) {
-    logger?.log({
-      module: "semantic",
-      event: "judge_disagreement",
-      tick: world.tick,
-      turnIndex: world.turnIndex,
-      actorId: action.actorId,
-      input: { action, fromEffects, fromJudge },
-      output: { disagreements, groundedSemantics: semantics },
-    });
-  }
+  // Phase 1 / Exp-3 item 8c: one disagreement event per resolution (every
+  // turn), even when empty — the session disagreement rate (non-empty /
+  // total) is then directly computable from the JSONL trace instead of
+  // failing open silently.
+  logger?.log({
+    module: "semantic",
+    event: "judge_vs_effects_disagreement",
+    tick: world.tick,
+    turnIndex: world.turnIndex,
+    actorId: action.actorId,
+    input: { action, fromEffects, fromJudge },
+    output: {
+      disagreements,
+      agreement: disagreements.length === 0,
+      source,
+      groundedSemantics: semantics,
+    },
+  });
   if (semantics) {
     logger?.log({
       module: "semantic",

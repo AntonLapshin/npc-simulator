@@ -1,27 +1,29 @@
 // Deterministic mock SemanticJudge (offline / tests only).
 //
-// This is the ONLY place in src/ where keyword heuristics survive: simple
-// verb lists + masking regexes approximate "what did this sentence mean?"
-// without any network call. The production validation path never calls
-// regex on raw text — it consumes the ActionSemantics produced here (mock
-// runs) or by the LLM judge (real runs).
+// Movement/speech *flag* heuristics (verb lists, masking regexes) live only
+// in this mock. Mention/destination *resolution* (which roster id the text
+// names) is shared with the production deterministic grounding layer
+// (engine/deterministicSemantics.ts) — the mock and the validator resolve
+// names identically, so offline runs behave like grounded production runs.
+// The production validation path never calls regex on raw text — it
+// consumes the ActionSemantics produced here (mock runs) or by the LLM
+// judge (real runs).
 //
 // Faithful paraphrase understanding ("saunter over", "go the extra mile")
 // belongs to the LLM judge; the mock intentionally stays keyword-based.
 
 import type { Action, ActionSemantics, World } from "../types.js";
 import type { SemanticJudge } from "../intelligence/types.js";
+import {
+  parseActionQuotes,
+  resolveDestinationActorId,
+  resolveDestinationObjectId,
+  resolveMentionedActorId,
+} from "../engine/deterministicSemantics.js";
 
 /** Double- and single-quoted segments (content length >= 2). Format parsing, not a verb ontology. */
 function quotedSegments(text: string): string[] {
-  const out: string[] = [];
-  const doubleRe = /"([^"]{2,})"/g;
-  let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(text)) !== null) out.push(m[1]!);
-  // Single quotes: avoid matching apostrophes inside words (don't, I'm).
-  const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(text)) !== null) out.push(m[2]!);
-  return out;
+  return parseActionQuotes(text);
 }
 
 /**
@@ -113,13 +115,7 @@ function mockFindMentionedActorId(
   actingActorId: string,
   actionText: string,
 ): string | undefined {
-  const lowered = actionText.toLowerCase();
-  for (const a of world.actors) {
-    if (a.id === actingActorId) continue;
-    if (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) return a.id;
-    if (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase())) return a.id;
-  }
-  return undefined;
+  return resolveMentionedActorId(world, actingActorId, actionText);
 }
 
 /** Mock-only landmark resolution: object whose id or name appears in the text. */
@@ -128,46 +124,7 @@ function mockFindMentionedObjectId(
   actionText: string,
   actingActorId?: string,
 ): string | undefined {
-  const lowered = actionText.toLowerCase();
-  for (const o of world.scene.objects) {
-    if (o.id.toLowerCase().length >= 3 && lowered.includes(o.id.toLowerCase())) return o.id;
-    if (o.name.toLowerCase().length >= 3 && lowered.includes(o.name.toLowerCase())) return o.id;
-  }
-  // Generic landmark words map to the first matching object — except with a
-  // possessive ("my desk", "my own chair"), which resolves to the acting
-  // actor's own object first (anton_desk for anton's "my desk"). Without
-  // this, "my desk" silently binds to someone else's desk and the
-  // closer-to-target gate then enforces the WRONG destination (exp-2 §6).
-  const possessive = /\bmy\b|\bown\b/i.test(actionText);
-  const generic: Array<[RegExp, RegExp]> = [
-    [/\bcoffee\b/i, /coffee/i],
-    [/\bdesk\b/i, /desk/i],
-    [/\bdoor\b/i, /door/i],
-    [/\bwall\b/i, /wall/i],
-    [/\blaptop\b/i, /laptop/i],
-    [/\bchair\b/i, /chair/i],
-    [/\bmug\b/i, /mug/i],
-  ];
-  for (const [wordRe, objRe] of generic) {
-    if (wordRe.test(actionText)) {
-      const matches = world.scene.objects.filter(
-        (o) => objRe.test(o.name) || objRe.test(o.id),
-      );
-      if (matches.length === 0) continue;
-      if (possessive && actingActorId) {
-        const actorLower = actingActorId.toLowerCase();
-        const actor = world.actors.find((a) => a.id === actingActorId);
-        const actorName = actor?.name.toLowerCase() ?? actorLower;
-        const owned =
-          matches.find((o) => o.id.toLowerCase().startsWith(`${actorLower}_`)) ??
-          matches.find((o) => o.id.toLowerCase().includes(actorLower)) ??
-          matches.find((o) => o.name.toLowerCase().startsWith(actorName));
-        if (owned) return owned.id;
-      }
-      return matches[0]!.id;
-    }
-  }
-  return undefined;
+  return resolveDestinationObjectId(world, actionText, actingActorId);
 }
 
 /** Mock-only physical-contact heuristic (handshake, hugs, handing things over). */
@@ -191,8 +148,11 @@ export function mockClassifyAction(world: World, action: Action): ActionSemantic
   let moves = mockLooksLikeMovement(action.text);
   const quotes = quotedSegments(action.text);
   const speaks = quotes.length > 0 || mockLooksLikeSpeech(action.text);
+  // Destinations resolve only from movement-toward mentions (shared
+  // deterministic resolution): a greeting addressee ("Thanks Tanya!"
+  // while walking to a desk) is never a destination (exp-3 tick 6).
   let destinationActorId = moves
-    ? mockFindMentionedActorId(world, action.actorId, action.text)
+    ? resolveDestinationActorId(world, action.actorId, action.text)
     : undefined;
   // Exp-3 item 3: approaching/joining someone already adjacent is not
   // locomotion — no movement needed, no destination owed. (Mirrors the LLM

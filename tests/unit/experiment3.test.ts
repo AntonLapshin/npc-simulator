@@ -8,6 +8,10 @@ import {
   parseActionQuotes,
   resolveActionSemantics,
 } from "../../src/engine/actionSemantics.js";
+import {
+  resolveDestinationActorId,
+  resolveDeterministicSemantics,
+} from "../../src/engine/deterministicSemantics.js";
 import { isSpeechOnlyFailure, resolveWithValidation, trySalvageConsequence } from "../../src/engine/turnOrchestrator.js";
 import { suggestSimilarIds } from "../../src/engine/physicalValidator.js";
 import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
@@ -71,8 +75,9 @@ describe("exp3-1 deterministic quote grounding (ticks 0/3/9/17)", () => {
     const action = "Walk to Tanya and ask \"where is my desk?\"";
     expect(isQuoteGroundedInAction("Good to see you again, Jeff", action)).toBe(false);
     expect(isQuoteGroundedInAction("where is my desk?", action)).toBe(true);
-    // Close paraphrase stays grounded.
-    expect(isQuoteGroundedInAction("where my desk is", action)).toBe(true);
+    // Phase 1 is strict substring: paraphrases do NOT count as ground truth
+    // here (narrative-side paraphrase stays lenient — see tick-3 test below).
+    expect(isQuoteGroundedInAction("where my desk is", action)).toBe(false);
   });
 
   it("drops judge-invented quotes and ids, logging disagreement", async () => {
@@ -105,7 +110,7 @@ describe("exp3-1 deterministic quote grounding (ticks 0/3/9/17)", () => {
     expect(resolved.semantics!.destinationActorId).toBeUndefined();
     expect(resolved.semantics!.addresseeActorId).toBeUndefined();
     expect(resolved.disagreements!.length).toBeGreaterThan(0);
-    expect(logger.store.events()).toContain("judge_disagreement");
+    expect(logger.store.events()).toContain("judge_vs_effects_disagreement");
   });
 
   it("applyDeterministicGrounding keeps roster ids and grounded quotes", () => {
@@ -572,5 +577,165 @@ describe("exp3-9/10/11/12/13 prompting", () => {
     const world = officeWorld();
     expect(buildProposalContext(world, "u")).toContain("KNOWN COLLEAGUES");
     expect(buildSelectionContext(world, "u", ["Wave."])).toContain("KNOWN COLLEAGUES");
+  });
+});
+
+describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
+  function tanyaWorld(): World {
+    const world = makeTinyWorld();
+    world.actors.find((a) => a.id === "n")!.name = "Tanya";
+    return world;
+  }
+
+  it("deterministic destination prefers the goal over the origin", () => {
+    const world = tanyaWorld();
+    expect(resolveDestinationActorId(world, "u", "Walk from Tanya to the door.")).toBeUndefined();
+    world.actors.push({
+      id: "d", name: "Dana", persona: "p", x: 0, y: 0,
+      state: "s", emotion: "c", goal: "g", thoughts: "t", memories: [], beliefs: [], relationships: [],
+    });
+    // Last movement mention wins: Dana is the goal, Tanya the origin.
+    expect(resolveDestinationActorId(world, "u", "Walk from Tanya to Dana.")).toBe("d");
+    // A greeting addressee is never a destination (tick 6).
+    expect(resolveDestinationActorId(world, "u", "Thanks, Tanya! Walk to my desk.")).toBeUndefined();
+    expect(resolveDestinationActorId(world, "u", "Come closer to Tanya.")).toBe("n");
+  });
+
+  it("drops a greeting addressee promoted to destination, keeps the addressee (tick 6)", async () => {
+    const world = tanyaWorld();
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: 'Walk to my desk and sit down. "Thanks, Tanya! Is this my spot?"' };
+    const quote = "Thanks, Tanya! Is this my spot?";
+    const judge = {
+      async classify(): Promise<ActionSemantics> {
+        return {
+          moves: true, destinationActorId: "n", speaks: true,
+          quotedSpeech: [quote], addresseeActorId: "n",
+        };
+      },
+    };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        ...baseResult("U walks."),
+        actorPatches: [],
+        effects: { moved: true, spoke: true, quotedSpeech: [quote] },
+      },
+      judge, logger,
+    );
+    // Tanya is mentioned only as an addressee — never a movement requirement.
+    expect(resolved.semantics!.destinationActorId).toBeUndefined();
+    expect(resolved.semantics!.addresseeActorId).toBe("n");
+    expect(resolved.semantics!.quotedSpeech).toEqual([quote]);
+    expect(resolved.disagreements!.join(" ")).toMatch(/not named as a movement target/);
+  });
+
+  it("drops an unmentioned roster destination so good movement still validates (tick 9)", async () => {
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: "Walk over to the coffee machine for a break." };
+    const judge = {
+      async classify(): Promise<ActionSemantics> {
+        return {
+          moves: true, destinationActorId: "n", speaks: false,
+          quotedSpeech: ["Excuse me, do you have a minute?"],
+        };
+      },
+    };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        ...baseResult("Anton approaches the coffee machine, standing beside it."),
+        actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
+        objectPatches: [],
+        reasoning: "r",
+        effects: { moved: true, spoke: false },
+      },
+      judge, logger,
+    );
+    // No Tanya in the action: the invented destination and quote are dropped.
+    expect(resolved.semantics!.destinationActorId).toBeUndefined();
+    expect(resolved.semantics!.quotedSpeech).toEqual([]);
+    expect(resolved.disagreements!.length).toBeGreaterThan(0);
+    // ...and the valid walk validates on its own movement, not the invention.
+    const v = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton approaches the coffee machine, standing beside it."),
+        actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
+        objectPatches: [],
+        reasoning: "r",
+        effects: { moved: true, spoke: false },
+      },
+      action,
+      resolved.semantics!,
+    );
+    expect(v).toEqual({ valid: true, errors: [] });
+  });
+
+  it("tick-3 paraphrase still passes end to end under strict quote grounding", async () => {
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: 'Walk to N and ask "could you show me where my desk is?"' };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        narrative: "U asks N for directions to his desk.",
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
+          { actorId: "n", thoughts: "Helpful." },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+        effects: {
+          moved: true, spoke: true,
+          quotedSpeech: ["could you show me where my desk is?"],
+          destinationActorId: "n", addresseeActorId: "n",
+        },
+      },
+      new MockSemanticJudge(), logger,
+    );
+    expect(resolved.disagreements).toEqual([]);
+    const v = validateConsequence(
+      world,
+      {
+        narrative: "U asks N for directions to his desk.",
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
+          { actorId: "n", thoughts: "Helpful." },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+        effects: {
+          moved: true, spoke: true,
+          quotedSpeech: ["could you show me where my desk is?"],
+          destinationActorId: "n", addresseeActorId: "n",
+        },
+      },
+      action,
+      resolved.semantics!,
+    );
+    expect(v).toEqual({ valid: true, errors: [] });
+  });
+
+  it("logs judge_vs_effects_disagreement on every resolution, even on agreement", async () => {
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    const resolved = await resolveActionSemantics(
+      world,
+      { actorId: "u", text: "Wave." },
+      { narrative: "U waves.", actorPatches: [], objectPatches: [], reasoning: "r" },
+      new MockSemanticJudge(), logger,
+    );
+    expect(resolved.disagreements).toEqual([]);
+    const events = logger.store.byEvent("judge_vs_effects_disagreement");
+    expect(events).toHaveLength(1);
+    expect((events[0]!.output as { agreement: boolean }).agreement).toBe(true);
+    // Deterministic layer resolves no quotes/destinations for a bare wave.
+    expect(resolveDeterministicSemantics(world, { actorId: "u", text: "Wave." })).toEqual({
+      quotedSpeech: [],
+    });
   });
 });
