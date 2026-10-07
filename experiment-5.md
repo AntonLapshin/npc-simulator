@@ -41,7 +41,7 @@ World positions after each applied turn (from `turn_completed`):
 | 8 | tanya | (11,5) | (8,7) | (15,11) | FALLBACK |
 | 9 | dana | (11,5) | (8,7) | (15,11) | FALLBACK |
 | 10 | anton | (11,5) | (8,7) | (15,11) | FALLBACK |
-| 11 | tanya | (11,5) | (8,7) | (15,11) | FALLBACK |
+| 10 | tanya | (11,5) | (8,7) | (15,11) | FALLBACK |
 | 12 | dana | (11,5) | (8,7) | (15,11) | FALLBACK |
 | 13 | anton | (11,5) | (8,7) | (15,11) | FALLBACK |
 | 14 | tanya | (11,5) | (8,7) | (15,11) | FALLBACK |
