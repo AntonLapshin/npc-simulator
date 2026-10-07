@@ -13,7 +13,7 @@ import {
   resolveDestinationActorId,
   resolveDeterministicSemantics,
 } from "../../src/engine/deterministicSemantics.js";
-import { isSpeechOnlyFailure, resolveWithValidation, trySalvageConsequence } from "../../src/engine/turnOrchestrator.js";
+import { isSpeechOnlyFailure, resolveWithValidation, summarizeTurnOutcomes, trySalvageConsequence } from "../../src/engine/turnOrchestrator.js";
 import { suggestSimilarIds } from "../../src/engine/physicalValidator.js";
 import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
 import { Logger } from "../../src/logging/logger.js";
@@ -1101,5 +1101,234 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
     });
     const out2 = await resolveWithValidation(world, action, deps2);
     expect(out2.narrative).toBe("Nothing changes.");
+  });
+});
+
+describe("phase4 partial-apply fallback (plan Phase 4)", () => {
+  it("isSpeechOnlyFailure covers lost questions and silent-behavior swaps", () => {
+    expect(
+      isSpeechOnlyFailure([
+        'action asks a question ("where is my desk?") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)',
+      ]),
+    ).toBe(true);
+    expect(
+      isSpeechOnlyFailure([
+        'action says something ("thanks for the welcome") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior',
+      ]),
+    ).toBe(true);
+    // Speech nit mixed with a physics error is still a hard failure.
+    expect(
+      isSpeechOnlyFailure([
+        'narrative drops the acting actor\'s exact words ("hi")',
+        "actor u: coordinates outside scene bounds",
+      ]),
+    ).toBe(false);
+  });
+
+  it("salvages valid movement + dropped question + stray patch with warnings (tick-3 degraded shape)", () => {
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    const action = { actorId: "u", text: 'Walk to the coffee machine and ask "is this my spot?"' };
+    const semantics: ActionSemantics = {
+      moves: true, destinationObjectId: "coffee_machine",
+      speaks: true, quotedSpeech: ["is this my spot?"],
+    };
+    const out = trySalvageConsequence(
+      world,
+      action,
+      {
+        narrative: "Anton walks to the coffee machine.",
+        actorPatches: [
+          { actorId: "u", x: 1, y: 1, thoughts: "Coffee time." },
+          { actorId: "jeff", thoughts: "Hello." },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+      },
+      semantics,
+    );
+    expect(out).not.toBeNull();
+    // Degraded-but-advancing: movement kept, hallucination stripped.
+    expect(out!.salvaged.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
+    expect(out!.salvaged.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
+    expect(out!.warnings.length).toBeGreaterThan(0);
+    expect(out!.warnings.join(" ")).toMatch(/question|exact words/);
+  });
+
+  it("repairs missing movement in salvage when locomotion is implied", () => {
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    const action = { actorId: "u", text: "Walk to the coffee machine." };
+    const out = trySalvageConsequence(
+      world,
+      action,
+      {
+        // Narrates the walk but omits the x/y patch (weak-LLM shape).
+        narrative: "Anton walks to the coffee machine.",
+        actorPatches: [{ actorId: "u", thoughts: "Going." }],
+        objectPatches: [],
+        reasoning: "r",
+      },
+      { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
+    );
+    expect(out).not.toBeNull();
+    const moved = out!.salvaged.actorPatches.find((p) => p.actorId === "u")!;
+    expect(moved.x).toBeDefined();
+    expect(moved.y).toBeDefined();
+    expect([moved.x, moved.y]).not.toEqual([3, 3]);
+  });
+
+  it("does not repair glance turns: no locomotion, no movement", () => {
+    const world = officeWorld();
+    const out = trySalvageConsequence(
+      world,
+      { actorId: "u", text: "Glance over the notes." },
+      {
+        narrative: "Anton glances over the notes.",
+        actorPatches: [{ actorId: "u", thoughts: "Zone." }],
+        objectPatches: [],
+        reasoning: "r",
+      },
+      stillSemantics(),
+    );
+    // Already valid as-is (in place) — salvaged clean, never moved.
+    expect(out).not.toBeNull();
+    expect(out!.warnings).toEqual([]);
+    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBeUndefined();
+  });
+
+  it("refuses salvage when object/contact gates fail (gates stay hard)", () => {
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    // Pour verb dropped with no backing patch (tick-9 verb-drop shape).
+    const pour = trySalvageConsequence(
+      world,
+      { actorId: "u", text: "Walk to the coffee machine and pour a coffee." },
+      {
+        narrative: "Anton approaches the coffee machine, standing beside it.",
+        actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
+        objectPatches: [],
+        reasoning: "r",
+      },
+      { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
+    );
+    expect(pour).toBeNull();
+
+    // Far handshake with no adjacency (tick-12 shape): u (1,1), n (4,4).
+    const contact = trySalvageConsequence(
+      officeWorld(),
+      { actorId: "u", text: "Shake Nadia's hand warmly." },
+      {
+        narrative: "Anton shakes Nadia's hand.",
+        actorPatches: [
+          { actorId: "u", thoughts: "Firm grip." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+      },
+      stillSemantics(),
+    );
+    expect(contact).toBeNull();
+  });
+
+  it("resolveWithValidation guides prose-only retry, then salvages (tick-9 end to end)", async () => {
+    const logger = new Logger({ sessionId: "exp3-phase4-retry", writeToFile: false });
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    const seenFeedback: (string | undefined)[] = [];
+    const bad: ConsequenceResult = {
+      narrative: "Anton approaches the coffee machine, standing beside it.",
+      actorPatches: [
+        { actorId: "u", x: 1, y: 1, thoughts: "Coffee time." },
+        { actorId: "jeff", thoughts: "Hello." },
+      ],
+      objectPatches: [],
+      reasoning: "r",
+      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: false },
+    };
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: {
+        resolve: async (_w: World, _a: { actorId: string; text: string }, feedback?: string) => {
+          seenFeedback.push(feedback);
+          return structuredClone(bad);
+        },
+      } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 1, autosaveEnabled: false },
+    });
+    const out = await resolveWithValidation(
+      world,
+      { actorId: "u", text: "Walk to the coffee machine." },
+      deps,
+    );
+    // Degraded-but-advancing instead of "Nothing changes.": movement kept.
+    expect(out.narrative).not.toBe("Nothing changes.");
+    expect(out.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
+    expect(out.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
+    expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+    // The retry was told to keep patches and fix prose only.
+    expect(seenFeedback[1]).toMatch(/keep the remaining valid patches|keep every actorPatch/);
+  });
+
+  it("summarizeTurnOutcomes tracks clean / salvaged / fallback separately", async () => {
+    const logger = new Logger({ sessionId: "exp3-phase4-rates", writeToFile: false });
+
+    // Clean turn: default mock engine validates first try.
+    const cleanDeps = makeTestDeps(logger, {
+      config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
+    });
+    await resolveWithValidation(makeTinyWorld(), { actorId: "u", text: "Wave." }, cleanDeps);
+
+    // Salvaged turn: valid movement + stray patch, speech-clean.
+    const salvagedWorld = officeWorld();
+    salvagedWorld.actors.find((a) => a.id === "u")!.x = 3;
+    salvagedWorld.actors.find((a) => a.id === "u")!.y = 3;
+    const salvaged: ConsequenceResult = {
+      narrative: "Anton approaches the coffee machine, standing beside it.",
+      actorPatches: [
+        { actorId: "u", x: 1, y: 1, thoughts: "Coffee time." },
+        { actorId: "jeff", thoughts: "Hello." },
+      ],
+      objectPatches: [],
+      reasoning: "r",
+      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: false },
+    };
+    const salvagedDeps = makeTestDeps(logger, {
+      consequenceEngine: { resolve: async () => structuredClone(salvaged) } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
+    });
+    await resolveWithValidation(
+      salvagedWorld,
+      { actorId: "u", text: "Walk to the coffee machine." },
+      salvagedDeps,
+    );
+
+    // Fallback turn: unrepairable physics (out of bounds, no locomotion).
+    const fallbackDeps = makeTestDeps(logger, {
+      consequenceEngine: {
+        resolve: async () => ({
+          narrative: "Teleport!",
+          actorPatches: [{ actorId: "u", x: 999, y: 999 }],
+          objectPatches: [],
+          reasoning: "bad",
+        }),
+      } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
+    });
+    const fell = await resolveWithValidation(makeTinyWorld(), { actorId: "u", text: "Wave." }, fallbackDeps);
+    expect(fell.narrative).toBe("Nothing changes.");
+
+    const summary = summarizeTurnOutcomes(logger.store.all());
+    expect(summary).toMatchObject({ clean: 1, salvaged: 1, fallback: 1, total: 3 });
+    expect(summary.cleanRate).toBeCloseTo(1 / 3);
+    expect(summary.salvagedRate).toBeCloseTo(1 / 3);
+    expect(summary.fallbackRate).toBeCloseTo(1 / 3);
+    expect(summary.degradedRate).toBeCloseTo(1 / 3);
+    expect(summarizeTurnOutcomes([])).toMatchObject({ clean: 0, salvaged: 0, fallback: 0, total: 0 });
   });
 });

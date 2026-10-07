@@ -99,24 +99,74 @@ export function stripSelectionPrefix(text: string): string {
 /** Offline default: keyword-based mock judge (zero network calls). */
 const defaultSemanticJudge: SemanticJudge = new MockSemanticJudge();
 
-/** True when every validation error is a speech-rendering nit (dropped/invented wording). */
+/** True when every validation error is a speech-rendering nit (dropped/invented wording, lost question, silent-behavior swap). */
 export function isSpeechOnlyFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
-  return errors.every((e) => /exact words|invents dialogue/.test(e));
+  return errors.every((e) =>
+    /exact words|invents dialogue|keeps no question|renders no speech/.test(e),
+  );
 }
 
 /**
- * Exp-3 item 6: partial-apply / salvage instead of all-or-nothing fallback.
+ * Deterministic movement repair for the salvage path (Phase 4): fill in (or
+ * fix) the acting actor's x/y with a computed reachable position, mirroring
+ * the retry-loop repair. Returns a repaired clone, or null when no valid
+ * suggestion exists. Never touches prose — the caller revalidates and only
+ * accepts the repair when the movement gate (and everything except
+ * speech-rendering nits) passes.
+ */
+function applySalvageMovementRepair(
+  world: World,
+  action: Action,
+  candidate: ConsequenceResult,
+  semantics: ActionSemantics,
+): ConsequenceResult | null {
+  if (!semantics.moves) return null;
+  const suggestion = suggestMoveTarget(
+    world,
+    action.actorId,
+    semantics.destinationActorId,
+    semantics.destinationObjectId,
+  );
+  if (!suggestion) return null;
+  const repaired: ConsequenceResult = structuredClone(candidate);
+  const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
+  if (existing) {
+    existing.x = suggestion.x;
+    existing.y = suggestion.y;
+  } else {
+    repaired.actorPatches.push({
+      actorId: action.actorId,
+      x: suggestion.x,
+      y: suggestion.y,
+    });
+  }
+  if (repaired.effects) {
+    repaired.effects.moved = true;
+    if (semantics.destinationActorId !== undefined) {
+      repaired.effects.destinationActorId = semantics.destinationActorId;
+    }
+    if (semantics.destinationObjectId !== undefined) {
+      repaired.effects.destinationObjectId = semantics.destinationObjectId;
+    }
+  }
+  return repaired;
+}
+
+/**
+ * Exp-3 item 6 / Phase 4: partial-apply / salvage instead of all-or-nothing fallback.
  * Ticks 3/9 showed whole good turns (valid movement + adjacency) discarded
  * for a speech nit plus a stray hallucinated patch — and 57% "Nothing
  * changes." is what actually stalls a scenario. Salvage strips patches that
  * reference nonexistent actors/objects (clear hallucinations like a `jeff`
- * patch), revalidates, and:
+ * patch), deterministically repairs a missing/invalid movement patch when
+ * the turn implies locomotion, and:
  * - returns the salvaged result when fully valid, or
  * - returns it with the remaining speech misses downgraded to warnings
  *   (movement + thoughts apply; the speech miss is logged, not fatal).
  * Anything else (physics, movement, contact, addressee, verb-coverage
- * failures) still falls back — salvage never invents positions or speech.
+ * failures) still falls back — salvage never invents speech and only
+ * accepts positions that pass the full movement gate on revalidation.
  */
 export function trySalvageConsequence(
   world: World,
@@ -129,35 +179,98 @@ export function trySalvageConsequence(
   const objectIds = new Set(world.scene.objects.map((o) => o.id));
   const strippedActor = result.actorPatches.filter((p) => !actorIds.has(p.actorId));
   const strippedObject = result.objectPatches.filter((p) => !objectIds.has(p.objectId));
+  let candidate: ConsequenceResult;
   if (strippedActor.length === 0 && strippedObject.length === 0) {
-    // Nothing salvageable to strip — but a pure speech nit on an otherwise
-    // valid turn is still worth applying with a warning.
-    const revalidation = validateConsequence(world, result, action, semantics);
-    if (revalidation.valid) return { salvaged: result, warnings: [] };
-    if (isSpeechOnlyFailure(revalidation.errors)) {
-      return { salvaged: result, warnings: revalidation.errors };
-    }
-    return null;
+    candidate = result;
+  } else {
+    candidate = {
+      ...structuredClone(result),
+      actorPatches: result.actorPatches.filter((p) => actorIds.has(p.actorId)),
+      objectPatches: result.objectPatches.filter((p) => objectIds.has(p.objectId)),
+    };
   }
-  const salvaged: ConsequenceResult = {
-    ...structuredClone(result),
-    actorPatches: result.actorPatches.filter((p) => actorIds.has(p.actorId)),
-    objectPatches: result.objectPatches.filter((p) => objectIds.has(p.objectId)),
-  };
   // Salvage preserves real effects: the acting actor must remain patched —
   // otherwise the turn's only content was hallucinated (e.g. a lone `ghost`
-  // patch) and an emptied husk is no better than the fallback.
-  if (!salvaged.actorPatches.some((p) => p.actorId === action.actorId)) {
+  // patch) and an emptied husk is no better than the fallback. The one
+  // exception is a locomotion turn whose movement can be deterministically
+  // repaired below (same repair the retry loop applies).
+  if (
+    !candidate.actorPatches.some((p) => p.actorId === action.actorId) &&
+    !semantics.moves
+  ) {
     return null;
   }
-  const revalidation = validateConsequence(world, salvaged, action, semantics);
-  if (revalidation.valid) {
-    return { salvaged, warnings: [] };
-  }
-  if (isSpeechOnlyFailure(revalidation.errors)) {
-    return { salvaged, warnings: revalidation.errors };
+  const accept = (
+    c: ConsequenceResult,
+  ): { salvaged: ConsequenceResult; warnings: string[] } | null => {
+    const revalidation = validateConsequence(world, c, action, semantics);
+    if (revalidation.valid) return { salvaged: c, warnings: [] };
+    if (isSpeechOnlyFailure(revalidation.errors)) {
+      return { salvaged: c, warnings: revalidation.errors };
+    }
+    return null;
+  };
+  const stripped = accept(candidate);
+  if (stripped) return stripped;
+  // Phase 4 "(or movement-repair them)": the turn implies locomotion but the
+  // position is missing or invalid — fill it deterministically and accept
+  // only if the full gate (or speech-only) passes on revalidation.
+  if (semantics.moves) {
+    const repaired = applySalvageMovementRepair(world, action, candidate, semantics);
+    if (repaired) {
+      const repairedOut = accept(repaired);
+      if (repairedOut) return repairedOut;
+    }
   }
   return null;
+}
+
+/** Per-turn outcome counts for long-run SLO tracking (Phase 4).
+ *
+ * Event accounting per resolveWithValidation call:
+ * - clean: exactly one `validation_passed` (first-try pass or pass after
+ *   retry / deterministic movement repair);
+ * - salvaged: one `partial_applied` (degraded-but-advancing: valid patches
+ *   kept, speech nits logged as warnings);
+ * - fallback: one `fallback_used` ("Nothing changes.").
+ * A turn emits exactly one of the three, so total = clean + salvaged +
+ * fallback. Pass `logger.store.all()` (or any entry list with `event`).
+ */
+export type TurnOutcomeSummary = {
+  clean: number;
+  salvaged: number;
+  fallback: number;
+  total: number;
+  cleanRate: number;
+  salvagedRate: number;
+  fallbackRate: number;
+  /** Degraded-but-advancing share (salvaged / total) — the Phase 4 SLO. */
+  degradedRate: number;
+};
+
+export function summarizeTurnOutcomes(
+  entries: ReadonlyArray<{ event: string }>,
+): TurnOutcomeSummary {
+  let clean = 0;
+  let salvaged = 0;
+  let fallback = 0;
+  for (const e of entries) {
+    if (e.event === "validation_passed") clean++;
+    else if (e.event === "partial_applied") salvaged++;
+    else if (e.event === "fallback_used") fallback++;
+  }
+  const total = clean + salvaged + fallback;
+  const rate = (n: number): number => (total === 0 ? 0 : n / total);
+  return {
+    clean,
+    salvaged,
+    fallback,
+    total,
+    cleanRate: rate(clean),
+    salvagedRate: rate(salvaged),
+    fallbackRate: rate(fallback),
+    degradedRate: rate(salvaged),
+  };
 }
 
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
@@ -333,7 +446,23 @@ export async function resolveWithValidation(
       }
     }
 
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${movementHint ? `\n${movementHint}` : ""}\nReturn corrected JSON only.`;
+    // Phase 4 "retry only prose": when the patches are valid and only the
+    // narrative prose fails (speech nit, possibly plus droppable
+    // hallucinated patches), say so explicitly — otherwise the retry
+    // regenerates everything and often loses the good movement it just had
+    // (ticks 3/9). This hint costs nothing when the model already retries
+    // cleanly; after retries are exhausted the salvage path below applies
+    // the same split (keep patches, warn on speech).
+    let proseHint: string | undefined;
+    if (isSpeechOnlyFailure(validation.errors)) {
+      proseHint =
+        "The patches are valid — keep every actorPatch/objectPatch exactly as-is and fix ONLY the narrative prose (preserve the action's exact wording).";
+    } else if (validation.errors.some((e) => /unknown (actor|object) id/.test(e))) {
+      proseHint =
+        "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
+    }
+
+    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
     report(deps, {
       stage: "consequence_retry",
