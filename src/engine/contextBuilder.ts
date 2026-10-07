@@ -48,6 +48,59 @@ function formatVisibleObjects(objects: SceneObject[]): string {
 const THOUGHTS_GUIDANCE =
   "Thoughts (your immediate inner reaction to the last event — HIGH PRIORITY, this guides what you do next; private, never spoken aloud, never narrated; be blunt, candid, profane/explicit when in-character)";
 
+/** Max open-question entries surfaced to proposal/selection. */
+export const MAX_OPEN_QUESTIONS = 3;
+/** Max recent own actions surfaced to the selection prompt. */
+export const MAX_RECENT_OWN_ACTIONS = 5;
+
+/**
+ * Salient pending questions addressed to `actorId` (action item 6).
+ * Scans recent history for entries containing "?" that mention the actor
+ * by name/id — or a bare "you" question from someone else — newest last.
+ * Pure helper (no LLM): the model still decides how to answer.
+ */
+export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN_QUESTIONS): string[] {
+  const actor = getActorById(world, actorId);
+  if (!actor) return [];
+  const nameLower = actor.name.toLowerCase();
+  const idLower = actor.id.toLowerCase();
+  const entries = world.history.slice(-defaultConfig.proposalHistoryLimit);
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (!entry.includes("?")) continue;
+    const lower = entry.toLowerCase();
+    const mentionsMe = lower.includes(nameLower) || lower.includes(idLower) || /\byou\b/.test(lower);
+    const mine = lower.startsWith(`${nameLower}:`) || lower.startsWith(`${idLower}:`);
+    if (mentionsMe && !mine) out.push(entry);
+  }
+  return out.slice(-limit);
+}
+
+/** Recent actions this actor already took (for the repetition guard). */
+export function getRecentOwnActions(world: World, actorId: string, limit = MAX_RECENT_OWN_ACTIONS): string[] {
+  const actor = getActorById(world, actorId);
+  if (!actor) return [];
+  const prefixName = `${actor.name}:`;
+  const prefixId = `${actor.id}:`;
+  const mine = world.history.filter((h) => h.startsWith(prefixName) || h.startsWith(prefixId));
+  return mine.slice(-limit);
+}
+
+/**
+ * Persona anchoring (action item 10): restate who this actor is — and who
+ * they are NOT — so a recruiter never adopts the new hire's developer
+ * identity. Selection and consequence both embed this line.
+ */
+export function buildIdentityAnchor(world: World, actorId: string): string {
+  const actor = getActorById(world, actorId);
+  if (!actor) return `You are ${actorId}.`;
+  const others = world.actors
+    .filter((a) => a.id !== actorId)
+    .map((a) => `${a.name} (${a.id})`);
+  const notLine = others.length > 0 ? ` You are NOT ${others.join(", ")} — never act as them, never use their role, goal, or skills.` : "";
+  return `IDENTITY: You are ${actor.name} (${actor.id}). Role: ${actor.persona} Current goal: ${actor.goal}.${notLine} Your next action must fit YOUR role and goal above.`;
+}
+
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
 // private memories, beliefs, hidden goals, or unperceived events.
@@ -69,6 +122,11 @@ export function buildProposalContext(
   const historyLimit = resolveHistoryLimit(opts);
   const maxSuggestions = resolveMaxSuggestions(opts);
   const recentHistory = world.history.slice(-historyLimit).join("\n") || "(no history yet)";
+  const openQuestions = getOpenQuestions(world, actorId);
+  const questionsLine =
+    openQuestions.length > 0
+      ? `Open questions addressed to you (answer these before starting anything new):\n${openQuestions.map((q) => `- ${q}`).join("\n")}`
+      : "Open questions addressed to you: (none)";
 
   return [
     "Current Actor",
@@ -78,6 +136,8 @@ export function buildProposalContext(
     `State: ${actor.state}`,
     `Goal: ${actor.goal}`,
     `${THOUGHTS_GUIDANCE}: ${actor.thoughts || "(none yet)"}`,
+    "",
+    questionsLine,
     "",
     "Memories",
     "",
@@ -97,6 +157,7 @@ export function buildProposalContext(
     `Tick: ${world.tick}`,
     "",
     "Physical constraints: actors are points; non-passable objects block movement; movement must be reachable; stay inside scene bounds.",
+    "If you move toward someone/something, you must END the turn strictly closer to them than you started (no teleports, no wrong-direction moves). Physical contact (handshake, handing coffee) requires ending ADJACENT to them.",
     "",
     "Task",
     "",
@@ -175,8 +236,34 @@ export function buildSelectionContext(
     suggestions.length > 0
       ? suggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")
       : "(no candidates)";
+  const openQuestions = getOpenQuestions(world, actorId);
+  const recentOwn = getRecentOwnActions(world, actorId);
+  const questionsBlock =
+    openQuestions.length > 0
+      ? [
+          "",
+          "Open questions addressed to you (action item: answer before anything new)",
+          "",
+          ...openQuestions.map((q) => `- ${q}`),
+          "If someone asked you a direct question above, your chosen action should ANSWER it (with words, movement, or both) instead of repeating a greeting or going back to work.",
+        ].join("\n")
+      : "";
+  const repetitionBlock =
+    recentOwn.length > 0
+      ? [
+          "",
+          "Your recent actions (do NOT repeat yourself)",
+          "",
+          ...recentOwn.map((a) => `- ${a}`),
+          "Do not pick or invent an action you already took above unless the situation clearly changed. Greeting, welcoming, or walking over to the same person twice in a row is a repeat — choose something that moves the scene forward.",
+        ].join("\n")
+      : "";
   return [
     fullContext,
+    "",
+    buildIdentityAnchor(world, actorId),
+    questionsBlock,
+    repetitionBlock,
     "",
     "Candidate Actions",
     "",
@@ -186,6 +273,7 @@ export function buildSelectionContext(
     "",
     "Choose the action this actor actually performs.",
     "You may choose a candidate action or produce a different action if it better fits the actor and situation.",
+    "Prefer answering an open question above over repeating a recent action above.",
     "Return the action text alone, without any leading candidate number (never '1. ...' or '3) ...').",
     "Return JSON only.",
   ].join("\n");
@@ -223,12 +311,20 @@ export function buildConsequenceContext(
     "",
     `Acting actor position: ${actor ? `${actor.name} (${actor.id}) at (${actor.x}, ${actor.y})` : "(unknown)"}`,
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
+    `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "If the action says to move toward/close to/next to/beside someone, the new x,y MUST be strictly closer to that actor than the current position (Euclidean distance). Example: an actor at (1,10) moving toward someone at (8,8) could go to (5,8) — never inside a desk rect, stand NEXT to it.",
+    "Same rule for NAMED LANDMARKS: if the action names a desk, the coffee machine, the door, or any object above ('my desk', 'west-side desk', 'NW-corner coffee machine'), the new x,y MUST be strictly closer to that object's rectangle than the current position. Never teleport across the room to an unrelated area; never move AWAY from the named target.",
+    "PHYSICAL CONTACT RULE: if the action shakes hands, hugs, high-fives, pats, kisses, or hands/passes/gives something to someone, the acting actor MUST end ADJACENT to that person (within 2.5 cells Euclidean). A handshake across the room is invalid — walk over first, then touch.",
+    "IDENTITY RULE: " + (actor ? `${buildIdentityAnchor(world, action.actorId)} Act out YOUR role only.` : "Act out the acting actor's role only."),
+    "PRONOUN RULE: preserve every actor's pronouns exactly as used in their persona and the world above — never flip he/him to she/her or vice versa. If the scenario says Dana is he/him, every verb and pronoun for Dana stays he/him.",
+    "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence.",
     "",
     `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
       perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"
     }`,
     "Actors NOT listed here perceived nothing — do NOT patch them.",
+    "ADDRESSEE RULE: if the action speaks to, asks, greets, or names one of the perceivers above (e.g. 'ask Tanya for my first task'), that addressee MUST get an actorPatch (thoughts at minimum) — an event that leaves no trace on the person spoken to is invalid.",
+    "EFFECTS DECLARATION (required, machine-readable): set effects.moved (own whole-body locomotion only), effects.destinationActorId (exact roster id moved toward, when the action names a person), effects.destinationObjectId (exact landmark id moved toward, when the action names a desk/machine/door), effects.spoke + effects.quotedSpeech (exact uttered segments), effects.addresseeActorId (exact roster id spoken to), effects.contactActorId (exact roster id touched or handed something).",
     "",
     "Physical Constraints",
     "",

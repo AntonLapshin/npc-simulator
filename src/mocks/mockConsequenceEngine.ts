@@ -68,6 +68,15 @@ export class MockConsequenceEngine implements ConsequenceEngine {
           ...(semantics.destinationActorId !== undefined
             ? { destinationActorId: semantics.destinationActorId }
             : {}),
+          ...(semantics.destinationObjectId !== undefined
+            ? { destinationObjectId: semantics.destinationObjectId }
+            : {}),
+          ...(semantics.addresseeActorId !== undefined
+            ? { addresseeActorId: semantics.addresseeActorId }
+            : {}),
+          ...(semantics.contactActorId !== undefined
+            ? { contactActorId: semantics.contactActorId }
+            : {}),
         };
       }
       const rawResponse = JSON.stringify(result);

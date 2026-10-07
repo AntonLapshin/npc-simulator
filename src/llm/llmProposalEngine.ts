@@ -26,7 +26,29 @@ export type LlmProposalEngineOptions = {
   historyLimit?: number;
   /** Max suggestions requested. Defaults to maxProposalSuggestions (10). */
   maxSuggestions?: number;
+  /** Min usable suggestions per turn; fewer triggers a format retry. Defaults to 2. */
+  minSuggestions?: number;
 };
+
+/** Minimum suggestions that count as a usable option set (tick 17 returned 1). */
+export const MIN_PROPOSAL_SUGGESTIONS = 2;
+
+function normalizeSuggestions(suggestions: unknown): string[] {
+  if (!Array.isArray(suggestions)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of suggestions) {
+    if (typeof s !== "string") continue;
+    // Strip echoed numbering the model sometimes adds ("3. Do X").
+    const cleaned = s.replace(/^\s*\d+\s*[.)]\s*/, "").trim();
+    if (cleaned.length === 0) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
 
 export class LLMProposalEngine implements ProposalEngine {
   constructor(
@@ -68,6 +90,17 @@ export class LLMProposalEngine implements ProposalEngine {
       input: { actorId },
       maxRetries,
       schema: proposalResultSchema,
+      extraCheck: (value) => {
+        const cleaned = normalizeSuggestions(value.suggestions);
+        if (cleaned.length === 0) return "no usable suggestions";
+        const min = this.options.minSuggestions ?? MIN_PROPOSAL_SUGGESTIONS;
+        if (cleaned.length < min)
+          return `only ${cleaned.length} usable suggestion(s), need at least ${min} — generate a full option set`;
+        return undefined;
+      },
+      repairHint:
+        "suggestions must be an array of at least 2 distinct non-empty action sentences (aim for the requested max); " +
+        "no numbering prefixes, no empty strings, no duplicates.",
     });
 
     if (!result.ok) {
@@ -102,6 +135,10 @@ export class LLMProposalEngine implements ProposalEngine {
       output: result.value,
       durationMs: Date.now() - startedAt,
     });
-    return result.value;
+    // Normalize before returning: strip numbering, drop empties/dupes,
+    // truncate to the requested max so callers always get a clean set.
+    const max = this.options.maxSuggestions ?? 10;
+    const cleaned = normalizeSuggestions(result.value.suggestions).slice(0, Math.max(1, max));
+    return { ...result.value, suggestions: cleaned };
   }
 }

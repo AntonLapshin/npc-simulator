@@ -160,6 +160,12 @@ export type ConsequenceEffects = {
   quotedSpeech?: string[];
   /** Resolved movement-target actor id, when the action names one. */
   destinationActorId?: string;
+  /** Resolved movement-target object id, when the action names a landmark. */
+  destinationObjectId?: string;
+  /** Resolved speech addressee actor id, when the action speaks to someone. */
+  addresseeActorId?: string;
+  /** Resolved physical-contact target actor id (handshake, handing coffee...). */
+  contactActorId?: string;
 };
 
 /**
@@ -172,10 +178,16 @@ export type ActionSemantics = {
   moves: boolean;
   /** Named movement target, resolved to an actor id (via id comparison). */
   destinationActorId?: string;
+  /** Named movement landmark, resolved to an object id. */
+  destinationObjectId?: string;
   /** Uttered words / explicit speech intent? */
   speaks: boolean;
   /** Canonical uttered segments (ground truth for speech preservation). */
   quotedSpeech: string[];
+  /** Actor spoken to, resolved to an actor id (direct addressee). */
+  addresseeActorId?: string;
+  /** Physical-contact target (handshake, handing coffee...), resolved to id. */
+  contactActorId?: string;
 };
 
 export type EngineConfig = {

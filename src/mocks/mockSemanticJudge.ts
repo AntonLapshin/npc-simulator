@@ -94,6 +94,48 @@ function mockFindMentionedActorId(
   return undefined;
 }
 
+/** Mock-only landmark resolution: object whose id or name appears in the text. */
+function mockFindMentionedObjectId(world: World, actionText: string): string | undefined {
+  const lowered = actionText.toLowerCase();
+  for (const o of world.scene.objects) {
+    if (o.id.toLowerCase().length >= 3 && lowered.includes(o.id.toLowerCase())) return o.id;
+    if (o.name.toLowerCase().length >= 3 && lowered.includes(o.name.toLowerCase())) return o.id;
+  }
+  // Generic landmark words map to the first matching object.
+  const generic: Array<[RegExp, RegExp]> = [
+    [/\bcoffee\b/i, /coffee/i],
+    [/\bdesk\b/i, /desk/i],
+    [/\bdoor\b/i, /door/i],
+    [/\bwall\b/i, /wall/i],
+    [/\blaptop\b/i, /laptop/i],
+  ];
+  for (const [wordRe, objRe] of generic) {
+    if (wordRe.test(actionText)) {
+      const found =
+        world.scene.objects.find((o) => objRe.test(o.name)) ??
+        world.scene.objects.find((o) => objRe.test(o.id));
+      if (found) return found.id;
+    }
+  }
+  return undefined;
+}
+
+/** Mock-only physical-contact heuristic (handshake, hugs, handing things over). */
+function mockFindContactActorId(
+  world: World,
+  actingActorId: string,
+  actionText: string,
+): string | undefined {
+  if (
+    !/\b(handshake|shake\s+.*hands?|shake\s+.*hand|hug|embrace|kiss|high[\s-]?five|fist[\s-]?bump|\bpat\b|slap|punch|handing|hands?\s+(him|her|them|over|.*coffee|.*cup)|give\s+.*(coffee|cup)|pass\s+.*(coffee|cup))\b/i.test(
+      actionText,
+    )
+  ) {
+    return undefined;
+  }
+  return mockFindMentionedActorId(world, actingActorId, actionText);
+}
+
 /** Synchronous mock classification shared by the judge and effect synthesis. */
 export function mockClassifyAction(world: World, action: Action): ActionSemantics {
   const moves = mockLooksLikeMovement(action.text);
@@ -102,11 +144,21 @@ export function mockClassifyAction(world: World, action: Action): ActionSemantic
   const destinationActorId = moves
     ? mockFindMentionedActorId(world, action.actorId, action.text)
     : undefined;
+  const destinationObjectId = moves
+    ? mockFindMentionedObjectId(world, action.text)
+    : undefined;
+  const addresseeActorId = speaks
+    ? mockFindMentionedActorId(world, action.actorId, action.text)
+    : undefined;
+  const contactActorId = mockFindContactActorId(world, action.actorId, action.text);
   return {
     moves,
     ...(destinationActorId !== undefined ? { destinationActorId } : {}),
+    ...(destinationObjectId !== undefined ? { destinationObjectId } : {}),
     speaks,
     quotedSpeech: quotes,
+    ...(addresseeActorId !== undefined ? { addresseeActorId } : {}),
+    ...(contactActorId !== undefined ? { contactActorId } : {}),
   };
 }
 

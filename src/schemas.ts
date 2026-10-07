@@ -280,8 +280,11 @@ export const consequenceResultSchema: z.ZodType<ConsequenceResult> = z.preproces
 export const actionSemanticsSchema: z.ZodType<ActionSemantics> = z.object({
   moves: z.boolean(),
   destinationActorId: z.string().min(1).optional(),
+  destinationObjectId: z.string().min(1).optional(),
   speaks: z.boolean(),
   quotedSpeech: z.array(z.string()),
+  addresseeActorId: z.string().min(1).optional(),
+  contactActorId: z.string().min(1).optional(),
 }) as z.ZodType<ActionSemantics>;
 
 export const consequenceEffectsSchema: z.ZodType<ConsequenceEffects> = z.object({
@@ -289,6 +292,9 @@ export const consequenceEffectsSchema: z.ZodType<ConsequenceEffects> = z.object(
   spoke: z.boolean(),
   quotedSpeech: z.array(z.string()).optional(),
   destinationActorId: z.string().min(1).optional(),
+  destinationObjectId: z.string().min(1).optional(),
+  addresseeActorId: z.string().min(1).optional(),
+  contactActorId: z.string().min(1).optional(),
 }) as z.ZodType<ConsequenceEffects>;
 
 export const engineConfigSchema = z

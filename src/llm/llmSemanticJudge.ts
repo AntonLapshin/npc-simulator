@@ -19,11 +19,15 @@ export function buildSemanticJudgePrompt(world: World, action: Action): string {
   const roster = world.actors
     .map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`)
     .join(" | ");
+  const landmarks = world.scene.objects
+    .map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`)
+    .join(" | ");
   return [
     "Classify what the action sentence MEANS. Return JSON only.",
     "",
     `Acting actor: ${action.actorId}${actor ? ` (${actor.name}) at (${actor.x}, ${actor.y})` : ""}`,
     `Roster: ${roster || "(none)"}`,
+    `Landmarks: ${landmarks || "(none)"}`,
     `Action text: ${action.text}`,
     "",
     "FIELD RULES:",
@@ -38,12 +42,21 @@ export function buildSemanticJudgePrompt(world: World, action: Action): string {
     "destinationActorId: the roster id the acting actor moves toward, ONLY when the action names such an",
     "actor (by name, nickname, or description you can resolve — use pronouns and context); omit otherwise.",
     "It MUST be an exact id from the roster above.",
+    "destinationObjectId: the landmark id the acting actor moves toward, ONLY when the action names a",
+    "desk, coffee machine, door, chair, or other object above (including 'my desk' = that actor's own desk);",
+    "omit otherwise. It MUST be an exact object id from the landmarks above.",
     "speaks=true when the acting actor utters words or the action explicitly intends speech",
     "(says, murmurs, greets, introduces, asks, shouts, whispers, or quoted dialogue).",
     "quotedSpeech: the canonical uttered segments from the action text (exact quoted strings when the",
     "action quotes them; otherwise the spoken words the action states). Empty array when nothing is said.",
+    "addresseeActorId: the roster id SPOKEN TO, when the action addresses, asks, greets, or names another",
+    "actor (including 'ask Tanya', 'tell him', 'greet the room' has no single addressee — omit).",
+    "It MUST be an exact id from the roster above.",
+    "contactActorId: the roster id touched or handed something (handshake, hug, kiss, high-five, fist bump,",
+    "pat on the shoulder/back, handing coffee/a cup, giving an object). Omit when no touch/handover occurs.",
+    "It MUST be an exact id from the roster above.",
     "",
-    'Output Schema: {"moves": boolean, "destinationActorId"?: string, "speaks": boolean, "quotedSpeech": string[]}',
+    'Output Schema: {"moves": boolean, "destinationActorId"?: string, "destinationObjectId"?: string, "speaks": boolean, "quotedSpeech": string[], "addresseeActorId"?: string, "contactActorId"?: string}',
     "Return COMPACT single-line JSON (no pretty-print, no markdown).",
   ].join("\n");
 }
@@ -65,6 +78,7 @@ export class LLMSemanticJudge implements SemanticJudge {
     const maxRetries = this.options.maxRetries ?? 3;
     const userPrompt = buildSemanticJudgePrompt(world, action);
     const rosterIds = new Set(world.actors.map((a) => a.id));
+    const objectIds = new Set(world.scene.objects.map((o) => o.id));
 
     const result = await completeJson({
       logger: this.logger,
@@ -78,12 +92,20 @@ export class LLMSemanticJudge implements SemanticJudge {
       input: { action },
       maxRetries,
       schema: actionSemanticsSchema,
-      extraCheck: (value) =>
-        value.destinationActorId !== undefined && !rosterIds.has(value.destinationActorId)
-          ? `unknown destinationActorId: ${value.destinationActorId}`
-          : undefined,
+      extraCheck: (value) => {
+        if (value.destinationActorId !== undefined && !rosterIds.has(value.destinationActorId))
+          return `unknown destinationActorId: ${value.destinationActorId}`;
+        if (value.destinationObjectId !== undefined && !objectIds.has(value.destinationObjectId))
+          return `unknown destinationObjectId: ${value.destinationObjectId}`;
+        if (value.addresseeActorId !== undefined && !rosterIds.has(value.addresseeActorId))
+          return `unknown addresseeActorId: ${value.addresseeActorId}`;
+        if (value.contactActorId !== undefined && !rosterIds.has(value.contactActorId))
+          return `unknown contactActorId: ${value.contactActorId}`;
+        return undefined;
+      },
       repairHint:
-        "destinationActorId must be an exact actor id from the roster (or omit it); " +
+        "destinationActorId/addresseeActorId/contactActorId must be exact actor ids from the roster (or omit); " +
+        "destinationObjectId must be an exact object id from the landmarks (or omit); " +
         "moves/speaks are booleans; quotedSpeech is an array of strings.",
     });
 

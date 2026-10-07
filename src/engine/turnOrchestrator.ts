@@ -198,15 +198,18 @@ export async function resolveWithValidation(
         world,
         action.actorId,
         resolved.semantics.destinationActorId,
+        resolved.semantics.destinationObjectId,
       );
       if (suggestion) {
         const dest = resolved.semantics.destinationActorId
           ? ` strictly closer to ${resolved.semantics.destinationActorId}`
-          : "";
+          : resolved.semantics.destinationObjectId
+            ? ` strictly closer to ${resolved.semantics.destinationObjectId}`
+            : "";
         movementHint =
           `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
           ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
-          `Set effects.moved=true${resolved.semantics.destinationActorId ? ` and effects.destinationActorId="${resolved.semantics.destinationActorId}"` : ""}.`;
+          `Set effects.moved=true${resolved.semantics.destinationActorId ? ` and effects.destinationActorId="${resolved.semantics.destinationActorId}"` : ""}${resolved.semantics.destinationObjectId ? ` and effects.destinationObjectId="${resolved.semantics.destinationObjectId}"` : ""}.`;
         if (isMovementOnlyFailure(validation.errors)) {
           const repaired: ConsequenceResult = structuredClone(result);
           const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
@@ -224,6 +227,9 @@ export async function resolveWithValidation(
             repaired.effects.moved = true;
             if (resolved.semantics.destinationActorId !== undefined) {
               repaired.effects.destinationActorId = resolved.semantics.destinationActorId;
+            }
+            if (resolved.semantics.destinationObjectId !== undefined) {
+              repaired.effects.destinationObjectId = resolved.semantics.destinationObjectId;
             }
           }
           // Re-validate against the same judged semantics (effects may now

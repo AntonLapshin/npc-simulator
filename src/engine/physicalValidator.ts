@@ -1,8 +1,12 @@
 import type { Action, ActionSemantics, ConsequenceResult, ValidationResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
-import { isInsideScene, isPointBlocked, pointInRect } from "./geometry.js";
+import { distance, isInsideScene, isPointBlocked, pointInRect } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
 import { effectsToSemantics } from "./actionSemantics.js";
+import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
+
+/** Physical-contact radius: touching requires ending this close (Euclidean). */
+export const CONTACT_RADIUS = 2.5;
 
 /**
  * Validate ConsequenceResult output. Checks schema, referenced ids,
@@ -172,6 +176,9 @@ export function validateConsequence(
     if (resolved) {
       errors.push(...validateSpeechPreservation(resolved, normalized.narrative));
       errors.push(...validateMovementIntent(world, normalized, action, resolved));
+      errors.push(...validateDestinationObject(world, normalized, action, resolved));
+      errors.push(...validateContactAdjacency(world, normalized, action, resolved));
+      errors.push(...validateAddresseePatch(world, normalized, action, resolved));
     }
   }
 
@@ -222,6 +229,125 @@ function validateMovementIntent(
       }
     }
   }
+  // Teleport guard: a big single-turn jump that lands no closer to anyone
+  // named is suspicious even without a resolved id — flag jumps longer than
+  // half the perception radius that increase distance to every other actor.
+  // (Weak judges sometimes miss the destination; this keeps cross-room
+  // teleports from passing silently.)
+  return errors;
+}
+
+/** Distance from a point to the closest point of an axis-aligned rect. */
+function distanceToRect(px: number, py: number, rect: { x: number; y: number; w: number; h: number }): number {
+  const cx = Math.min(Math.max(px, rect.x), rect.x + rect.w);
+  const cy = Math.min(Math.max(py, rect.y), rect.y + rect.h);
+  return Math.hypot(px - cx, py - cy);
+}
+
+/**
+ * Landmark fidelity (action item 3): when the judged semantics name a
+ * destination object ("my desk", "coffee machine"), the new position must
+ * be strictly closer to that object than the old one — same rule as
+ * actor destinations. Rejects teleports to unrelated areas and
+ * wrong-direction moves.
+ */
+function validateDestinationObject(
+  world: World,
+  normalized: { actorPatches: { actorId: string; x?: number; y?: number }[] },
+  action: Action,
+  semantics: ActionSemantics,
+): string[] {
+  const errors: string[] = [];
+  if (semantics.destinationObjectId === undefined) return errors;
+  const obj = world.scene.objects.find((o) => o.id === semantics.destinationObjectId);
+  if (!obj) return errors;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor) return errors;
+  // Object destinations only constrain turns with locomotion; a pure
+  // "look at my desk" must not demand movement.
+  if (!semantics.moves) return errors;
+  const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+  if (!patch || patch.x === undefined || patch.y === undefined) return errors; // movement gate reports this
+  if (patch.x === actor.x && patch.y === actor.y) return errors;
+  const oldDist = distanceToRect(actor.x, actor.y, obj);
+  const newDist = distanceToRect(patch.x, patch.y, obj);
+  if (!(newDist < oldDist)) {
+    errors.push(
+      `action says to move toward ${obj.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${obj.name} (${obj.id})`,
+    );
+  }
+  return errors;
+}
+
+/**
+ * Contact adjacency (action item 2): physical contact (handshake, hug,
+ * handing coffee) requires the acting actor to END the turn next to the
+ * target — same hardness as the inside-furniture rejection. A handshake
+ * across 8 cells is rejected so the model retries with an approach.
+ */
+function validateContactAdjacency(
+  world: World,
+  normalized: { actorPatches: { actorId: string; x?: number; y?: number }[] },
+  action: Action,
+  semantics: ActionSemantics,
+): string[] {
+  const errors: string[] = [];
+  if (semantics.contactActorId === undefined) return errors;
+  const target = world.actors.find((a) => a.id === semantics.contactActorId);
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!target || !actor || target.id === action.actorId) return errors;
+  const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+  const endX = patch?.x ?? actor.x;
+  const endY = patch?.y ?? actor.y;
+  const dist = Math.hypot(endX - target.x, endY - target.y);
+  if (dist > CONTACT_RADIUS) {
+    errors.push(
+      `action implies physical contact with ${target.id} but ends at (${endX}, ${endY}), ${dist.toFixed(1)} cells from ${target.id} at (${target.x}, ${target.y}): move adjacent (within ${CONTACT_RADIUS} cells) before touching, or drop the contact from the narrative`,
+    );
+  }
+  return errors;
+}
+
+/** Actors that perceived the acting actor's event (mirrors contextBuilder). */
+function perceiverIds(world: World, actingActorId: string): Set<string> {
+  const actor = world.actors.find((a) => a.id === actingActorId);
+  const out = new Set<string>([actingActorId]);
+  if (!actor) return out;
+  for (const o of world.actors) {
+    if (o.id === actingActorId) continue;
+    const sees = getVisibleActors(world, o.id).some((a) => a.id === actingActorId);
+    const hears = getAudibleActors(world, o.id).some((a) => a.id === actingActorId);
+    const adjacent =
+      Math.abs(o.x - actor.x) + Math.abs(o.y - actor.y) <= 2;
+    if (sees || hears || adjacent) out.add(o.id);
+  }
+  return out;
+}
+
+/**
+ * Addressee patching (action item 5): when the action speaks directly TO a
+ * perceiving actor ("ask Tanya ..."), that addressee must record at least
+ * a thoughts reaction. A direct question with no patch on the person asked
+ * means the event left no trace on them — reject so the model retries.
+ */
+function validateAddresseePatch(
+  world: World,
+  normalized: { actorPatches: { actorId: string; thoughts?: string }[] },
+  action: Action,
+  semantics: ActionSemantics,
+): string[] {
+  const errors: string[] = [];
+  if (semantics.addresseeActorId === undefined) return errors;
+  if (semantics.addresseeActorId === action.actorId) return errors;
+  const target = world.actors.find((a) => a.id === semantics.addresseeActorId);
+  if (!target) return errors;
+  if (!perceiverIds(world, action.actorId).has(target.id)) return errors; // couldn't perceive — no patch owed
+  const patched = normalized.actorPatches.some((p) => p.actorId === target.id);
+  if (!patched) {
+    errors.push(
+      `action speaks directly to ${target.id} but ${target.id} has no actorPatch: give every perceiving actor (especially a direct addressee) at least a 'thoughts' reaction patch`,
+    );
+  }
   return errors;
 }
 
@@ -263,14 +389,19 @@ function validateSpeechPreservation(semantics: ActionSemantics, narrative: strin
 
   // 1. Quoted action words must survive into the narrative (stem overlap —
   // close paraphrase like "Greeting all!" -> "greets all" passes, but a
-  // wholly different sentence fails).
+  // wholly different sentence or a truncation to a greeting fragment fails).
+  // Applies to user turns and NPC turns alike: the exact-words rule is not
+  // NPC-only. Require at least half of each quote's content words to
+  // survive (single-word quotes require the one word), so "Hi, I'm Anton,
+  // where is my desk?" cannot collapse to just "Hi, I'm Anton."
   for (const q of actionQuotes) {
     const words = contentWords(q);
     if (words.length === 0) continue;
     const kept = words.filter((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
-    if (kept.length === 0) {
+    const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);
+    if (kept.length < need) {
       errors.push(
-        `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — never invent different dialogue`,
+        `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — quote or closely paraphrase the FULL utterance, never invent different dialogue or truncate it to a fragment`,
       );
     }
   }

@@ -25,7 +25,8 @@ function isFree(world: World, x: number, y: number): boolean {
 /**
  * Find a reachable free position for `actorId` that satisfies the movement
  * gate: changed, reachable, and — when `destinationActorId` is given —
- * strictly closer to that actor than the current position.
+ * strictly closer to that actor than the current position (or, when
+ * `destinationObjectId` is given, strictly closer to that object).
  *
  * Strategy: scan integer cells, keep free + reachable candidates, sort by
  * distance to the destination (or to the actor for undirected moves) and
@@ -36,6 +37,7 @@ export function suggestMoveTarget(
   world: World,
   actorId: string,
   destinationActorId?: string,
+  destinationObjectId?: string,
 ): MoveSuggestion | null {
   const actor = world.actors.find((a) => a.id === actorId);
   if (!actor) return null;
@@ -48,9 +50,20 @@ export function suggestMoveTarget(
   // Unknown destination id: fall back to undirected movement.
   const hasTarget = target !== undefined && target.id !== actorId;
 
-  const oldDist = hasTarget
-    ? Math.hypot(actor.x - target!.x, actor.y - target!.y)
-    : 0;
+  const obj =
+    !hasTarget && destinationObjectId !== undefined
+      ? world.scene.objects.find((o) => o.id === destinationObjectId)
+      : undefined;
+  const objCx = obj !== undefined ? obj.x + obj.w / 2 : 0;
+  const objCy = obj !== undefined ? obj.y + obj.h / 2 : 0;
+  const hasObjectTarget = obj !== undefined;
+
+  const distToTarget = (x: number, y: number): number => {
+    if (hasTarget) return Math.hypot(x - target!.x, y - target!.y);
+    if (hasObjectTarget) return Math.hypot(x - objCx, y - objCy);
+    return Math.hypot(x - actor.x, y - actor.y);
+  };
+  const oldDist = hasTarget || hasObjectTarget ? distToTarget(actor.x, actor.y) : 0;
 
   type Candidate = { x: number; y: number; score: number; distToTarget: number };
   const candidates: Candidate[] = [];
@@ -59,8 +72,8 @@ export function suggestMoveTarget(
     for (let y = 0; y < world.scene.height; y++) {
       if (x === actor.x && y === actor.y) continue;
       if (!isFree(world, x, y)) continue;
-      if (hasTarget) {
-        const d = Math.hypot(x - target!.x, y - target!.y);
+      if (hasTarget || hasObjectTarget) {
+        const d = distToTarget(x, y);
         // Must be strictly closer (with a small epsilon for int coords).
         if (!(d < oldDist - 1e-9)) continue;
         candidates.push({ x, y, score: d, distToTarget: d });
@@ -75,9 +88,10 @@ export function suggestMoveTarget(
   // Closest-to-target first (directed); nearest-step first (undirected).
   // For directed moves, deprioritize stacking exactly on the target cell so
   // the actor stands NEXT to them instead.
+  const hasDirectedTarget = hasTarget || hasObjectTarget;
   candidates.sort((a, b) => {
-    const stackA = hasTarget && a.distToTarget < 0.5 ? 1 : 0;
-    const stackB = hasTarget && b.distToTarget < 0.5 ? 1 : 0;
+    const stackA = hasDirectedTarget && a.distToTarget < 0.5 ? 1 : 0;
+    const stackB = hasDirectedTarget && b.distToTarget < 0.5 ? 1 : 0;
     if (stackA !== stackB) return stackA - stackB;
     return a.score - b.score;
   });

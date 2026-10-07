@@ -224,13 +224,24 @@ export function renderTurnStory(
   }
 
   // 4. Consequence: why + exact changes + affected/unaffected.
-  const consequenceDone = findEntry(tickEntries, "consequence", "consequence_completed");
+  // Shows the ACCEPTED result: the last consequence_completed per tick, or
+  // the post-repair payload when deterministic movement repair fired. Older
+  // attempts were rejected by the validator — rendering the first attempt
+  // misled readers into analyzing coordinates the world never applied.
+  const consequenceAll = findAll(tickEntries, "consequence", "consequence_completed");
+  const consequenceDone = consequenceAll.length > 0 ? consequenceAll[consequenceAll.length - 1] : undefined;
   const consequenceFails = findAll(tickEntries, "consequence", "consequence_failed");
+  const movementRepaired = findEntry(tickEntries, "turn", "movement_repaired");
+  const repairedOutput = asRecord(movementRepaired?.output) as { repaired?: unknown } | undefined;
+  const repairedResult = asRecord(repairedOutput?.["repaired"]) as unknown as ConsequenceResult | undefined;
+  const attemptsShown = consequenceAll.length > 1 ? ` (attempt ${consequenceAll.length} of ${consequenceAll.length} shown; earlier attempts rejected)` : "";
+  const repairedMarker = movementRepaired ? " [movement repaired: coordinates filled deterministically]" : "";
   if (consequenceDone) {
-    const out = (asRecord(consequenceDone.output) ?? asRecord(consequenceDone.parsedResponse)) as unknown as
+    const rawOut = (asRecord(consequenceDone.output) ?? asRecord(consequenceDone.parsedResponse)) as unknown as
       | ConsequenceResult
       | undefined;
-    lines.push(ok(`consequence: narrative "${flat(out?.narrative ?? "", 200)}"`));
+    const out = repairedResult ?? rawOut;
+    lines.push(ok(`consequence: narrative "${flat(out?.narrative ?? "", 200)}"${attemptsShown}${repairedMarker}`));
     const why = typeof consequenceDone.reasoning === "string" ? consequenceDone.reasoning : out?.reasoning;
     lines.push(ok(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`));
     const actorPatches = Array.isArray(out?.actorPatches) ? out.actorPatches : [];

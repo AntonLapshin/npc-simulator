@@ -21,8 +21,11 @@ export function effectsToSemantics(result: ConsequenceResult): ActionSemantics |
   return {
     moves: fx.moved,
     ...(fx.destinationActorId !== undefined ? { destinationActorId: fx.destinationActorId } : {}),
+    ...(fx.destinationObjectId !== undefined ? { destinationObjectId: fx.destinationObjectId } : {}),
     speaks: fx.spoke,
     quotedSpeech: fx.quotedSpeech ?? [],
+    ...(fx.addresseeActorId !== undefined ? { addresseeActorId: fx.addresseeActorId } : {}),
+    ...(fx.contactActorId !== undefined ? { contactActorId: fx.contactActorId } : {}),
   };
 }
 
