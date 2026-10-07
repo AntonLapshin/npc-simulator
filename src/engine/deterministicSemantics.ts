@@ -204,10 +204,13 @@ function objectKindScore(
     // Walk targets prefer furniture (desks, machines, chairs) over loose
     // props over signs over fixtures. Signs rank after furniture even when
     // their name contains a furniture word ("Anton's desk sign" is a label
-    // on a desk, not a place to stand).
+    // on a desk, not a place to stand). Props are checked BEFORE furniture:
+    // a "Desk lamp" contains the word "desk" but its head noun is a loose
+    // prop, not a place to stand (Exp-5 tick 15: anton_lamp won over
+    // anton_desk on proximity tiebreak because both scored as furniture).
     if (isSign) return 2;
-    if (isFurniture && !isFixture) return 0;
     if (isProp) return 1;
+    if (isFurniture && !isFixture) return 0;
     if (isFixture) return 3;
     return 1;
   }
@@ -295,54 +298,81 @@ export function resolveDestinationObjectId(
   const verbRe = new RegExp(`\\b(?:${LOCOMOTION_VERBS})\\w*\\b`, "i");
   const towardRe = /\btoward[s]?\b|\b(?:over to|up to|next to|beside|behind)\b/i;
   const grabRe = /\b(grab|grabs|pick(?:s|ed|ing)?\s+up|pour|pours|fill|fills|brew|open|opens|boot|hold|holds|holding|carry|carries|set\s+up|use|uses|using)\b/i;
+  // Exp-5 tick 18: the walk/grab mode is per-CLAUSE, not per-action. "Head
+  // toward the west-side desks to set up the laptop" carries both a directed
+  // walk ("head toward … desks") and a grab verb ("set up … laptop") — the
+  // whole-action grab mode resolved the *walk target* to anton_laptop (a
+  // prop) and the good walk then failed "not closer to the laptop". A clause
+  // with directed-walk tokens (locomotion verb or toward-phrase) always
+  // ranks as a walk target; grab mode applies only to clauses without one
+  // ("open the laptop", "pour a coffee").
+  const clauseMode = (clause: string): "walk" | "grab" =>
+    verbRe.test(clause) || towardRe.test(clause) ? "walk" : "grab";
   const mode: "walk" | "grab" = grabRe.test(actionText) ? "grab" : "walk";
   // Exp-4 tick 15: "the desk with the ANTON sign" names a sign, but the
   // walk target is the furniture. A clause whose only hits are signs while
   // naming furniture falls through to ranked generic resolution.
-  const furnitureWordRe = /\b(desk|table|chair|sofa|machine)\b/i;
+  const furnitureWordRe = /\b(desks?|tables?|chairs?|sofas?|machines?)\b/i;
+  // Exp-5 tick 18: plural-tolerant object mention ("head toward the
+  // west-side desks" must hit the desks, not fall through to the laptop).
+  const mentionsObjectVariant = (clause: string, variant: string): boolean => {
+    if (mentionsVariant(clause, variant)) return true;
+    return new RegExp(`\\b${escapeRegExp(variant)}s\\b`, "i").test(clause);
+  };
   for (const clause of splitClauses(actionText)) {
     if (!verbRe.test(clause) && !towardRe.test(clause) && !grabRe.test(clause)) continue;
     const hits = world.scene.objects.filter((o) =>
-      objectMentionVariants(o).some((v) => mentionsVariant(clause, v)),
+      objectMentionVariants(o).some((v) => mentionsObjectVariant(clause, v)),
     );
     if (hits.length > 0) {
       const nonSignHits = hits.filter((o) => !/sign/i.test(`${o.id} ${o.name}`));
       if (nonSignHits.length > 0 || !furnitureWordRe.test(clause)) {
         const pool = nonSignHits.length > 0 ? nonSignHits : hits;
-        const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, mode);
+        const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, clauseMode(clause));
         if (ranked) return ranked;
       }
     }
   }
   const possessive = /\bmy\b|\bown\b/i.test(actionText);
-  const generic: Array<[RegExp, RegExp]> = [
+  // Third element (optional): furniture-kind id filter. A "desk" keyword
+  // matches "Desk lamp" and "Anton's desk sign" by NAME — but those are a
+  // prop and a label, not places to stand (Exp-5 tick 15: anton_lamp won
+  // over anton_desk on a proximity tiebreak). When the filter matches at
+  // least one object id, name-only matches are dropped from the pool.
+  const generic: Array<[RegExp, RegExp, RegExp?]> = [
     // Exp-4 tick 7: "grab leftover coffee" means the lounge leftovers
     // (lounge_mug), not the machine fixture — checked before bare coffee.
     [/\bleftover\b/i, /lounge/i],
     [/\blounge\b/i, /lounge/i],
     [/\bcoffee\b/i, /coffee/i],
-    [/\bdesk\b/i, /desk/i],
-    [/\bdoor\b/i, /door/i],
-    [/\bwall\b/i, /wall/i],
-    [/\blaptop\b/i, /laptop/i],
-    [/\bchair\b/i, /chair/i],
-    [/\bmug\b/i, /mug/i],
+    [/\bdesks?\b/i, /desk/i, /desk/i],
+    [/\bdoors?\b/i, /door/i, /door/i],
+    [/\bwalls?\b/i, /wall/i, /wall/i],
+    [/\blaptops?\b/i, /laptop/i],
+    [/\bchairs?\b/i, /chair/i, /chair|sofa/i],
+    [/\bmugs?\b/i, /mug/i],
   ];
-  for (const [wordRe, objRe] of generic) {
+  for (const [wordRe, objRe, furnitureIdRe] of generic) {
     if (wordRe.test(actionText)) {
       const matches = world.scene.objects.filter(
         (o) => objRe.test(o.name) || objRe.test(o.id),
       );
       if (matches.length === 0) continue;
-      // "coffee" as an object to grab ("pour a coffee", "grab coffee")
-      // prefers the lounge mug over the machine fixture.
+      const kindMatches =
+        furnitureIdRe !== undefined ? matches.filter((o) => furnitureIdRe.test(o.id)) : matches;
+      const pool = kindMatches.length > 0 ? kindMatches : matches;
+      const isFurnitureKeyword = furnitureIdRe !== undefined;
       const grabMode: "walk" | "grab" =
-        /\bcoffee\b/i.test(wordRe.source) && grabRe.test(actionText) ? "grab" : mode;
+        isFurnitureKeyword
+          ? "walk"
+          : /\bcoffee\b/i.test(wordRe.source) && grabRe.test(actionText)
+            ? "grab"
+            : mode;
       if (possessive && actingActorId) {
-        const ranked = rankDestinationObjects(world, matches, actionText, actingActorId, grabMode);
+        const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, grabMode);
         if (ranked) return ranked;
       }
-      const ranked = rankDestinationObjects(world, matches, actionText, actingActorId, grabMode);
+      const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, grabMode);
       if (ranked) return ranked;
     }
   }

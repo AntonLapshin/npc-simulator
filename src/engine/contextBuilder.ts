@@ -265,8 +265,11 @@ export function detectIdentityLeak(
       // Psychology attribution anywhere: "Anton wants to familiarize…"
       // (tick 8), "Tanya knows the best way for Anton…" is fine (about
       // others is OK) — only flag "<Other> wants/needs/is eager" goals.
+      // Exp-5 item 7: broadened beyond wants/needs — a selection reasoning
+      // that plans, decides, hopes, or worries FOR another roster actor is
+      // the same POV swap ("Jeff responds, 'Okay, Anton…'"-class).
       const psychRe = new RegExp(
-        `\\b${esc(o.name)}\\s+(wants?|needs?|is\\s+eager|eager\\s+to)\\b`,
+        `\\b${esc(o.name)}\\s+(wants?|needs?|is\\s+eager|eager\\s+to|plans?|intends?|intending|decides?|decided|tries?\\s+to|hopes?|hoping|worries|worried|keen\\s+to)\\b`,
         "i",
       );
       if (psychRe.test(text)) {
@@ -373,6 +376,32 @@ export function findCoreRepeat(
   const core = suggestionCore(world, text, actorId);
   for (const prior of getRecentOwnActions(world, actorId)) {
     if (suggestionCore(world, prior, actorId) === core) return prior;
+  }
+  return undefined;
+}
+
+/**
+ * Exp-5 items 5+7: pre-consequence selection screen. Returns a rejection
+ * reason when the chosen action casts another roster actor as the subject /
+ * pursues their goals (POV mismatch, item 7) or repeats the verb+noun core
+ * of a recent own action (attractor loop, item 5) — so the turn can
+ * substitute a clean candidate instead of burning 4 consequence attempts
+ * on a known-bad pick. Used by the selection engine's format check and by
+ * the turn orchestrator as defense-in-depth (mock engines don't check).
+ */
+export function validateSelectionForActor(
+  world: World,
+  actorId: string,
+  actionText: string,
+): string | undefined {
+  const leak = detectIdentityLeak(world, actorId, actionText);
+  if (leak !== undefined) return leak;
+  const prior = findCoreRepeat(world, actorId, actionText);
+  if (prior !== undefined) {
+    return (
+      `repetition: "${actionText.slice(0, 60)}" repeats recent action ` +
+      `"${prior.slice(0, 60)}" (same verb+noun core) — choose something that moves the scene forward instead`
+    );
   }
   return undefined;
 }

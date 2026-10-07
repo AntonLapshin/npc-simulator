@@ -26,6 +26,13 @@ export const defaultConfig: EngineConfig = {
   openQuestionScanWindow: 60,
   /** Radius around the acting actor for the slim consequence snapshot (nearby actors/objects + named targets). */
   consequenceSnapshotRadius: 12,
+  /**
+   * Exp-5 item 6 (NPC liveness floor): an actor that falls back this many
+   * consecutive own turns gets a deterministic minimal applied turn
+   * (thoughts-only reaction) instead of another "Nothing changes.", so
+   * dialogue threads can advance by words even when bodies cannot.
+   */
+  livenessFallbackThreshold: 3,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {

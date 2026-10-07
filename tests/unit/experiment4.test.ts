@@ -358,8 +358,9 @@ describe("exp4-8 salvage entry logging (whole run)", () => {
       semantics, logger,
     );
     expect(ok).not.toBeNull();
-    // Refuse: pour verb dropped (object gate stays hard).
-    const no = trySalvageConsequence(
+    // Exp-5 item 1: the pour miss no longer refuses — tier-2 salvage
+    // advances the movement with the pour miss logged as a warning.
+    const tier2 = trySalvageConsequence(
       world,
       { actorId: "anton", text: "Walk to the coffee machine and pour a coffee." },
       {
@@ -369,12 +370,27 @@ describe("exp4-8 salvage entry logging (whole run)", () => {
       },
       semantics, logger,
     );
+    expect(tier2).not.toBeNull();
+    expect(tier2!.warnings.join(" ")).toMatch(/pour\/brew\/open/);
+    // Refuse: far contact with no adjacency (adjacency stays hard).
+    const no = trySalvageConsequence(
+      world,
+      { actorId: "anton", text: "Shake Tanya's hand warmly." },
+      {
+        narrative: "Anton shakes Tanya's hand.",
+        actorPatches: [{ actorId: "anton", thoughts: "Firm grip." }],
+        objectPatches: [], reasoning: "r",
+      },
+      { moves: false, speaks: false, quotedSpeech: [], contactActorId: "tanya" },
+      logger,
+    );
     expect(no).toBeNull();
     const evals = logger.store.byEvent("salvage_evaluated");
-    expect(evals).toHaveLength(2);
+    expect(evals).toHaveLength(3);
     expect((evals[0]!.output as { eligible: boolean }).eligible).toBe(true);
-    expect((evals[1]!.output as { eligible: boolean }).eligible).toBe(false);
-    expect((evals[1]!.output as { blockers: string[] }).blockers.length).toBeGreaterThan(0);
+    expect((evals[1]!.output as { eligible: boolean }).eligible).toBe(true);
+    expect((evals[2]!.output as { eligible: boolean }).eligible).toBe(false);
+    expect((evals[2]!.output as { blockers: string[] }).blockers.length).toBeGreaterThan(0);
   });
 });
 

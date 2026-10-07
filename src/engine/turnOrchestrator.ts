@@ -21,6 +21,9 @@ import {
   isMovementOnlyFailure,
   suggestMoveTarget,
 } from "./movementAssist.js";
+import { validateSelectionForActor } from "./contextBuilder.js";
+import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
+import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
@@ -126,6 +129,54 @@ export function isSpeechOnlyFailure(errors: string[]): boolean {
 }
 
 /**
+ * Exp-5 item 1: tier-2 (degraded) salvage eligibility. Tier 1 accepts fully
+ * valid turns or speech-only misses. Tier 2 additionally downgrades
+ * speech + object/prop/pose WORDING misses to warnings — dropped quotes,
+ * lost questions, silent-behavior swaps, hollow explanations, and
+ * pour/brew/open/pick-up/sip/hold/sit wording without a backing patch —
+ * so a turn with good clampable movement still advances position +
+ * thoughts instead of freezing whole. Staying HARD (never salvaged):
+ * physics (bounds/blocked/path), movement direction + real progress,
+ * contact adjacency (a handshake across the room), observer-move/state
+ * discipline, observer-as-subject prose, unknown actors in the narrative,
+ * acting-actor presence, and the direct-addressee patch (repaired
+ * deterministically with a stub reaction instead of downgraded).
+ */
+export function isTier2Salvageable(errors: string[]): boolean {
+  if (errors.length === 0) return false;
+  return errors.every((e) =>
+    /exact words|invents dialogue|keeps no question|renders no speech|keeps none of its topic words|pour\/brew\/open|pick up\/hold|describes sitting|brewing\/pouring|picking something up|opening\/booting|sipping\/drinking\/typing|holding\/carrying|says to (sit|stand)|neither sets pose|without an object patch|without a prop\/object patch/.test(
+      e,
+    ),
+  );
+}
+
+/**
+ * Exp-5 item 2: honest-history notes for salvaged/liveness turns. The
+ * consequence dropped content (or the liveness floor replaced it), so the
+ * world history must record the NARRATIVE (what happened) plus this note —
+ * never the raw action text (the wish). Stored off-object (WeakMap) so the
+ * validated payload shape is untouched; runTurn reads it via
+ * getHonestHistoryNote() and forwards it to applyConsequence.
+ */
+const honestHistoryNotes = new WeakMap<ConsequenceResult, string>();
+
+export function getHonestHistoryNote(result: ConsequenceResult): string | undefined {
+  return honestHistoryNotes.get(result);
+}
+
+function withHonestNote(out: { salvaged: ConsequenceResult; warnings: string[] }): {
+  salvaged: ConsequenceResult;
+  warnings: string[];
+} {
+  honestHistoryNotes.set(
+    out.salvaged,
+    out.warnings.length > 0 ? `partial: ${out.warnings.join(" | ").slice(0, 240)}` : "partial",
+  );
+  return out;
+}
+
+/**
  * Deterministic movement repair for the salvage path (Phase 4): fill in (or
  * fix) the acting actor's x/y with a computed reachable position, mirroring
  * the retry-loop repair. Returns a repaired clone, or null when no valid
@@ -186,19 +237,59 @@ function applySalvageMovementRepair(
 }
 
 /**
+ * Exp-5 item 1: deterministic addressee repair for the salvage path. When
+ * the action speaks directly TO someone (addressee semantics) but the
+ * consequence left no patch on them, add a minimal stub thoughts reaction
+ * instead of failing the whole turn — being spoken to always registers.
+ * Returns a repaired clone, or null when no repair applies (no addressee,
+ * already patched, unknown id, or the addressee could not perceive the
+ * event — mirroring the validator's perceiver rule, so no patch is owed).
+ * Never invents speech content: the stub records only that something was
+ * heard, and the dropped wording stays logged as a warning.
+ */
+function repairMissingAddressee(
+  world: World,
+  action: Action,
+  candidate: ConsequenceResult,
+  semantics: ActionSemantics,
+): ConsequenceResult | null {
+  const addressee = semantics.addresseeActorId;
+  if (addressee === undefined || addressee === action.actorId) return null;
+  if (candidate.actorPatches.some((p) => p.actorId === addressee)) return null;
+  const target = world.actors.find((a) => a.id === addressee);
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!target || !actor) return null;
+  const perceives =
+    getVisibleActors(world, addressee).some((a) => a.id === action.actorId) ||
+    getAudibleActors(world, addressee).some((a) => a.id === action.actorId) ||
+    Math.abs(target.x - actor.x) + Math.abs(target.y - actor.y) <= 2;
+  if (!perceives) return null;
+  const repaired: ConsequenceResult = structuredClone(candidate);
+  repaired.actorPatches.push({
+    actorId: addressee,
+    thoughts: `Heard ${actor.name} — will pick this up next turn.`,
+  });
+  return repaired;
+}
+
+/**
  * Exp-3 item 6 / Phase 4: partial-apply / salvage instead of all-or-nothing fallback.
  * Ticks 3/9 showed whole good turns (valid movement + adjacency) discarded
  * for a speech nit plus a stray hallucinated patch — and 57% "Nothing
  * changes." is what actually stalls a scenario. Salvage strips patches that
  * reference nonexistent actors/objects (clear hallucinations like a `jeff`
  * patch), deterministically repairs a missing/invalid movement patch when
- * the turn implies locomotion, and:
+ * the turn implies locomotion, deterministically patches a missing
+ * direct-addressee reaction, and:
  * - returns the salvaged result when fully valid, or
  * - returns it with the remaining speech misses downgraded to warnings
- *   (movement + thoughts apply; the speech miss is logged, not fatal).
- * Anything else (physics, movement, contact, addressee, verb-coverage
- * failures) still falls back — salvage never invents speech and only
- * accepts positions that pass the full movement gate on revalidation.
+ *   (movement + thoughts apply; the speech miss is logged, not fatal), or
+ * - (Exp-5 item 1, tier 2) returns clampable movement + thoughts with
+ *   speech/object wording misses downgraded to warnings.
+ * Physics, movement direction/progress, contact adjacency, observer
+ * discipline, and unknown-actor prose still fall back — salvage never
+ * invents speech and only accepts positions that pass the full movement
+ * gate on revalidation.
  */
 export type SalvageEvaluation = {
   eligible: boolean;
@@ -258,7 +349,6 @@ export function trySalvageConsequence(
   ) {
     return evaluate(false, "acting actor unpatched and no locomotion implied: only hallucinated patches");
   }
-  let lastBlockers: string[] = [];
   const accept = (
     c: ConsequenceResult,
   ): { salvaged: ConsequenceResult; warnings: string[] } | null => {
@@ -267,42 +357,143 @@ export function trySalvageConsequence(
     if (isSpeechOnlyFailure(revalidation.errors)) {
       return { salvaged: c, warnings: revalidation.errors };
     }
-    lastBlockers = revalidation.errors;
     return null;
   };
   const stripped = accept(candidate);
   if (stripped) {
     evaluate(true, "valid patches kept (speech nits downgraded to warnings)");
-    return stripped;
+    return withHonestNote(stripped);
   }
   // Phase 4 "(or movement-repair them)": the turn implies locomotion but the
   // position is missing or invalid — fill it deterministically (Exp-4 item
   // 1: claimed over-cap jumps clamp to a partial step, not just fresh
   // suggestions) and accept only if the full gate (or speech-only) passes
   // on revalidation.
+  // Exp-5 item 1: tier-2 fallback below widens the accept to speech/object
+  // wording misses, so a repaired movement is no longer discarded for a
+  // dropped quote or a missing pour patch.
+  let movementBase: ConsequenceResult | null = null;
   if (semantics.moves) {
     const repaired = applySalvageMovementRepair(world, action, candidate, semantics);
     if (repaired) {
+      movementBase = repaired;
       const repairedOut = accept(repaired);
       if (repairedOut) {
         evaluate(true, "movement repaired (clamped/suggested) with valid patches kept");
-        return repairedOut;
+        return withHonestNote(repairedOut);
       }
-      return evaluate(
-        false,
-        "movement repaired but hard gates still fail: object/contact/addressee/verb-coverage stay hard",
-        lastBlockers,
-      );
+    } else {
+      return evaluate(false, "locomotion implied but no valid capped step exists (surroundings blocked)");
     }
-    return evaluate(false, "locomotion implied but no valid capped step exists (surroundings blocked)", lastBlockers);
+  }
+  // Exp-5 item 1, tier 2 (degraded-but-advancing): repair the missing
+  // addressee reaction deterministically, then accept clampable movement +
+  // thoughts even when speech/object wording misses remain — logged as
+  // warnings, not fatal. Physics, direction/progress, contact adjacency,
+  // and observer discipline stay hard.
+  const tierBase = movementBase ?? candidate;
+  const withAddressee = repairMissingAddressee(world, action, tierBase, semantics);
+  const tiered = withAddressee ?? tierBase;
+  const revalidation = validateConsequence(world, tiered, action, semantics);
+  if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
+    evaluate(
+      true,
+      withAddressee !== null
+        ? "movement kept + addressee reaction patched (speech nits downgraded to warnings)"
+        : "valid patches kept (speech nits downgraded to warnings)",
+    );
+    return withHonestNote({
+      salvaged: tiered,
+      warnings: revalidation.valid ? [] : revalidation.errors,
+    });
+  }
+  if (isTier2Salvageable(revalidation.errors)) {
+    evaluate(
+      true,
+      "tier-2 degraded: clampable movement + thoughts kept, speech/object wording logged as warnings",
+    );
+    return withHonestNote({ salvaged: tiered, warnings: revalidation.errors });
+  }
+  if (semantics.moves) {
+    return evaluate(
+      false,
+      "movement repaired but hard gates still fail (physics/direction/contact/observer-discipline stay hard; tier-2 covers speech/object wording only)",
+      revalidation.errors,
+    );
   }
   return evaluate(
     false,
-    isClampableMovementFailure(lastBlockers)
+    isClampableMovementFailure(revalidation.errors)
       ? "clampable movement present but repair produced no valid step"
-      : "hard gates fail (physics/contact/addressee/object/verb-coverage — salvage keeps movement/speech only)",
-    lastBlockers,
+      : "hard gates fail (physics/contact/addressee/observer/object — tier-2 covers speech/object wording only)",
+    revalidation.errors,
   );
+}
+
+/**
+ * Exp-5 item 6: consecutive own-turn fallback streak for an actor. Counts
+ * trailing history entries authored by `actorId` that are fallback-marked
+ * ("tried … (not done)"), stopping at that actor's first applied entry.
+ * Other actors' interleaved turns don't break the streak — Tanya falling
+ * back 7 of her own turns in a row is the freezer signal even when Dana's
+ * turns interleave. Applied entries include salvaged/partial and liveness
+ * turns (narrative-based, no "(not done)" marker).
+ */
+export function consecutiveFallbacks(world: World, actorId: string): number {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const prefixes =
+    actor !== undefined
+      ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+      : [`${actorId}:`, `${actorId} tried:`];
+  let streak = 0;
+  for (let i = world.history.length - 1; i >= 0; i--) {
+    const entry = world.history[i]!;
+    if (!prefixes.some((p) => entry.startsWith(p))) continue;
+    if (entry.includes("(not done)")) streak++;
+    else break;
+  }
+  return streak;
+}
+
+/**
+ * Exp-5 item 6: deterministic liveness reaction. After N consecutive own
+ * fallbacks the actor holds position with a fresh thoughts reaction (plus
+ * a stub reaction for anyone they were directly addressing), so threads
+ * (desk question, first task) can advance by dialogue even when bodies
+ * cannot. Bypasses validation like the fallback does — but unlike the
+ * fallback it APPLIES (history records the narrative, honestly marked).
+ */
+function buildLivenessConsequence(
+  world: World,
+  action: Action,
+  semantics: ActionSemantics,
+  priorFallbacks: number,
+): ConsequenceResult {
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const name = actor?.name ?? action.actorId;
+  const actorPatches: ConsequenceResult["actorPatches"] = [
+    { actorId: action.actorId, thoughts: "Holding position and watching the room." },
+  ];
+  const addressee = semantics.addresseeActorId;
+  if (
+    addressee !== undefined &&
+    addressee !== action.actorId &&
+    world.actors.some((a) => a.id === addressee)
+  ) {
+    actorPatches.push({
+      actorId: addressee,
+      thoughts: `Heard ${name} — will pick this up next turn.`,
+    });
+  }
+  const liveness: ConsequenceResult = {
+    narrative: `${name} holds position, taking in the room.`,
+    actorPatches,
+    objectPatches: [],
+    reasoning: `Liveness floor after ${priorFallbacks} consecutive fallbacks: minimal in-place reaction so the scene keeps moving.`,
+    effects: { moved: false, spoke: false },
+  };
+  honestHistoryNotes.set(liveness, "liveness floor");
+  return liveness;
 }
 
 /** Per-turn outcome counts for long-run SLO tracking (Phase 4).
@@ -311,19 +502,24 @@ export function trySalvageConsequence(
  * - clean: exactly one `validation_passed` (first-try pass or pass after
  *   retry / deterministic movement repair);
  * - salvaged: one `partial_applied` (degraded-but-advancing: valid patches
- *   kept, speech nits logged as warnings);
+ *   kept, speech/object nits logged as warnings);
+ * - liveness: one `liveness_applied` (Exp-5 item 6 floor: minimal in-place
+ *   reaction after N consecutive fallbacks);
  * - fallback: one `fallback_used` ("Nothing changes.").
- * A turn emits exactly one of the three, so total = clean + salvaged +
- * fallback. Pass `logger.store.all()` (or any entry list with `event`).
+ * A turn emits exactly one of the four, so total = clean + salvaged +
+ * liveness + fallback. Pass `logger.store.all()` (or any entry list with `event`).
  */
 export type TurnOutcomeSummary = {
   clean: number;
   salvaged: number;
   fallback: number;
+  /** Exp-5 item 6: minimal applied turns from the liveness floor. */
+  liveness: number;
   total: number;
   cleanRate: number;
   salvagedRate: number;
   fallbackRate: number;
+  livenessRate: number;
   /** Degraded-but-advancing share (salvaged / total) — the Phase 4 SLO. */
   degradedRate: number;
 };
@@ -334,21 +530,25 @@ export function summarizeTurnOutcomes(
   let clean = 0;
   let salvaged = 0;
   let fallback = 0;
+  let liveness = 0;
   for (const e of entries) {
     if (e.event === "validation_passed") clean++;
     else if (e.event === "partial_applied") salvaged++;
+    else if (e.event === "liveness_applied") liveness++;
     else if (e.event === "fallback_used") fallback++;
   }
-  const total = clean + salvaged + fallback;
+  const total = clean + salvaged + fallback + liveness;
   const rate = (n: number): number => (total === 0 ? 0 : n / total);
   return {
     clean,
     salvaged,
     fallback,
+    liveness,
     total,
     cleanRate: rate(clean),
     salvagedRate: rate(salvaged),
     fallbackRate: rate(fallback),
+    livenessRate: rate(liveness),
     degradedRate: rate(salvaged),
   };
 }
@@ -358,6 +558,7 @@ export async function resolveWithValidation(
   world: World,
   action: Action,
   deps: EngineDependencies,
+  opts: { allowLiveness?: boolean } = {},
 ): Promise<ConsequenceResult> {
   const config = depsConfig(deps);
   const logger = deps.logger;
@@ -643,6 +844,31 @@ export async function resolveWithValidation(
     }
   }
 
+  // Exp-5 item 6: NPC liveness floor. Before giving up to "Nothing
+  // changes.", check whether this actor has already fallen back N
+  // consecutive own turns — if so, apply a minimal in-place reaction
+  // (thoughts-only, plus a stub for anyone directly addressed) so the
+  // scene keeps moving by dialogue even when bodies cannot. User turns
+  // are excluded by the caller: silently rewriting the user's own action
+  // would hide the failure from them.
+  if (opts.allowLiveness !== false && lastSemantics) {
+    const threshold = depsConfig(deps).livenessFallbackThreshold ?? 3;
+    const priorFallbacks = consecutiveFallbacks(world, action.actorId);
+    if (priorFallbacks >= threshold) {
+      const liveness = buildLivenessConsequence(world, action, lastSemantics, priorFallbacks);
+      logger.log({
+        module: "turn",
+        event: "liveness_applied",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, result: lastResult, priorFallbacks },
+        output: { liveness },
+      });
+      return liveness;
+    }
+  }
+
   logger.log({
     module: "turn",
     event: "fallback_used",
@@ -746,7 +972,40 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     report(deps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
     const selection = await deps.selectionEngine.select(world, actor.id, proposal.suggestions);
     report(deps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
-    action = { actorId: actor.id, text: stripSelectionPrefix(selection.action) };
+    let actionText = stripSelectionPrefix(selection.action);
+    // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
+    // on it. A POV-swapped pick ("Anton walks…" on Dana's turn) or a
+    // verb+noun repeat of a recent own action (handshake attractor) is
+    // rejected here and replaced with the first clean candidate — the
+    // proposal engine already dedups its own output, but the selector may
+    // invent a repeat (or a mock may replay one).
+    const rejection = validateSelectionForActor(world, actor.id, actionText);
+    if (rejection !== undefined) {
+      logger.log({
+        module: "selection",
+        event: "selection_rejected",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: actor.id,
+        input: { action: actionText, suggestions: proposal.suggestions },
+        output: { rejection },
+        error: rejection,
+      });
+      const clean = proposal.suggestions
+        .map((s) => stripSelectionPrefix(s))
+        .find((s) => s.length > 0 && validateSelectionForActor(world, actor.id, s) === undefined);
+      actionText = clean ?? FALLBACK_SELECTION.action;
+      logger.log({
+        module: "selection",
+        event: "selection_substituted",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: actor.id,
+        input: { rejected: selection.action },
+        output: { action: actionText },
+      });
+    }
+    action = { actorId: actor.id, text: actionText };
   }
 
   logger.log({
@@ -759,13 +1018,21 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   });
 
   report(deps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
-  const consequence = await resolveWithValidation(world, action, deps);
+  const consequence = await resolveWithValidation(world, action, deps, {
+    // Exp-5 item 6: the liveness floor rewrites failed turns — never the
+    // user's own action text.
+    allowLiveness: action.actorId !== world.userActorId,
+  });
   report(deps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
 
   // Exp-4 item 6: mark fallback history as un-applied so proposals ground
-  // on the world, not the wish.
+  // on the world, not the wish. Exp-5 item 2: salvaged/liveness turns
+  // record the narrative (what happened) plus the honest note — never the
+  // raw action text — so later turns don't assume a dropped desk question
+  // was asked or a laptop setup happened.
   const patched = applyConsequence(world, consequence, action, config, {
     fallback: isFallbackConsequence(consequence),
+    honestHistoryNote: getHonestHistoryNote(consequence),
   });
   report(deps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({

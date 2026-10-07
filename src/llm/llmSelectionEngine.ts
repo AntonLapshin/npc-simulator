@@ -10,7 +10,7 @@
 import type { SelectionEngine } from "../intelligence/types.js";
 import type { SelectionResult, World } from "../types.js";
 import { selectionResultSchema } from "../schemas.js";
-import { buildSelectionContext, detectIdentityLeak } from "../engine/contextBuilder.js";
+import { buildSelectionContext, detectIdentityLeak, findCoreRepeat } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, selectionSuffix } from "./prompts.js";
@@ -78,6 +78,12 @@ export class LLMSelectionEngine implements SelectionEngine {
             ? detectIdentityLeak(world, actorId, value.reasoning)
             : undefined);
         if (leak !== undefined) return `${leak} — choose an action for ${actorId} only`;
+        // Exp-5 item 5: selection-level repetition dedup — the proposal
+        // engine dedups its own output, but the selector may invent a
+        // reworded repeat of a recent own action (handshake attractor).
+        const prior = findCoreRepeat(world, actorId, value.action);
+        if (prior !== undefined)
+          return `chosen action repeats recent action "${prior.slice(0, 60)}" (same verb+noun core) — choose something that moves the scene forward instead`;
         return undefined;
       },
     });

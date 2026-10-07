@@ -17,13 +17,29 @@ export type ApplyConsequenceOptions = {
    * (see contextBuilder filtering).
    */
   fallback?: boolean;
+  /**
+   * Exp-5 item 2: the applied consequence dropped content (tier-1/2 salvage)
+   * or is a deterministic liveness reaction — record the NARRATIVE (what
+   * happened) plus this note ("partial: <warnings>" / "liveness floor"),
+   * never the raw action text (the wish). Later proposals ground on the
+   * fiction otherwise (tick 16 assumed the laptop setup was underway).
+   * Takes effect only for non-fallback turns.
+   */
+  honestHistoryNote?: string;
 };
 
 /** Marker suffix for un-applied fallback history entries (Exp-4 item 6). */
 export const FALLBACK_HISTORY_MARKER = "(not done)";
 
+/** Marker for salvaged/liveness history entries recorded from the narrative (Exp-5 item 2). */
+export const PARTIAL_HISTORY_MARKER = "(partial)";
+
 export function isFallbackHistoryEntry(entry: string): boolean {
   return entry.includes(FALLBACK_HISTORY_MARKER);
+}
+
+export function isPartialHistoryEntry(entry: string): boolean {
+  return !isFallbackHistoryEntry(entry) && entry.includes(PARTIAL_HISTORY_MARKER);
 }
 
 export function applyConsequence(
@@ -90,11 +106,15 @@ export function applyConsequence(
   // UI layers show this entry only when the viewer can perceive the actor.
   // Exp-4 item 6: fallback attempts are marked as un-applied so later
   // proposals don't assume Anton sits at his desk / the task was explained.
-  next.history.push(
-    opts.fallback
-      ? `${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}`
-      : `${actorName}: ${action.text}`,
-  );
+  // Exp-5 item 2: salvaged/liveness turns record the narrative + note so
+  // later turns don't assume a dropped question was asked.
+  if (opts.fallback) {
+    next.history.push(`${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}`);
+  } else if (opts.honestHistoryNote !== undefined) {
+    next.history.push(`${actorName}: ${result.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);
+  } else {
+    next.history.push(`${actorName}: ${action.text}`);
+  }
   if (next.history.length > config.maxHistoryEntries) {
     next.history.splice(0, next.history.length - config.maxHistoryEntries);
   }

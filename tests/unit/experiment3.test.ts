@@ -1199,11 +1199,13 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(out!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBeUndefined();
   });
 
-  it("refuses salvage when object/contact gates fail (gates stay hard)", () => {
+  it("tier-2 salvages movement when object wording fails, still refuses contact gaps", () => {
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
     world.actors.find((a) => a.id === "u")!.y = 3;
     // Pour verb dropped with no backing patch (tick-9 verb-drop shape).
+    // Exp-5 item 1: tier-2 salvage advances the movement with the pour
+    // miss logged as a warning instead of freezing the whole turn.
     const pour = trySalvageConsequence(
       world,
       { actorId: "u", text: "Walk to the coffee machine and pour a coffee." },
@@ -1215,7 +1217,9 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
       },
       { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
     );
-    expect(pour).toBeNull();
+    expect(pour).not.toBeNull();
+    expect(pour!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBe(1);
+    expect(pour!.warnings.join(" ")).toMatch(/pour\/brew\/open/);
 
     // Far handshake with no adjacency (tick-12 shape): u (1,1), n (4,4).
     const contact = trySalvageConsequence(

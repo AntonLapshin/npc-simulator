@@ -216,6 +216,8 @@ export type EngineConfig = {
   openQuestionScanWindow: number;
   /** Radius for the slim consequence snapshot (Phase 5 context budget). */
   consequenceSnapshotRadius: number;
+  /** Consecutive own-turn fallbacks before the NPC liveness floor fires (Exp-5 item 6). */
+  livenessFallbackThreshold: number;
 };
 
 export type ValidationResult = {

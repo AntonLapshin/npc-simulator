@@ -811,7 +811,7 @@ function validateObjectGrounding(
       );
     }
   }
-  if (/\b(opens?(?:ing)? (?:his|her|their|my|the|a|an) laptop|boots?(?:ing)? (?:up )?(?:his|her|their|my|the|a|an)? ?laptop|powers? on)\b/i.test(text)) {
+  if (new RegExp(`\\b(opens?(?:ing|ed)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?laptop|boots?(?:ing)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an)\\s+)?laptop|powers?\\s+on)\\b`, "i").test(text)) {
     if (!propPatched && !hasObjectPatch && !holdsSomething) {
       errors.push(
         `narrative describes opening/booting a laptop but no prop/object patch backs it: set prop ("laptop") on the acting actor or add the matching objectPatch`,
@@ -943,17 +943,32 @@ function validateActionVerbCoverage(
     }
   }
 
-  // "open" counts only as a verb with an object ("open the door", "open his
-  // laptop") — never as an adjective ("an open and welcoming demeanor").
+  // "open" counts as a verb with a concrete object ("open the door", "open
+  // his laptop", bare "open laptop") — never as an adjective ("an open and
+  // welcoming demeanor", where "open" is followed by "and", not a noun).
+  // Exp-5 tick 15: the old regex required a determiner ("open MY laptop"),
+  // so bare "open laptop" dodged this gate while "opens his laptop" in the
+  // narrative tripped the narrative-side one — identical omissions passed
+  // or failed on prose luck. The determiner is now optional but the object
+  // noun is required. Partial semantics for triple-verb actions
+  // (sit + open in one action): sit applies now via the pose patch, the
+  // laptop opens next turn — a turn that sits without the laptop patch
+  // still fails here, and the message says so (Tier-2 salvage may advance
+  // the movement/sit with the laptop miss logged as a warning instead).
+  const OPEN_OBJECT_NOUNS =
+    "laptop|mug|cup|door|bag|chair|papers?|phone|monitor|book|box|window|desk|machine|notes?|documents?|bottle|drawer|lid";
   if (
     /\b(brew|brews|pour|pours|fill|fills|boot|boots|mak(e|es|ing)\s+coffee)\b/i.test(text) ||
-    /\bopens?\s+(?:his|her|their|my|the|a|an|that|this)\s+[a-z]+\b/i.test(text)
+    new RegExp(
+      `\\bopens?(?:ed|ing)?\\s+(?:up\\s+)?(?:(?:his|her|their|my|the|a|an|that|this)\\s+)?(?:${OPEN_OBJECT_NOUNS})\\b`,
+      "i",
+    ).test(text)
   ) {
     const backed =
       normalized.objectPatches.length > 0 || actingPatch?.prop !== undefined;
     if (!backed) {
       errors.push(
-        `action says to pour/brew/open ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch`,
+        `action says to pour/brew/open ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch (split triple-verb actions across turns — sit now via the pose patch, open the laptop next turn)`,
       );
     }
   }
@@ -987,24 +1002,31 @@ function validateActionVerbCoverage(
     }
   }
 
-  // Phase 3 (exp-3 item 2, tick 18): speech dropped without a trace. The
-  // quote gate only guards quoted segments, and the ask gate only guards
-  // questions — so "Thank both, then head to the desk" narrated as "looks
-  // around" passes with the entire utterance erased (the judge even agreed
-  // speaks=false). When the action text carries an explicitly verbal verb
-  // (thank/say/tell — ask/? stays with the ask gate above), the narrative
-  // must render speech: a quote or a speech verb of its own.
+  // Phase 3 (exp-3 item 2, tick 18) + Exp-5 item 8 (ticks 14/20): speech
+  // dropped without a trace. The quote gate only guards quoted segments,
+  // and the ask gate only guards questions — so "Thank both, then head to
+  // the desk" narrated as "looks around" passes with the entire utterance
+  // erased (the judge even agreed speaks=false). When the action text
+  // carries an explicitly verbal verb (thank/say/tell/explain/describe —
+  // ask/? stays with the ask gate above, explain/describe/discuss stay
+  // with the explanation gate below), the narrative must render speech: a
+  // quote or a speech verb of its own.
   // Greet/welcome are deliberately excluded: they can be rendered
   // non-verbally (walking over, waving), and the golden path relies on it.
+  // Exp-5 item 8: describe/discuss/brief/present/outline added — "describe
+  // the layout" narrated as silent behavior was the hollow-pass class that
+  // survived every gate.
+  const EXPLANATORY_VERBS =
+    "explain|explains|explained|explaining|describ(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|brief(?:s|ed|ing)?|present(?:s|ed|ing)?|outlin(?:e|es|ed|ing)";
   if (
-    /\b(say|says|said|tell|tells|told|thank|thanks|thanked|answer|answers|answered|repl(?:y|ies|ied)|mention|mentions|mentioned|explain|explains|explained|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\b/i.test(text) ||
+    new RegExp(`\\b(say|says|said|tell|tells|told|thank|thanks|thanked|answer|answers|answered|repl(?:y|ies|ied)|mention|mentions|mentioned|${EXPLANATORY_VERBS}|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\\b`, "i").test(text) ||
     /\bcall\s+out\b/i.test(text)
   ) {
     if (!/\bask\w*\b|\?/.test(text)) {
       const rendersSpeech =
         narrative.includes("?") ||
         quotedSegments(narrative).length > 0 ||
-        /\b(say|says|said|tell|tells|told|thank|thanks|thanked|greet|greets|greeted|greeting|welcome|welcomes|welcomed|ask|asks|asked|answer|answers|answered|repl(?:y|ies|ied)|mentions?|mentioned|explain|explains|explained|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\b/i.test(narrative);
+        new RegExp(`\\b(say|says|said|tell|tells|told|thank|thanks|thanked|greet|greets|greeted|greeting|welcome|welcomes|welcomed|ask|asks|asked|answer|answers|answered|repl(?:y|ies|ied)|mentions?|mentioned|${EXPLANATORY_VERBS}|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\\b`, "i").test(narrative);
       if (!rendersSpeech) {
         errors.push(
           `action says something ("${text.slice(0, 80)}") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior`,
@@ -1013,7 +1035,61 @@ function validateActionVerbCoverage(
     }
   }
 
+  errors.push(...validateExplanationCoverage(action, normalized));
+
   return errors;
+}
+
+/**
+ * Exp-5 item 8 (ticks 14/20): explanation hollow-pass gate. A selected
+ * "explain/describe/discuss/brief/present/outline" action whose consequence
+ * keeps no question and no explanation is the hollow-pass class that
+ * survived every gate: the quote gate guards quoted segments, the ask gate
+ * guards questions, and the renders-speech check above accepts ANY speech
+ * verb anywhere ("explain the office layout" narrated as "greets everyone
+ * warmly" passes it). This gate additionally requires the TOPIC to survive:
+ * at least one shared content-word stem between the action and the
+ * narrative beyond the explanatory verb itself — so the greeting-substitute
+ * fails while "explains the layout of the desks" passes.
+ */
+const EXPLANATION_VERBS_RE =
+  /\b(explain|explains|explained|explaining|describ(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|brief(?:s|ed|ing)?|present(?:s|ed|ing)?|outlin(?:e|es|ed|ing)|walk(?:s|ed|ing)?\s+(?:\w+\s+)?through|run\s+(?:\w+\s+)?through)\b/i;
+
+/** Explanatory verb forms excluded from topic-overlap (they always match). */
+const EXPLANATION_STOP_WORDS = new Set(
+  [
+    "explain", "explains", "explained", "explaining",
+    "describe", "describes", "described", "describing",
+    "discuss", "discusses", "discussed", "discussing",
+    "brief", "briefs", "briefed", "briefing",
+    "present", "presents", "presented", "presenting",
+    "outline", "outlines", "outlined", "outlining",
+    "walk", "walks", "walked", "walking", "run", "through",
+    "with", "that", "this", "these", "those", "from", "your",
+    "their", "them", "they", "then", "than", "have", "has",
+    "will", "would", "could", "should", "there", "here",
+    "when", "where", "which", "while", "after", "before",
+    "about", "into", "over", "under",
+  ].map((w) => w.slice(0, 4)),
+);
+
+function validateExplanationCoverage(
+  action: Action,
+  normalized: { narrative: string },
+): string[] {
+  if (!EXPLANATION_VERBS_RE.test(action.text)) return [];
+  const topic = contentWords(action.text).filter(
+    (w) => !EXPLANATION_STOP_WORDS.has(w.slice(0, 4)),
+  );
+  if (topic.length === 0) return [];
+  const narrativeWords = contentWords(normalized.narrative);
+  const kept = topic.filter((w) => narrativeWords.some((nw) => sameStem(w, nw)));
+  if (kept.length === 0) {
+    return [
+      `action explains/describes something ("${action.text.slice(0, 80)}") but the narrative keeps none of its topic words (${topic.slice(0, 4).join(", ") || "none"}): preserve WHAT is explained (the topic), not just that someone spoke — a greeting substitute for an explanation is hollow`,
+    ];
+  }
+  return [];
 }
 
 /**
