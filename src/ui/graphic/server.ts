@@ -153,9 +153,11 @@ function buildDeps(
     const env = resolveRuntimeEnv(llmOpts);
     const engines = createLlmEngines(logger, { env });
     const cfg = resolveLlmEnv(env);
-    const model =
+    const hardModel =
       cfg.backend === "ollama" ? cfg.ollama.model : cfg.backend === "laya-local" ? cfg.laya.model : cfg.joingonka.model;
-    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `${cfg.backend}/${model}` };
+    const simpleModel = cfg.simpleModel ??
+      (cfg.simpleBackend === "ollama" ? cfg.ollama.model : cfg.simpleBackend === "laya-local" ? cfg.laya.model : cfg.joingonka.model);
+    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `hard=${cfg.backend}/${hardModel} simple=${cfg.simpleBackend}/${simpleModel}` };
   } catch (err) {
     console.log(
       `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,

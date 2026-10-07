@@ -27,6 +27,14 @@
 //       LLM_BACKEND=ollama OLLAMA_MODEL=fluffy/l3-8b-stheno-v3.2
 //
 // Both speak the OpenAI Chat Completions dialect; only defaults differ.
+//
+// Tiered routing (default): hard tasks (proposal/consequence — creative,
+// long-context, memory/belief/relationship compounding) run on LLM_BACKEND
+// (default joingonka, e.g. zai-org/GLM-5.3-Flash or DeepSeek). Simple tasks
+// (selection/semantic — single-pick decisions, moves/speaks classification)
+// run on LLM_SIMPLE_BACKEND (default ollama, local small model).
+// Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}.
+// Simple-tier model override: LLM_SIMPLE_MODEL.
 
 export interface LLMProvider {
   /** Complete a system+user prompt pair. Resolves with raw text (JSON expected). */
@@ -240,8 +248,33 @@ export function ollamaApiRoot(baseUrl: string): string {
 
 export type LlmBackend = "joingonka" | "laya-local" | "ollama";
 
+/**
+ * LLM task kinds routed to providers.
+ * - hard (large/hosted): proposal, consequence — creative, long-context,
+ *   physics + roster discipline, memory/belief/relationship compounding.
+ * - simple (small/local): selection, semantic — short classification /
+ *   single-pick decisions over an already-built candidate set.
+ */
+export type LlmTask = "proposal" | "selection" | "consequence" | "semantic";
+
+/** Tasks that default to the large hosted model (worth the cost). */
+export const HARD_LLM_TASKS: readonly LlmTask[] = ["proposal", "consequence"] as const;
+/** Tasks that default to the small local model (cheap, fast, good enough). */
+export const SIMPLE_LLM_TASKS: readonly LlmTask[] = ["selection", "semantic"] as const;
+
+export function isSimpleLlmTask(task: LlmTask): boolean {
+  return (SIMPLE_LLM_TASKS as readonly string[]).includes(task);
+}
+
 export type LlmEnvConfig = {
+  /** Default backend for HARD tasks (proposal/consequence). */
   backend: LlmBackend;
+  /** Default backend for SIMPLE tasks (selection/semantic). Defaults to local. */
+  simpleBackend: LlmBackend;
+  /** Per-task backend overrides (LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}). */
+  taskBackends: Partial<Record<LlmTask, LlmBackend>>;
+  /** Optional model override applied to SIMPLE tasks only (LLM_SIMPLE_MODEL). */
+  simpleModel?: string;
   joingonka: { apiKey?: string; baseUrl: string; model: string };
   laya: { baseUrl: string; model: string; apiKey?: string };
   ollama: { baseUrl: string; model: string; apiKey?: string };
@@ -253,13 +286,31 @@ export type LlmEnvConfig = {
 
 const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
 
+function parseBackend(raw: string | undefined): LlmBackend | undefined {
+  return raw === "laya-local" || raw === "ollama" || raw === "joingonka" ? raw : undefined;
+}
+
 /** Read backend configuration from environment (no secrets are ever logged). */
 export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfig {
-  const raw = env["LLM_BACKEND"];
-  const backend: LlmBackend =
-    raw === "laya-local" || raw === "ollama" || raw === "joingonka" ? raw : "joingonka";
+  const backend = parseBackend(env["LLM_BACKEND"]) ?? "joingonka";
+  // Simple tasks default to local — goal is to run large hosted models
+  // only for hard tasks that are worth it.
+  const simpleBackend = parseBackend(env["LLM_SIMPLE_BACKEND"]) ?? "ollama";
+  const taskBackends: Partial<Record<LlmTask, LlmBackend>> = {};
+  const proposal = parseBackend(env["LLM_BACKEND_PROPOSAL"]);
+  const selection = parseBackend(env["LLM_BACKEND_SELECTION"]);
+  const consequence = parseBackend(env["LLM_BACKEND_CONSEQUENCE"]);
+  const semantic = parseBackend(env["LLM_BACKEND_SEMANTIC"]);
+  if (proposal) taskBackends.proposal = proposal;
+  if (selection) taskBackends.selection = selection;
+  if (consequence) taskBackends.consequence = consequence;
+  if (semantic) taskBackends.semantic = semantic;
+  const simpleModel = env["LLM_SIMPLE_MODEL"]?.trim() || undefined;
   return {
     backend,
+    simpleBackend,
+    taskBackends,
+    simpleModel,
     joingonka: {
       apiKey: env["JOINGONKA_API_KEY"],
       baseUrl: env["JOINGONKA_BASE_URL"] ?? JoinGonkaProvider.DEFAULT_BASE_URL,
@@ -282,16 +333,22 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
   };
 }
 
+/** Resolve which backend serves a task: per-task override → tier default. */
+export function resolveTaskBackend(task: LlmTask, cfg: LlmEnvConfig): LlmBackend {
+  return cfg.taskBackends[task] ?? (isSimpleLlmTask(task) ? cfg.simpleBackend : cfg.backend);
+}
+
 /** Backends accepted by LLM_BACKEND / --provider. */
 export function knownBackends(): LlmBackend[] {
   return [...KNOWN_BACKENDS];
 }
 
 /**
- * Build the default provider from env. Recommended split (§16):
- * creative work (proposal/consequence) on JoinGonka, fast local
- * decisions (selection) on Laya — pass `backend: "laya-local"` to
- * route a specific engine at construction time.
+ * Build the default provider from env. Tiered split (default):
+ * hard tasks (proposal/consequence) on JoinGonka, simple tasks
+ * (selection/semantic) on the local backend — pass `backend:
+ * "laya-local"` to route a specific engine at construction time,
+ * or use createProviderForTask() for tier-aware routing.
  */
 export function createProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -299,10 +356,14 @@ export function createProviderFromEnv(
 ): LLMProvider {
   const cfg = resolveLlmEnv(env);
   const which = backend ?? cfg.backend;
+  return buildProviderForBackend(cfg, which);
+}
+
+function buildProviderForBackend(cfg: LlmEnvConfig, which: LlmBackend, modelOverride?: string): LLMProvider {
   if (which === "laya-local") {
     return new LocalLayaProvider({
       baseUrl: cfg.laya.baseUrl,
-      model: cfg.laya.model,
+      model: modelOverride ?? cfg.laya.model,
       apiKey: cfg.laya.apiKey,
       temperature: cfg.temperature,
       repeatPenalty: cfg.repeatPenalty,
@@ -313,7 +374,7 @@ export function createProviderFromEnv(
   if (which === "ollama") {
     return new OllamaProvider({
       baseUrl: cfg.ollama.baseUrl,
-      model: cfg.ollama.model,
+      model: modelOverride ?? cfg.ollama.model,
       apiKey: cfg.ollama.apiKey,
       temperature: cfg.temperature,
       repeatPenalty: cfg.repeatPenalty,
@@ -327,10 +388,25 @@ export function createProviderFromEnv(
   return new JoinGonkaProvider({
     apiKey: cfg.joingonka.apiKey,
     baseUrl: cfg.joingonka.baseUrl,
-    model: cfg.joingonka.model,
+    model: modelOverride ?? cfg.joingonka.model,
     temperature: cfg.temperature,
     repeatPenalty: cfg.repeatPenalty,
     maxTokens: cfg.maxTokens,
     timeoutMs: cfg.timeoutMs,
   });
+}
+
+/**
+ * Tier-aware provider builder: resolves the backend for `task`
+ * (per-task LLM_BACKEND_* override → tier default) and applies
+ * LLM_SIMPLE_MODEL to simple tasks when set.
+ */
+export function createProviderForTask(
+  env: NodeJS.ProcessEnv = process.env,
+  task: LlmTask = "consequence",
+): LLMProvider {
+  const cfg = resolveLlmEnv(env);
+  const which = resolveTaskBackend(task, cfg);
+  const modelOverride = isSimpleLlmTask(task) ? cfg.simpleModel : undefined;
+  return buildProviderForBackend(cfg, which, modelOverride);
 }

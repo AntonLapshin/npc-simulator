@@ -161,9 +161,20 @@ function buildDeps(
     const env = resolveRuntimeEnv(llmOpts);
     const engines = createLlmEngines(logger, { env });
     const cfg = resolveLlmEnv(env);
-    const model =
+    const hardModel =
       cfg.backend === "ollama" ? cfg.ollama.model : cfg.backend === "laya-local" ? cfg.laya.model : cfg.joingonka.model;
-    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `${cfg.backend}/${model}` };
+    const simpleModel = cfg.simpleModel ??
+      (cfg.simpleBackend === "ollama" ? cfg.ollama.model : cfg.simpleBackend === "laya-local" ? cfg.laya.model : cfg.joingonka.model);
+    const hardTasks = (["proposal", "consequence"] as const)
+      .map((t) => cfg.taskBackends[t] ?? cfg.backend)
+      .every((b) => b === cfg.backend);
+    const simpleTasks = (["selection", "semantic"] as const)
+      .map((t) => cfg.taskBackends[t] ?? cfg.simpleBackend)
+      .every((b) => b === cfg.simpleBackend);
+    const llmLabel = hardTasks && simpleTasks
+      ? `hard=${cfg.backend}/${hardModel} simple=${cfg.simpleBackend}/${simpleModel}`
+      : `proposal=${cfg.taskBackends.proposal ?? cfg.backend} selection=${cfg.taskBackends.selection ?? cfg.simpleBackend} consequence=${cfg.taskBackends.consequence ?? cfg.backend} semantic=${cfg.taskBackends.semantic ?? cfg.simpleBackend}`;
+    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel };
   } catch (err) {
     console.log(
       `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,

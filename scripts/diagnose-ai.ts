@@ -116,12 +116,22 @@ async function main(): Promise<void> {
   if (dotEnv) pass(".env", "loaded from project root");
   else warn(".env", "not found — copy it: cp .env.example .env");
 
-  // 2. Backend selection ----------------------------------------------------
+  // 2. Backend selection (tiered: hard vs simple) -----------------------------
   const rawBackend = process.env["LLM_BACKEND"];
-  if (!rawBackend) pass("LLM_BACKEND", `unset, defaulting to "${cfg.backend}"`);
+  if (!rawBackend) pass("LLM_BACKEND", `unset, hard tasks default to "${cfg.backend}"`);
   else if (rawBackend === "joingonka" || rawBackend === "laya-local" || rawBackend === "ollama")
-    pass("LLM_BACKEND", `"${cfg.backend}"`);
+    pass("LLM_BACKEND", `hard tasks on "${cfg.backend}"`);
   else warn("LLM_BACKEND", `unknown value "${rawBackend}" — falling back to "${cfg.backend}"`);
+  const rawSimple = process.env["LLM_SIMPLE_BACKEND"];
+  if (!rawSimple) pass("LLM_SIMPLE_BACKEND", `unset, simple tasks (selection/semantic) default to "${cfg.simpleBackend}"`);
+  else if (rawSimple === "joingonka" || rawSimple === "laya-local" || rawSimple === "ollama")
+    pass("LLM_SIMPLE_BACKEND", `simple tasks (selection/semantic) on "${cfg.simpleBackend}"${cfg.simpleModel ? ` model "${cfg.simpleModel}"` : ""}`);
+  else warn("LLM_SIMPLE_BACKEND", `unknown value "${rawSimple}" — falling back to "${cfg.simpleBackend}"`);
+  const taskOverrides = (Object.entries(cfg.taskBackends) as Array<[string, string]>)
+    .map(([t, b]) => `${t}=${b}`)
+    .join(", ");
+  if (taskOverrides) pass("LLM_BACKEND_* overrides", taskOverrides);
+  else pass("LLM_BACKEND_* overrides", "none (tier defaults apply)");
 
   // 3. Hosted provider (JoinGonka) ------------------------------------------
   if (cfg.joingonka.apiKey) {
@@ -255,9 +265,9 @@ async function main(): Promise<void> {
       complete: async () => JSON.stringify({ action: "Stay where you are.", reasoning: "diagnose" }),
     };
     const logger = createTestLogger("diagnose");
-    // Stub all three engines so this check never needs credentials or network.
+    // Stub all engines so this check never needs credentials or network.
     const engines = createLlmEngines(logger, {
-      providers: { proposal: stub, selection: stub, consequence: stub },
+      providers: { proposal: stub, selection: stub, consequence: stub, semantic: stub },
     });
     const world: World = {
       version: 1,
