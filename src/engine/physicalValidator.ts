@@ -240,6 +240,7 @@ export function validateConsequence(
     errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
     errors.push(...validateNarrativeActors(world, normalized));
     errors.push(...validateObjectGrounding(world, normalized, action));
+    errors.push(...validateNarrativeMovementGrounding(world, normalized, action));
     if (resolved) {
       errors.push(...validateSpeechPreservation(resolved, normalized.narrative));
       errors.push(...validateMovementIntent(world, normalized, action, resolved));
@@ -658,6 +659,74 @@ function validateNarrativeActors(
     ];
   }
   return [];
+}
+
+/**
+ * Exp-4 item 2 (reverse verb-drop, ticks 2/16): narrative locomotion/pose
+ * verbs with no backing patch. The action-side gates check action→patch;
+ * the mirror hole is the consequence *adding* "stands up, walks to the
+ * kitchen" with `moved=true` and zero coordinates and passing (tick 2).
+ * Require: `effects.moved=true` ⇒ position patch present; narrative
+ * locomotion verb ⇒ position change; narrative pose-change verb
+ * (stand up / sit down) ⇒ pose patch. Only the narrative→patch direction:
+ * a movement patch with undescriptive prose (deterministic repairs) stays
+ * allowed, so the repair/salvage paths keep validating.
+ */
+const NARRATIVE_LOCOMOTION_RE =
+  /\b(walk|walks|walked|walking|go|goes|went|going|headed|heading|move|moves|moved|moving|approach|approaches|approached|approaching|enter|enters|entered|entering|leave|leaves|left|leaving|return|returns|returned|returning|advance|advances|proceed|proceeds|come|comes|came|coming|follow|follows|followed|join|joins|joined|hurry|hurries|rush|rushes|stroll|strolls|saunter|saunters|drift|drifts|sidle|sidles)\b/i;
+const HEAD_VERB_RE = /\b(head\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along))\b/i;
+const NARRATIVE_POSE_CHANGE_RE =
+  /\b((stand|stands|standing|stood)\s+up\b|\bsit(s|ting)?\s+down\b|\bsat\s+down\b|\btakes?\s+a\s+seat\b|\bget(s|ting)?\s+up\b)/i;
+const STAY_NEGATION_RE = /\b(stay|stays|staying|stayed|remain|remains|remaining|remained|keep|keeps|keeping|kept|continue|continues|continuing|still|without\s+(moving|standing\s+up|sitting\s+down))\b/i;
+
+function validateNarrativeMovementGrounding(
+  world: World,
+  normalized: {
+    narrative: string;
+    actorPatches: { actorId: string; x?: number; y?: number; pose?: string }[];
+    effects?: { moved?: boolean };
+  },
+  action: Action,
+): string[] {
+  const errors: string[] = [];
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+  const movedPatch =
+    actor !== undefined &&
+    patch?.x !== undefined &&
+    patch?.y !== undefined &&
+    (patch.x !== actor.x || patch.y !== actor.y);
+  // 1. Declared movement must move.
+  if (normalized.effects?.moved === true && !movedPatch) {
+    errors.push(
+      `effects declares moved=true but acting actor (${action.actorId}) has no position change: emit x and y with a new reachable position when movement occurs — never declare movement without the patch`,
+    );
+  }
+  // 2. Narrated locomotion must move (mask resumed activity + body-part
+  // "head" + staying-negations so "return to typing", "shake his head",
+  // and "stays seated" never trip this gate).
+  let masked = maskResumedActivity(normalized.narrative);
+  masked = masked.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
+  // Metaphor is not movement ("go the extra mile" — mirrors the
+  // deterministic action-side mask).
+  masked = masked.replace(/\bgo\s+(?:the\s+)?extra\s+mile\b/gi, " ");
+  const claimsLocomotion =
+    (NARRATIVE_LOCOMOTION_RE.test(masked) || HEAD_VERB_RE.test(masked)) &&
+    !STAY_NEGATION_RE.test(masked);
+  if (claimsLocomotion && !movedPatch) {
+    errors.push(
+      `narrative describes movement ("${normalized.narrative.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement — describing a walk without the patch is incomplete`,
+    );
+  }
+  // 3. Narrated pose change must set pose ("stands up" needs pose:"stand").
+  // Deliberately narrow (stand UP / sit DOWN only): "standing beside it"
+  // is posture prose, not a pose change.
+  if (NARRATIVE_POSE_CHANGE_RE.test(normalized.narrative) && patch?.pose === undefined) {
+    errors.push(
+      `narrative describes standing up/sitting down but no pose patch sets it: include pose ("stand" or "sit") on the acting actor (${action.actorId})`,
+    );
+  }
+  return errors;
 }
 
 /**

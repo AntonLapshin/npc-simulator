@@ -15,7 +15,12 @@ import type {
 import { applyConsequence } from "./patchApplier.js";
 import { validateConsequence } from "./physicalValidator.js";
 import { resolveActionSemantics } from "./actionSemantics.js";
-import { isMovementOnlyFailure, suggestMoveTarget } from "./movementAssist.js";
+import {
+  clampMoveToCap,
+  isClampableMovementFailure,
+  isMovementOnlyFailure,
+  suggestMoveTarget,
+} from "./movementAssist.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { advanceTurn, getCurrentActor, incrementTick } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
@@ -78,6 +83,19 @@ export const FALLBACK_CONSEQUENCE: ConsequenceResult = {
   reasoning: "Fallback due to Consequence Engine failure.",
 };
 
+/**
+ * Exp-4 item 6: did this turn fall back? Structural check (canonical
+ * fallback narrative with no patches) so the history entry can be marked
+ * as un-applied ("tried … (not done)") instead of asserted as fact.
+ */
+export function isFallbackConsequence(result: ConsequenceResult): boolean {
+  return (
+    result.narrative === FALLBACK_CONSEQUENCE.narrative &&
+    result.actorPatches.length === 0 &&
+    result.objectPatches.length === 0
+  );
+}
+
 function depsConfig(deps: EngineDependencies): EngineConfig {
   return deps.config ?? defaultConfig;
 }
@@ -122,12 +140,26 @@ function applySalvageMovementRepair(
   semantics: ActionSemantics,
 ): ConsequenceResult | null {
   if (!semantics.moves) return null;
-  const suggestion = suggestMoveTarget(
-    world,
-    action.actorId,
-    semantics.destinationActorId,
-    semantics.destinationObjectId,
-  );
+  // Exp-4 item 1: prefer the model's own claimed direction clamped to the
+  // cap (a 13-cell jump becomes a 6-cell step the same way) over a fresh
+  // suggestion; fall back to the destination-directed suggestion when the
+  // candidate claims no usable position.
+  const claimed = candidate.actorPatches.find((p) => p.actorId === action.actorId);
+  const suggestion =
+    claimed?.x !== undefined && claimed?.y !== undefined
+      ? (clampMoveToCap(world, action.actorId, claimed.x, claimed.y) ??
+        suggestMoveTarget(
+          world,
+          action.actorId,
+          semantics.destinationActorId,
+          semantics.destinationObjectId,
+        ))
+      : suggestMoveTarget(
+          world,
+          action.actorId,
+          semantics.destinationActorId,
+          semantics.destinationObjectId,
+        );
   if (!suggestion) return null;
   const repaired: ConsequenceResult = structuredClone(candidate);
   const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
@@ -168,13 +200,39 @@ function applySalvageMovementRepair(
  * failures) still falls back — salvage never invents speech and only
  * accepts positions that pass the full movement gate on revalidation.
  */
+export type SalvageEvaluation = {
+  eligible: boolean;
+  reason: string;
+  /** Non-speech blockers when ineligible (empty when eligible or unknown). */
+  blockers: string[];
+};
+
 export function trySalvageConsequence(
   world: World,
   action: Action,
   result: ConsequenceResult,
   semantics: ActionSemantics | undefined,
+  logger?: Logger,
 ): { salvaged: ConsequenceResult; warnings: string[] } | null {
-  if (!semantics) return null;
+  const evaluate = (eligible: boolean, reason: string, blockers: string[] = []): null => {
+    // Exp-4 item 8: every salvage entry evaluation is logged (eligible /
+    // ineligible + reason) so the session trace shows WHY salvage never
+    // fires — not just that it didn't.
+    logger?.log({
+      module: "turn",
+      event: "salvage_evaluated",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { eligible, reason, blockers } satisfies SalvageEvaluation as unknown as Record<
+        string,
+        unknown
+      >,
+    });
+    return null;
+  };
+  if (!semantics) return evaluate(false, "no semantics (fail-open): nothing to salvage against");
   const actorIds = new Set(world.actors.map((a) => a.id));
   const objectIds = new Set(world.scene.objects.map((o) => o.id));
   const strippedActor = result.actorPatches.filter((p) => !actorIds.has(p.actorId));
@@ -198,8 +256,9 @@ export function trySalvageConsequence(
     !candidate.actorPatches.some((p) => p.actorId === action.actorId) &&
     !semantics.moves
   ) {
-    return null;
+    return evaluate(false, "acting actor unpatched and no locomotion implied: only hallucinated patches");
   }
+  let lastBlockers: string[] = [];
   const accept = (
     c: ConsequenceResult,
   ): { salvaged: ConsequenceResult; warnings: string[] } | null => {
@@ -208,21 +267,42 @@ export function trySalvageConsequence(
     if (isSpeechOnlyFailure(revalidation.errors)) {
       return { salvaged: c, warnings: revalidation.errors };
     }
+    lastBlockers = revalidation.errors;
     return null;
   };
   const stripped = accept(candidate);
-  if (stripped) return stripped;
+  if (stripped) {
+    evaluate(true, "valid patches kept (speech nits downgraded to warnings)");
+    return stripped;
+  }
   // Phase 4 "(or movement-repair them)": the turn implies locomotion but the
-  // position is missing or invalid — fill it deterministically and accept
-  // only if the full gate (or speech-only) passes on revalidation.
+  // position is missing or invalid — fill it deterministically (Exp-4 item
+  // 1: claimed over-cap jumps clamp to a partial step, not just fresh
+  // suggestions) and accept only if the full gate (or speech-only) passes
+  // on revalidation.
   if (semantics.moves) {
     const repaired = applySalvageMovementRepair(world, action, candidate, semantics);
     if (repaired) {
       const repairedOut = accept(repaired);
-      if (repairedOut) return repairedOut;
+      if (repairedOut) {
+        evaluate(true, "movement repaired (clamped/suggested) with valid patches kept");
+        return repairedOut;
+      }
+      return evaluate(
+        false,
+        "movement repaired but hard gates still fail: object/contact/addressee/verb-coverage stay hard",
+        lastBlockers,
+      );
     }
+    return evaluate(false, "locomotion implied but no valid capped step exists (surroundings blocked)", lastBlockers);
   }
-  return null;
+  return evaluate(
+    false,
+    isClampableMovementFailure(lastBlockers)
+      ? "clampable movement present but repair produced no valid step"
+      : "hard gates fail (physics/contact/addressee/object/verb-coverage — salvage keeps movement/speech only)",
+    lastBlockers,
+  );
 }
 
 /** Per-turn outcome counts for long-run SLO tracking (Phase 4).
@@ -444,6 +524,65 @@ export async function resolveWithValidation(
           }
         }
       }
+      // Exp-4 item 1: the speed limit reads as a pace, not a wall. When the
+      // model claims an over-cap jump in the right direction (tick 15: the
+      // full 14-cell entrance→desk walk; tick 18: 8–12-cell strides),
+      // project ITS claimed target onto the ≤6-cell reachable set and
+      // continue next turn — instead of failing the whole turn. Accepts
+      // only when the clamped position passes the full gate on
+      // revalidation; otherwise the turn retries/salvages normally.
+      const capHit = validation.errors.some((e) => /at most 6 cells/i.test(e));
+      if (capHit && isClampableMovementFailure(validation.errors)) {
+        const claimed = result.actorPatches.find((p) => p.actorId === action.actorId);
+        const clamped =
+          claimed?.x !== undefined && claimed?.y !== undefined
+            ? clampMoveToCap(world, action.actorId, claimed.x, claimed.y)
+            : undefined;
+        if (clamped) {
+          const clampedResult: ConsequenceResult = structuredClone(result);
+          const existing = clampedResult.actorPatches.find((p) => p.actorId === action.actorId);
+          if (existing) {
+            existing.x = clamped.x;
+            existing.y = clamped.y;
+          } else {
+            clampedResult.actorPatches.push({
+              actorId: action.actorId,
+              x: clamped.x,
+              y: clamped.y,
+            });
+          }
+          if (clampedResult.effects) {
+            clampedResult.effects.moved = true;
+          }
+          const revalidation = validateConsequence(
+            world,
+            clampedResult,
+            action,
+            resolved.semantics,
+          );
+          if (revalidation.valid) {
+            logger.log({
+              module: "validator",
+              event: "validation_passed",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              input: { action, result: clampedResult, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+              output: { ...revalidation, repaired: true, clamped: true, suggestion: clamped },
+            });
+            logger.log({
+              module: "turn",
+              event: "movement_repaired",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              input: { action, result, attempt },
+              output: { suggestion: clamped, repaired: clampedResult, clamped: true },
+            });
+            return clampedResult;
+          }
+        }
+      }
     }
 
     // Phase 4 "retry only prose": when the patches are valid and only the
@@ -483,8 +622,10 @@ export async function resolveWithValidation(
 
   // Exp-3 item 6: before giving up to "Nothing changes.", try to salvage
   // the last attempt — keep valid movement/patches, warn on speech nits.
+  // Exp-4 item 8: the evaluation (eligible/ineligible + reason) is logged
+  // inside trySalvageConsequence as `salvage_evaluated`.
   if (lastResult && lastSemantics) {
-    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics);
+    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics, logger);
     if (salvage) {
       logger.log({
         module: "turn",
@@ -621,7 +762,11 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   const consequence = await resolveWithValidation(world, action, deps);
   report(deps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
 
-  const patched = applyConsequence(world, consequence, action, config);
+  // Exp-4 item 6: mark fallback history as un-applied so proposals ground
+  // on the world, not the wish.
+  const patched = applyConsequence(world, consequence, action, config, {
+    fallback: isFallbackConsequence(consequence),
+  });
   report(deps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({
     module: "turn",

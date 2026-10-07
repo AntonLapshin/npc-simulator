@@ -134,8 +134,78 @@ export function isMovementOnlyFailure(errors: string[]): boolean {
   if (errors.length === 0) return false;
   return errors.every(
     (e) =>
-      /no position change|position is unchanged|not closer|implies movement/i.test(
+      /no position change|position is unchanged|not closer|implies movement|narrative describes movement|declares moved=true/i.test(
         e,
       ),
   );
+}
+
+/**
+ * Exp-4 item 1: is this failure clampable to a partial step? True when the
+ * error set is movement-only (see above) plus optionally the per-turn
+ * displacement cap ("at most 6 cells") and/or the real-progress rule
+ * ("make real progress") — i.e. the model walked in the right direction
+ * but too far (or barely at all). The repair projects the claimed target
+ * onto the ≤6-cell reachable set instead of failing the turn whole, so a
+ * 14-cell entrance→desk walk degrades to capped steps with the question
+ * thread intact.
+ */
+export function isClampableMovementFailure(errors: string[]): boolean {
+  if (errors.length === 0) return false;
+  return errors.every(
+    (e) =>
+      /no position change|position is unchanged|not closer|implies movement|narrative describes movement|declares moved=true|at most 6 cells|make real progress|token shuffle/i.test(
+        e,
+      ),
+  );
+}
+
+/**
+ * Exp-4 item 1: project a claimed (possibly over-cap) destination onto the
+ * ≤6-cell reachable set around the actor: scale the actor→claimed vector
+ * to MAX_STEP_DISTANCE, then snap to the nearest free + reachable cell
+ * (never inside furniture, never outside bounds). Returns null when even
+ * a capped step is impossible (fully blocked surroundings).
+ */
+export function clampMoveToCap(
+  world: World,
+  actorId: string,
+  claimedX: number,
+  claimedY: number,
+): MoveSuggestion | null {
+  const actor = world.actors.find((a) => a.id === actorId);
+  if (!actor) return null;
+  if (!Number.isFinite(claimedX) || !Number.isFinite(claimedY)) return null;
+  const dx = claimedX - actor.x;
+  const dy = claimedY - actor.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return null;
+  const scale = Math.min(1, MAX_STEP_DISTANCE / len);
+  const cx = actor.x + dx * scale;
+  const cy = actor.y + dy * scale;
+  type Candidate = { x: number; y: number; d: number };
+  const candidates: Candidate[] = [];
+  const radius = Math.ceil(MAX_STEP_DISTANCE) + 1;
+  for (
+    let x = Math.max(0, Math.floor(cx - radius));
+    x <= Math.min(world.scene.width - 1, Math.ceil(cx + radius));
+    x++
+  ) {
+    for (
+      let y = Math.max(0, Math.floor(cy - radius));
+      y <= Math.min(world.scene.height - 1, Math.ceil(cy + radius));
+      y++
+    ) {
+      if (x === actor.x && y === actor.y) continue;
+      if (!isFree(world, x, y)) continue;
+      if (Math.hypot(x - actor.x, y - actor.y) > MAX_STEP_DISTANCE + 1e-9) continue;
+      candidates.push({ x, y, d: Math.hypot(x - cx, y - cy) });
+    }
+  }
+  candidates.sort((a, b) => a.d - b.d || a.x - b.x || a.y - b.y);
+  const from = { x: actor.x, y: actor.y };
+  for (const c of candidates) {
+    if (canMoveBetween(world.scene, from, { x: c.x, y: c.y })) return { x: c.x, y: c.y };
+  }
+  return null;
 }

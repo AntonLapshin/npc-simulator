@@ -16,6 +16,7 @@ import type { Action, ActionSemantics, World } from "../types.js";
 import type { SemanticJudge } from "../intelligence/types.js";
 import {
   hasDisplacementToken,
+  hasSpeechToken,
   maskNonLocomotion as canonicalMaskNonLocomotion,
   parseActionQuotes,
   resolveDestinationActorId,
@@ -47,11 +48,14 @@ function mockLooksLikeMovement(text: string): boolean {
  */
 export const maskNonLocomotion = canonicalMaskNonLocomotion;
 
-/** Mock-only speech-intent heuristic (keyword list lives ONLY in this mock). */
+/**
+ * Mock-only speech-intent heuristic. Delegates to the canonical
+ * speech-token check (engine/deterministicSemantics.ts) so the mock and
+ * the production speaks-grounding classify identically — including
+ * unquoted explaining/describing/nodding/thanking (Exp-4 item 3, tick 14).
+ */
 function mockLooksLikeSpeech(text: string): boolean {
-  return /\b(say|says|said|speak|speaks|talk|talks|tell|tells|ask|asks|greet|greets|greeting|hello|hi\b|hey|introduce|speech|shout|whisper|reply|replies|answer|answers|exclaim|announce)\b/i.test(
-    text,
-  );
+  return hasSpeechToken(text);
 }
 
 /** Mock-only name resolution by id/name substring (pronouns not resolved offline). */

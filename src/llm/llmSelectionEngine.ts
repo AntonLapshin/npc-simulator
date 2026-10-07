@@ -10,7 +10,7 @@
 import type { SelectionEngine } from "../intelligence/types.js";
 import type { SelectionResult, World } from "../types.js";
 import { selectionResultSchema } from "../schemas.js";
-import { buildSelectionContext } from "../engine/contextBuilder.js";
+import { buildSelectionContext, detectIdentityLeak } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, selectionSuffix } from "./prompts.js";
@@ -68,8 +68,18 @@ export class LLMSelectionEngine implements SelectionEngine {
       input: { actorId, suggestions },
       maxRetries,
       schema: selectionResultSchema,
-      extraCheck: (value) =>
-        value.action.trim().length === 0 ? "empty action text" : undefined,
+      extraCheck: (value) => {
+        if (value.action.trim().length === 0) return "empty action text";
+        // Exp-4 item 9: the chosen action must be the DECIDING actor's own —
+        // a POV-swapped pick ("Anton walks…" on Dana's turn) retries.
+        const leak =
+          detectIdentityLeak(world, actorId, value.action) ??
+          (typeof value.reasoning === "string"
+            ? detectIdentityLeak(world, actorId, value.reasoning)
+            : undefined);
+        if (leak !== undefined) return `${leak} — choose an action for ${actorId} only`;
+        return undefined;
+      },
     });
 
     if (!result.ok) {

@@ -207,6 +207,9 @@ export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN
   const out: string[] = [];
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i]!;
+    // Exp-4 item 6: fallback attempts never happened — their questions
+    // were never asked and must not become open questions.
+    if (entry.includes("(not done)")) continue;
     if (!entry.includes("?")) continue;
     const lower = entry.toLowerCase();
     const mentionsMe = lower.includes(nameLower) || lower.includes(idLower) || /\byou\b/.test(lower);
@@ -223,13 +226,170 @@ export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN
   return out.slice(-limit);
 }
 
+/**
+ * Exp-4 item 9: machine-detectable identity leak. Flags proposal/selection
+ * text written from the wrong actor's POV (tick 8 Dana-as-Anton, tick 19
+ * Tanya-as-Anton): a leading clause with another roster actor as the
+ * grammatical subject ("Anton walks…" on Dana's turn) or psychology
+ * attributed to them ("Anton wants…", "Tanya is eager to…"). Vocatives
+ * ("Tanya, could you…") and possessives ("Tanya's desk") are NOT leaks —
+ * only Name + verb. Returns a human-readable reason or undefined.
+ */
+export function detectIdentityLeak(
+  world: World,
+  actorId: string,
+  text: string,
+): string | undefined {
+  const others = world.actors.filter((a) => a.id !== actorId);
+  if (others.length === 0 || text.trim().length === 0) return undefined;
+  const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const subjectVerbs =
+    "is|are|was|were|has|have|had|wants?|needs?|eager|thinks?|feels?|knows?|" +
+    "walks?|goes|comes?|moves?|stands?|sits?|turns?|approaches?|enters?|leaves?|returns?|joins?|follows?|" +
+    "says?|said|speaks?|talks?|tells?|asks?|replies?|answers?|shouts?|whispers?|thanks?|greets?|welcomes?|waves?|" +
+    "looks?|watches?|sees?|nods?|smiles?|laughs?|shakes?|hugs?|hands?|gives?|takes?|picks?|opens?|pours?|types?|sips?";
+  for (const o of others) {
+    const first = o.name.split(/[^a-z0-9]+/i)[0] ?? "";
+    const variants = new Set<string>();
+    if (o.id.length >= 2) variants.add(o.id.toLowerCase());
+    if (o.name.length >= 2) variants.add(o.name.toLowerCase());
+    if (first.length >= 3) variants.add(first.toLowerCase());
+    for (const v of variants) {
+      // Leading subject: "Anton walks…" / "Anton is eager…" — but never
+      // "Anton," (vocative) or "Anton's" (possessive/landmark).
+      const leadRe = new RegExp(`^${esc(v)}\\s+(${subjectVerbs})\\b`, "i");
+      const firstClause = text.split(/[.!?;]+|\s+and\s+|\s+then\s+/i)[0]?.trim() ?? "";
+      if (firstClause.length > 0 && leadRe.test(firstClause)) {
+        return `identity leak: text casts "${o.id}" as the acting subject ("${firstClause.slice(0, 60)}…") on ${actorId}'s turn — act as ${actorId} only`;
+      }
+      // Psychology attribution anywhere: "Anton wants to familiarize…"
+      // (tick 8), "Tanya knows the best way for Anton…" is fine (about
+      // others is OK) — only flag "<Other> wants/needs/is eager" goals.
+      const psychRe = new RegExp(
+        `\\b${esc(o.name)}\\s+(wants?|needs?|is\\s+eager|eager\\s+to)\\b`,
+        "i",
+      );
+      if (psychRe.test(text)) {
+        return `identity leak: text attributes "${o.id}"'s goals ("${text.match(psychRe)?.[0]}") on ${actorId}'s turn — pursue YOUR goal, not theirs`;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Core verbs for the handshake/greeting attractor dedup (Exp-4 item 10). */
+const CORE_VERBS: Array<[RegExp, string]> = [
+  [/\b(handshake|shakes?\s+hands?|shake|shakes?|shook|shaking|shaken)\b/i, "shake"],
+  [/\b(hugs?|hugged|hugging|embrace|embraces|embraced)\b/i, "hug"],
+  [/\b(high[\s-]?five|fist[\s-]?bump|pats?|patted|slaps?|slapped)\b/i, "contact"],
+  [/\b(greets?|greeted|greeting|welcomes?|welcomed|welcoming)\b/i, "greet"],
+  [/\b(waves?|waved|waving)\b/i, "wave"],
+  [/\b(thanks?|thanked|thanking)\b/i, "thank"],
+  [/\b(asks?|asked|asking)\b/i, "ask"],
+  [/\b(tells?|told|telling|explains?|explained|explaining|discuss|discusses|discussed)\b/i, "tell"],
+  [/\b(walks?|walked|walking|goes?|went|going|heads?|headed|heading|moves?|moved|moving|approach|approaches|approached|comes?|came|coming)\b/i, "move"],
+  [/\b(sits?|sitting|sat)\b/i, "sit"],
+  [/\b(stands?|standing|stood)\b/i, "stand"],
+  [/\b(pours?|poured|pouring|brews?|brewed|fills?|filled)\b/i, "pour"],
+  [/\b(pick\s+up|picks\s+up|grabs?|grabbed|holds?|held|holding|carry|carries|carried|opens?|opened|opening)\b/i, "take"],
+  [/\b(sips?|sipped|sipping|drinks?|drank|drinking|types?|typed|typing)\b/i, "use"],
+  [/\b(introduces?|introduced|introducing)\b/i, "introduce"],
+  [/\b(looks?|looked|looking|glances?|glanced|watch|watches|nods?|nodded|smiles?|smiled)\b/i, "gesture"],
+];
+
+/** Object-kind nouns for the attractor core (desk/coffee/task/…). */
+const CORE_NOUNS: Array<[RegExp, string]> = [
+  [/\bdesk\b/i, "desk"],
+  [/\bcoffee\b/i, "coffee"],
+  [/\blaptop\b/i, "laptop"],
+  [/\bmug\b|\bcup\b/i, "mug"],
+  [/\btask\b|\bcode\b|\bbackend\b/i, "task"],
+  [/\bquestion\b|\bhelp\b|\bdirections?\b/i, "question"],
+  [/\bemail\b|\bpapers?\b|\bnotes?\b/i, "papers"],
+  [/\bbreak\b|\blunch\b|\btea\b/i, "break"],
+  [/\bmeeting\b/i, "meeting"],
+  [/\bhand\b|\bhands\b/i, "hand"],
+];
+
+/**
+ * Exp-4 item 10: verb+noun core of an action from one actor's perspective
+ * ("Anton shakes hands with Tanya" on Tanya's turn → "shake|anton"). The
+ * repetition guard lists prior actions but the model re-emits them anyway
+ * (6 handshakes, 6 greetings) — comparing cores proposal-side beats
+ * another prompt line. The deciding actor (`selfId`) is skipped when
+ * scanning mentions so both "Shake Anton's hand" and the observer-subject
+ * variant "Anton shakes hands with Tanya" core to the other participant;
+ * when nobody else is named, the self mention (or object kind) is kept.
+ */
+export function suggestionCore(world: World, text: string, selfId?: string): string {
+  const lower = text.toLowerCase();
+  let verb = "other";
+  for (const [re, stem] of CORE_VERBS) {
+    if (re.test(text)) {
+      verb = stem;
+      break;
+    }
+  }
+  const mentioned = (a: { id: string; name: string }): boolean => {
+    const first = a.name.split(/[^a-z0-9]+/i)[0]?.toLowerCase() ?? "";
+    return (
+      (a.id.length >= 2 && lower.includes(a.id.toLowerCase())) ||
+      (a.name.length >= 2 && lower.includes(a.name.toLowerCase())) ||
+      (first.length >= 3 && new RegExp(`\\b${first}\\b`).test(lower))
+    );
+  };
+  let noun = "";
+  for (const a of world.actors) {
+    if (selfId !== undefined && a.id === selfId) continue;
+    if (mentioned(a)) {
+      noun = a.id;
+      break;
+    }
+  }
+  if (noun === "" && selfId !== undefined) {
+    const self = world.actors.find((a) => a.id === selfId);
+    if (self && mentioned(self)) noun = self.id;
+  }
+  if (noun === "") {
+    for (const [re, stem] of CORE_NOUNS) {
+      if (re.test(text)) {
+        noun = stem;
+        break;
+      }
+    }
+  }
+  return `${verb}|${noun}`;
+}
+
+/**
+ * Exp-4 item 10: does this text repeat a recent own action's core?
+ * Returns the repeated prior action or undefined.
+ */
+export function findCoreRepeat(
+  world: World,
+  actorId: string,
+  text: string,
+): string | undefined {
+  const core = suggestionCore(world, text, actorId);
+  for (const prior of getRecentOwnActions(world, actorId)) {
+    if (suggestionCore(world, prior, actorId) === core) return prior;
+  }
+  return undefined;
+}
+
 /** Recent actions this actor already took (for the repetition guard). */
 export function getRecentOwnActions(world: World, actorId: string, limit = MAX_RECENT_OWN_ACTIONS): string[] {
   const actor = getActorById(world, actorId);
   if (!actor) return [];
   const prefixName = `${actor.name}:`;
   const prefixId = `${actor.id}:`;
-  const mine = world.history.filter((h) => h.startsWith(prefixName) || h.startsWith(prefixId));
+  // Exp-4 item 6: fallback attempts ("tried … (not done)") never happened —
+  // neither a repeat to avoid nor a question answered. The "tried:" prefix
+  // already misses the ":" author match below; the explicit filter keeps
+  // this true even if the format ever changes.
+  const mine = world.history.filter(
+    (h) => !h.includes("(not done)") && (h.startsWith(prefixName) || h.startsWith(prefixId)),
+  );
   return mine.slice(-limit);
 }
 
@@ -409,6 +569,11 @@ export function buildProposalContext(
   const coworkerAnchor = buildCoworkerAnchor(world, actorId);
 
   return [
+    // Exp-4 item 9: the proposal prompt LEADS with who is deciding (not
+    // buried after candidates) — POV swaps (Dana-as-Anton, Tanya-as-Anton)
+    // are machine-rejected downstream (see detectIdentityLeak).
+    buildIdentityAnchor(world, actorId),
+    "",
     "Current Actor",
     "",
     `ID: ${actor.id}`,

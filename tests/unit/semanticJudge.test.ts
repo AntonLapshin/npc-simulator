@@ -91,7 +91,7 @@ describe("resolveActionSemantics", () => {
     expect(resolved).toEqual({
       source: "effects",
       semantics: { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
-      disagreements: ["moves conflict: effects=true judge=false (kept OR)"],
+      disagreements: ["moves conflict: effects=true judge=false (kept deterministic token=true)"],
     });
     expect(logger.store.events()).toContain("semantic_resolved");
     expect(logger.store.events()).toContain("judge_vs_effects_disagreement");

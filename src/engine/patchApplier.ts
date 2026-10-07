@@ -8,11 +8,30 @@ import { cloneWorld } from "./worldStore.js";
  * object updates, world history entries, and trimming.
  * Assumes the result already passed validateConsequence.
  */
+export type ApplyConsequenceOptions = {
+  /**
+   * Exp-4 item 6: the turn fell back ("Nothing changes.") — record the
+   * attempt separately from the world ("Anton tried: … (not done)") so
+   * proposal/selection ground on what happened, not the wish. Fallback
+   * entries never count as answers, own actions, or open questions
+   * (see contextBuilder filtering).
+   */
+  fallback?: boolean;
+};
+
+/** Marker suffix for un-applied fallback history entries (Exp-4 item 6). */
+export const FALLBACK_HISTORY_MARKER = "(not done)";
+
+export function isFallbackHistoryEntry(entry: string): boolean {
+  return entry.includes(FALLBACK_HISTORY_MARKER);
+}
+
 export function applyConsequence(
   world: World,
   result: ConsequenceResult,
   action: Action,
   config: EngineConfig = defaultConfig,
+  opts: ApplyConsequenceOptions = {},
 ): World {
   const next = cloneWorld(world);
   const actorById = new Map(next.actors.map((a) => [a.id, a]));
@@ -69,7 +88,13 @@ export function applyConsequence(
   // but not duplicated here — it must describe only the acting actor
   // (see TURN DISCIPLINE) so repeating it would double-report the turn.
   // UI layers show this entry only when the viewer can perceive the actor.
-  next.history.push(`${actorName}: ${action.text}`);
+  // Exp-4 item 6: fallback attempts are marked as un-applied so later
+  // proposals don't assume Anton sits at his desk / the task was explained.
+  next.history.push(
+    opts.fallback
+      ? `${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}`
+      : `${actorName}: ${action.text}`,
+  );
   if (next.history.length > config.maxHistoryEntries) {
     next.history.splice(0, next.history.length - config.maxHistoryEntries);
   }

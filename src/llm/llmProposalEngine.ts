@@ -8,7 +8,11 @@
 import type { ProposalEngine } from "../intelligence/types.js";
 import type { ProposalResult, World } from "../types.js";
 import { proposalResultSchema } from "../schemas.js";
-import { buildProposalContext } from "../engine/contextBuilder.js";
+import {
+  buildProposalContext,
+  detectIdentityLeak,
+  findCoreRepeat,
+} from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, proposalSuffix } from "./prompts.js";
@@ -96,11 +100,33 @@ export class LLMProposalEngine implements ProposalEngine {
         const min = this.options.minSuggestions ?? MIN_PROPOSAL_SUGGESTIONS;
         if (cleaned.length < min)
           return `only ${cleaned.length} usable suggestion(s), need at least ${min} — generate a full option set`;
+        // Exp-4 item 9: reject POV swaps ("Anton wants…" on Dana's turn) so
+        // the retry generates options for the DECIDING actor.
+        for (const s of cleaned) {
+          const leak = detectIdentityLeak(world, actorId, s);
+          if (leak !== undefined)
+            return `${leak} — rewrite every suggestion from ${actorId}'s own point of view`;
+        }
+        if (typeof value.reasoning === "string") {
+          const leak = detectIdentityLeak(world, actorId, value.reasoning);
+          if (leak !== undefined)
+            return `${leak} (in reasoning) — reason about ${actorId}'s own goals only`;
+        }
+        // Exp-4 item 10: proposal-level dedup — a suggestion whose
+        // verb+noun core matches a recent own action (6 handshakes, 6
+        // greetings) is a repeat even when reworded.
+        for (const s of cleaned) {
+          const prior = findCoreRepeat(world, actorId, s);
+          if (prior !== undefined)
+            return `suggestion "${s.slice(0, 60)}" repeats recent action "${prior.slice(0, 60)}" (same verb+noun core) — propose something that moves the scene forward instead`;
+        }
         return undefined;
       },
       repairHint:
         "suggestions must be an array of at least 2 distinct non-empty action sentences (aim for the requested max); " +
-        "no numbering prefixes, no empty strings, no duplicates.",
+        "no numbering prefixes, no empty strings, no duplicates; " +
+        "every suggestion must be written from the deciding actor's own point of view (never cast another roster actor as the subject, never attribute their goals); " +
+        "no suggestion may repeat the verb+noun core of a recent own action.",
     });
 
     if (!result.ok) {

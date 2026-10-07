@@ -13,6 +13,7 @@ import type { SemanticJudge } from "../intelligence/types.js";
 import type { Logger } from "../logging/logger.js";
 import {
   hasDisplacementToken,
+  hasSpeechToken,
   isActorMentioned,
   parseActionQuotes,
   resolveDeterministicSemantics,
@@ -39,7 +40,23 @@ function normActionText(s: string): string {
 export function isQuoteGroundedInAction(quote: string, actionText: string): boolean {
   const q = normActionText(quote);
   if (q.length === 0) return false;
-  return normActionText(actionText).includes(q);
+  const hay = normActionText(actionText);
+  const idx = hay.indexOf(q);
+  if (idx === -1) return false;
+  // Exp-4 item 4 (tick 5: "Why don" for "Why don't we..."): a substring
+  // that ends mid-word is a truncation, not ground truth. Both ends of
+  // the match must sit on a word boundary (string edge, whitespace, or
+  // punctuation) — otherwise the "corrupted quote becomes ground truth
+  // the speech gate must demand".
+  const isWordChar = (c: string): boolean => /[a-z0-9']/i.test(c);
+  const before = idx > 0 ? hay[idx - 1]! : "";
+  const after = idx + q.length < hay.length ? hay[idx + q.length]! : "";
+  // Leading partial word ("don" matching inside "abandon") is also corrupt.
+  if (before !== "" && isWordChar(before) && q.length > 0 && isWordChar(q[0]!)) return false;
+  if (after !== "" && isWordChar(after) && q.length > 0 && isWordChar(q[q.length - 1]!)) {
+    return false;
+  }
+  return true;
 }
 
 /** Deterministic projection of a self-declared `effects` block to ActionSemantics. */
@@ -163,10 +180,24 @@ export function applyDeterministicGrounding(
 
   // Quotes: action-text parse is ground truth; keep declared/judged quotes
   // only when they are substrings of the action text.
+  // Exp-4 item 4: a merged quote that is a strict truncation of a parsed
+  // action quote ("Why don" vs "Why don't we take a 10-minute break…")
+  // is corruption, not ground truth — drop it even though it is technically
+  // a substring (isQuoteGroundedInAction already rejects mid-word ends,
+  // this catches whole-word prefixes like "Why" for "Why don't we...").
   const actionQuotes = det.quotedSpeech;
   const groundedQuotes: string[] = [...actionQuotes];
   for (const q of merged.quotedSpeech) {
     if (groundedQuotes.includes(q)) continue;
+    const truncatedOf = actionQuotes.find(
+      (a) => a.length > q.length && normActionText(a).includes(normActionText(q)),
+    );
+    if (truncatedOf !== undefined) {
+      disagreements.push(
+        `dropped truncated quote "${q.slice(0, 60)}" (prefix of action-text quote "${truncatedOf.slice(0, 60)}")`,
+      );
+      continue;
+    }
     if (isQuoteGroundedInAction(q, action.text)) {
       groundedQuotes.push(q);
     } else {
@@ -265,50 +296,92 @@ export function applyDeterministicGrounding(
   // Contact stays LLM-owned (moves/speaks/contact role): roster validity only.
   const contactActorId = groundActorId("contactActorId", merged.contactActorId);
 
-  // Requirement flags stay merged-OR, but record effects-vs-judge conflict.
-  // Phase 2: `moves` additionally requires a destination-or-displacement
-  // token in the action text itself — merged-OR cannot conjure locomotion
-  // out of a glance.
-  let moves = merged.moves;
-  let moveDestinationsDropped = false;
-  if (moves && !hasDisplacementToken(action.text)) {
-    moves = false;
-    moveDestinationsDropped =
+  // Exp-4 item 7: the deterministic parse wins over the LLM union.
+  // `moves` is the token check itself (not OR): an action with a
+  // displacement token moves even when both sides declare false (no
+  // verb-drop dodge), and an action without one never moves even when the
+  // judge hallucinates it (no forced teleport). Same for `speaks` via the
+  // speech-token check (Exp-4 item 3): unquoted explaining/telling/nodding
+  // verbs force speaks=true so hollow look-ups cannot pass.
+  // Destination conflicts resolve to the grounded resolution over effects
+  // (Exp-4 tick 10: the consequence's wrong landmark overrode the grounded
+  // one) — computed below after the id grounding.
+  const tokenMoves = hasDisplacementToken(action.text);
+  const tokenSpeaks = hasSpeechToken(action.text);
+  const moves = tokenMoves;
+  const speaks = merged.speaks || tokenSpeaks;
+  if (merged.moves && !tokenMoves) {
+    const moveDestinationsDropped =
       merged.destinationActorId !== undefined || merged.destinationObjectId !== undefined;
     disagreements.push(
       "dropped moves=true (no displacement verb or destination token in the action text; perception/cognition is never locomotion)" +
         (moveDestinationsDropped ? " — destination requirement(s) dropped with it" : ""),
     );
+  } else if (merged.moves !== moves) {
+    disagreements.push(
+      `moves deterministic override: merged=${merged.moves} token=${tokenMoves} (kept token)`,
+    );
+  }
+  if (merged.speaks !== speaks) {
+    disagreements.push(
+      `speaks deterministic override: merged=${merged.speaks} speech-token=${tokenSpeaks} (kept OR-with-token)`,
+    );
   }
   if (fromEffects && fromJudge) {
     if (fromEffects.moves !== fromJudge.moves) {
       disagreements.push(
-        `moves conflict: effects=${fromEffects.moves} judge=${fromJudge.moves} (kept OR)`,
+        `moves conflict: effects=${fromEffects.moves} judge=${fromJudge.moves} (kept deterministic token=${tokenMoves})`,
       );
     }
     if (fromEffects.speaks !== fromJudge.speaks) {
       disagreements.push(
-        `speaks conflict: effects=${fromEffects.speaks} judge=${fromJudge.speaks} (kept OR)`,
+        `speaks conflict: effects=${fromEffects.speaks} judge=${fromJudge.speaks} (kept OR-with-token=${speaks})`,
       );
     }
-    if (
-      fromEffects.destinationActorId !== undefined &&
-      fromJudge.destinationActorId !== undefined &&
-      fromEffects.destinationActorId !== fromJudge.destinationActorId
-    ) {
-      disagreements.push(
-        `destination conflict: effects=${fromEffects.destinationActorId} judge=${fromJudge.destinationActorId} (kept effects)`,
-      );
-    }
+  }
+
+  // Grounded destination wins over effects: when the deterministic
+  // resolution names a different actor/object than the declaration, the
+  // declaration's landmark is the consequence's wrong guess (tick 10).
+  let finalDestinationActorId = destinationActorId;
+  let finalDestinationObjectId = destinationObjectId;
+  if (
+    det.destinationActorId !== undefined &&
+    finalDestinationActorId !== undefined &&
+    det.destinationActorId !== finalDestinationActorId
+  ) {
+    disagreements.push(
+      `destination conflict: effects=${finalDestinationActorId} grounded=${det.destinationActorId} (kept grounded)`,
+    );
+    finalDestinationActorId = det.destinationActorId;
+  } else if (
+    fromEffects?.destinationActorId !== undefined &&
+    fromJudge?.destinationActorId !== undefined &&
+    fromEffects.destinationActorId !== fromJudge.destinationActorId &&
+    det.destinationActorId === undefined
+  ) {
+    disagreements.push(
+      `destination conflict: effects=${fromEffects.destinationActorId} judge=${fromJudge.destinationActorId} (kept effects)`,
+    );
+  }
+  if (
+    det.destinationObjectId !== undefined &&
+    finalDestinationObjectId !== undefined &&
+    det.destinationObjectId !== finalDestinationObjectId
+  ) {
+    disagreements.push(
+      `destination conflict: effects=${finalDestinationObjectId} grounded=${det.destinationObjectId} (kept grounded)`,
+    );
+    finalDestinationObjectId = det.destinationObjectId;
   }
 
   return {
     semantics: {
       moves,
-      speaks: merged.speaks,
+      speaks,
       quotedSpeech: groundedQuotes,
-      ...(destinationActorId !== undefined && moves ? { destinationActorId } : {}),
-      ...(destinationObjectId !== undefined && moves ? { destinationObjectId } : {}),
+      ...(finalDestinationActorId !== undefined && moves ? { destinationActorId: finalDestinationActorId } : {}),
+      ...(finalDestinationObjectId !== undefined && moves ? { destinationObjectId: finalDestinationObjectId } : {}),
       ...(addresseeActorId !== undefined ? { addresseeActorId } : {}),
       ...(contactActorId !== undefined ? { contactActorId } : {}),
     },

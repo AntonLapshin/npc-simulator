@@ -86,6 +86,7 @@ describe("golden office scenario", () => {
             y: 9,
             state: "standing near Jeff",
             emotion: "friendly",
+            pose: "stand",
             memoriesAppend: ["Walked over to Jeff after hearing his introduction."],
             relationshipsAppend: ["Ana approached Jeff in a friendly way."],
           },

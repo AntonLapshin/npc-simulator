@@ -296,10 +296,18 @@ describe("physicalValidator", () => {
         .valid,
     ).toBe(false);
 
-    // "go the extra mile" is metaphor — NOT movement.
+    // "go the extra mile" is metaphor — NOT movement. (Exp-4 item 2: a
+    // narrative that itself narrates locomotion still needs the patch, so
+    // the still-narrative case uses effort prose, not "saunters over".)
     const mile: ActionSemantics = { moves: false, speaks: false, quotedSpeech: [] };
+    const mileResult: ConsequenceResult = {
+      narrative: "U puts in extra effort on the report.",
+      actorPatches: [{ actorId: "u", thoughts: "Focused." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
     expect(
-      validateConsequence(world, saunterResult, { actorId: "u", text: "Go the extra mile." }, mile),
+      validateConsequence(world, mileResult, { actorId: "u", text: "Go the extra mile." }, mile),
     ).toEqual({ valid: true, errors: [] });
   });
 

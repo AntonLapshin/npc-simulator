@@ -154,11 +154,138 @@ function objectMentionVariants(obj: { id: string; name: string }): string[] {
 }
 
 /**
+ * Explicit speech verbs (Exp-4 item 3, tick 14): explaining, telling,
+ * asking, nodding-along etc. count as speech even with no quote marks.
+ * "Nod and start explaining Anton's first task" speaks — otherwise every
+ * explanation is droppable. Greeting verbs stay out of the *unquoted*
+ * set only in the sense that quotes still dominate; the token itself is
+ * intentionally broad (rendering stays lenient, content strict).
+ */
+const SPEECH_VERBS =
+  "say|says|said|tell|tells|told|speak|speaks|spoke|spoken|talk|talks|talked|" +
+  "ask|asks|asked|asking|answer|answers|answered|reply|replies|replied|" +
+  "explain|explains|explained|explaining|describe|describes|described|describing|" +
+  "mention|mentions|mentioned|mentioning|discuss|discusses|discussed|discussing|" +
+  "announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|" +
+  "call|calls|called|thank|thanks|thanked|thanking|greet|greets|greeted|greeting|" +
+  "introduce|introduces|introduced|introducing|brief|briefs|briefed|briefing|" +
+  "nod|nods|nodded|nodding|" +
+  "hello|hi|hey|speech|exclaim|exclaims|exclaimed|exclaiming";
+
+/**
+ * Exp-4 item 3: does the action text carry an explicit speech token? True
+ * for any quoted segment (existing ground truth) or an unquoted speech
+ * verb above ("explain", "nod and start explaining...", "thank both").
+ * Used by the grounding layer to force `speaks=true` so unquoted
+ * explanations cannot pass hollow.
+ */
+export function hasSpeechToken(text: string): boolean {
+  if (parseActionQuotes(text).length > 0) return true;
+  // A bare question mark is an utterance even without a verb ("Is this my spot?").
+  if (text.includes("?")) return true;
+  return new RegExp(`\\b(?:${SPEECH_VERBS})\\b`, "i").test(text);
+}
+
+/** Object-kind ranking for walk vs grab targets (Exp-4 item 5). */
+function objectKindScore(
+  o: { id: string; name: string },
+  mode: "walk" | "grab",
+): number {
+  const id = o.id.toLowerCase();
+  const name = o.name.toLowerCase();
+  const hay = `${id} ${name}`;
+  // Fixtures / building fabric are never grab targets; signs are labels,
+  // not destinations to stand at.
+  const isFixture = /wall|window|door|plant|printer|cooler|cabinet|sofa|table/i.test(hay);
+  const isSign = /sign/i.test(hay);
+  const isFurniture = /desk|table|chair|sofa|machine/i.test(hay);
+  const isProp = /mug|cup|laptop|papers|note|document|lamp/i.test(hay);
+  if (mode === "walk") {
+    // Walk targets prefer furniture (desks, machines, chairs) over loose
+    // props over signs over fixtures. Signs rank after furniture even when
+    // their name contains a furniture word ("Anton's desk sign" is a label
+    // on a desk, not a place to stand).
+    if (isSign) return 2;
+    if (isFurniture && !isFixture) return 0;
+    if (isProp) return 1;
+    if (isFixture) return 3;
+    return 1;
+  }
+  // Grab targets ("pour", "pick up", "set up the laptop") prefer props
+  // (mugs, laptops) over the fixture that houses them (coffee_machine).
+  if (isProp) return 0;
+  if (isSign) return 2;
+  if (isFixture && !isFurniture) return 3;
+  if (/coffee/i.test(hay) && !/mug|cup/i.test(hay)) return 2;
+  return 1;
+}
+
+/**
+ * Ranked object scoring (Exp-4 item 5): ownership ("his"→actor's own
+ * objects) beats proximity beats kind. Returns the best candidate id or
+ * undefined. `mode` selects walk-target ranking (furniture first) vs
+ * grab-target ranking (props first).
+ */
+export function rankDestinationObjects(
+  world: World,
+  candidates: { id: string; name: string; x: number; y: number; w: number; h: number }[],
+  actionText: string,
+  actingActorId: string | undefined,
+  mode: "walk" | "grab",
+): string | undefined {
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0]!.id;
+  const actor = actingActorId ? world.actors.find((a) => a.id === actingActorId) : undefined;
+  const actorLower = (actingActorId ?? "").toLowerCase();
+  const actorName = actor?.name.toLowerCase() ?? actorLower;
+  // Possessive scope: "my"/"his"/"own" scopes to the acting actor's objects;
+  // "her"/named scopes ("Tanya's", "Dana's desk") scope to that owner.
+  const possessiveSelf = /\b(my|own|his)\b/i.test(actionText);
+  const namedOwner = world.actors.find(
+    (a) =>
+      a.id !== actingActorId &&
+      new RegExp(`\\b${a.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[''’]s\\b`, "i").test(actionText),
+  );
+  const ownerPrefix = namedOwner
+    ? namedOwner.id.toLowerCase()
+    : possessiveSelf && actorLower
+      ? actorLower
+      : undefined;
+  const scored = candidates.map((o) => {
+    const idLower = o.id.toLowerCase();
+    const nameLower = o.name.toLowerCase();
+    let ownedScore = 1;
+    if (ownerPrefix) {
+      ownedScore =
+        idLower.startsWith(`${ownerPrefix}_`) || nameLower.startsWith(namedOwner?.name.toLowerCase() ?? actorName)
+          ? 0
+          : 2;
+    } else if (actorLower) {
+      // No possessive: mildly prefer the actor's own objects over others'
+      // (walking to "the desk" from your spawn usually means your desk),
+      // but never override an explicit name match handled by the caller.
+      ownedScore = idLower.startsWith(`${actorLower}_`) ? 0.5 : 1;
+    }
+    const cx = o.x + o.w / 2;
+    const cy = o.y + o.h / 2;
+    const dist = actor ? Math.hypot(actor.x - cx, actor.y - cy) : 0;
+    return { o, ownedScore, kind: objectKindScore(o, mode), dist };
+  });
+  scored.sort(
+    (a, b) =>
+      a.ownedScore - b.ownedScore || a.kind - b.kind || a.dist - b.dist || a.o.id.localeCompare(b.o.id),
+  );
+  return scored[0]!.o.id;
+}
+
+/**
  * Deterministic movement-target landmark: object whose id or name appears
  * in a movement-toward clause, else the generic/possessive fallback below.
- * Generic landmark words map to the first matching object — except with a
- * possessive ("my desk"), which resolves to the acting actor's own object
- * first (anton_desk for anton's "my desk").
+ * Exp-4 item 5: every multi-candidate choice is ranked (ownership →
+ * kind → proximity) instead of first-keyword-match; walk targets prefer
+ * furniture over props/signs ("set up the laptop" no longer resolves to
+ * someone else's laptop-sign when a desk walk is meant — the grab/walk
+ * mode is picked from the action verbs).
  */
 export function resolveDestinationObjectId(
   world: World,
@@ -167,14 +294,32 @@ export function resolveDestinationObjectId(
 ): string | undefined {
   const verbRe = new RegExp(`\\b(?:${LOCOMOTION_VERBS})\\w*\\b`, "i");
   const towardRe = /\btoward[s]?\b|\b(?:over to|up to|next to|beside|behind)\b/i;
+  const grabRe = /\b(grab|grabs|pick(?:s|ed|ing)?\s+up|pour|pours|fill|fills|brew|open|opens|boot|hold|holds|holding|carry|carries|set\s+up|use|uses|using)\b/i;
+  const mode: "walk" | "grab" = grabRe.test(actionText) ? "grab" : "walk";
+  // Exp-4 tick 15: "the desk with the ANTON sign" names a sign, but the
+  // walk target is the furniture. A clause whose only hits are signs while
+  // naming furniture falls through to ranked generic resolution.
+  const furnitureWordRe = /\b(desk|table|chair|sofa|machine)\b/i;
   for (const clause of splitClauses(actionText)) {
-    if (!verbRe.test(clause) && !towardRe.test(clause)) continue;
-    for (const o of world.scene.objects) {
-      if (objectMentionVariants(o).some((v) => mentionsVariant(clause, v))) return o.id;
+    if (!verbRe.test(clause) && !towardRe.test(clause) && !grabRe.test(clause)) continue;
+    const hits = world.scene.objects.filter((o) =>
+      objectMentionVariants(o).some((v) => mentionsVariant(clause, v)),
+    );
+    if (hits.length > 0) {
+      const nonSignHits = hits.filter((o) => !/sign/i.test(`${o.id} ${o.name}`));
+      if (nonSignHits.length > 0 || !furnitureWordRe.test(clause)) {
+        const pool = nonSignHits.length > 0 ? nonSignHits : hits;
+        const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, mode);
+        if (ranked) return ranked;
+      }
     }
   }
   const possessive = /\bmy\b|\bown\b/i.test(actionText);
   const generic: Array<[RegExp, RegExp]> = [
+    // Exp-4 tick 7: "grab leftover coffee" means the lounge leftovers
+    // (lounge_mug), not the machine fixture — checked before bare coffee.
+    [/\bleftover\b/i, /lounge/i],
+    [/\blounge\b/i, /lounge/i],
     [/\bcoffee\b/i, /coffee/i],
     [/\bdesk\b/i, /desk/i],
     [/\bdoor\b/i, /door/i],
@@ -189,17 +334,16 @@ export function resolveDestinationObjectId(
         (o) => objRe.test(o.name) || objRe.test(o.id),
       );
       if (matches.length === 0) continue;
+      // "coffee" as an object to grab ("pour a coffee", "grab coffee")
+      // prefers the lounge mug over the machine fixture.
+      const grabMode: "walk" | "grab" =
+        /\bcoffee\b/i.test(wordRe.source) && grabRe.test(actionText) ? "grab" : mode;
       if (possessive && actingActorId) {
-        const actorLower = actingActorId.toLowerCase();
-        const actor = world.actors.find((a) => a.id === actingActorId);
-        const actorName = actor?.name.toLowerCase() ?? actorLower;
-        const owned =
-          matches.find((o) => o.id.toLowerCase().startsWith(`${actorLower}_`)) ??
-          matches.find((o) => o.id.toLowerCase().includes(actorLower)) ??
-          matches.find((o) => o.name.toLowerCase().startsWith(actorName));
-        if (owned) return owned.id;
+        const ranked = rankDestinationObjects(world, matches, actionText, actingActorId, grabMode);
+        if (ranked) return ranked;
       }
-      return matches[0]!.id;
+      const ranked = rankDestinationObjects(world, matches, actionText, actingActorId, grabMode);
+      if (ranked) return ranked;
     }
   }
   return undefined;

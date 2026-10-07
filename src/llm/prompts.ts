@@ -50,6 +50,8 @@ export function proposalSuffix(): string {
     "",
     PROPOSAL_OUTPUT_SCHEMA,
     "",
+    "Write every suggestion from the deciding actor's own point of view (never cast another roster actor as the subject, never pursue their goals).",
+    "Do not repeat a recent own action listed above unless the situation clearly changed (same verb+noun core counts as a repeat).",
     "Return JSON only, matching the schema above.",
     "Return COMPACT single-line JSON (no pretty-print, no markdown).",
   ].join("\n");
