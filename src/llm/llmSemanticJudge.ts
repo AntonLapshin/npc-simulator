@@ -8,6 +8,7 @@
 import type { SemanticJudge } from "../intelligence/types.js";
 import type { Action, ActionSemantics, World } from "../types.js";
 import { actionSemanticsSchema } from "../schemas.js";
+import { suggestSimilarIds } from "../engine/physicalValidator.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT } from "./prompts.js";
@@ -38,9 +39,16 @@ export function buildSemanticJudgePrompt(world: World, action: Action): string {
     "a hand, reaching/grabbing, sipping/drinking, grunting. Someone ELSE's motion in a subordinate clause",
     "('as he enters') is NOT the acting actor moving. Resuming a task ('return/returning/back to",
     "typing/staring/work/task/focus') is NOT movement — only 'return to <place>' (door/desk/...) is.",
+    "Perception and cognition are NEVER locomotion: looking or glancing anywhere ('look up', 'glance over",
+    "notes'), asking questions, sipping/drinking, reviewing notes, preparing questions, typing, thinking,",
+    "waiting — none of these move the body, even when the sentence also names a destination.",
+    "Approaching, coming to, or joining someone ALREADY within 2.5 cells (compare the positions above) needs",
+    "no movement — set moves=false and omit the destination (they are already there).",
     "Metaphor is NOT movement ('go the extra mile').",
     "destinationActorId: the roster id the acting actor moves toward, ONLY when the action names such an",
     "actor (by name, nickname, or description you can resolve — use pronouns and context); omit otherwise.",
+    "A mere greeting/thank-you addressee ('Thanks Tanya!' while walking to a desk) is NOT a destination —",
+    "only set this when the actor's body moves toward that person.",
     "It MUST be an exact id from the roster above.",
     "destinationObjectId: the landmark id the acting actor moves toward, ONLY when the action names a",
     "desk, coffee machine, door, chair, or other object above (including 'my desk' = that actor's own desk);",
@@ -95,8 +103,15 @@ export class LLMSemanticJudge implements SemanticJudge {
       extraCheck: (value) => {
         if (value.destinationActorId !== undefined && !rosterIds.has(value.destinationActorId))
           return `unknown destinationActorId: ${value.destinationActorId}`;
-        if (value.destinationObjectId !== undefined && !objectIds.has(value.destinationObjectId))
-          return `unknown destinationObjectId: ${value.destinationObjectId}`;
+        if (value.destinationObjectId !== undefined && !objectIds.has(value.destinationObjectId)) {
+          // Exp-3 item 7: name the closest real ids ("tanya's_desk" →
+          // "tanya_desk") so the repair retry can succeed.
+          const hint = suggestSimilarIds(value.destinationObjectId, [...objectIds]);
+          return (
+            `unknown destinationObjectId: ${value.destinationObjectId}` +
+            (hint ? ` — did you mean ${hint}?` : "")
+          );
+        }
         if (value.addresseeActorId !== undefined && !rosterIds.has(value.addresseeActorId))
           return `unknown addresseeActorId: ${value.addresseeActorId}`;
         if (value.contactActorId !== undefined && !rosterIds.has(value.contactActorId))

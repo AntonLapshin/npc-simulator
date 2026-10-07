@@ -138,9 +138,66 @@ export function buildRosterAnchor(world: World): string {
   ].join(" ");
 }
 
+/**
+ * Exp-3 item 13: relationship refresh that actually fires. The global
+ * roster anchor ("known hired coworker") is ignored by small models
+ * (Tanya stranger-framed Anton 3×), so each subjective/objective context
+ * also carries a per-actor line: name, id, pronouns, and the first clause
+ * of the persona (role + key history, e.g. the Sixt referral) — framed as
+ * known colleagues, never strangers/candidates.
+ */
+export function buildRelationshipRefresh(world: World, actorId: string): string {
+  const others = world.actors.filter((a) => a.id !== actorId);
+  if (others.length === 0) return "Known colleagues: (none).";
+  const parts = others.map((a) => {
+    const firstClause = a.persona.split(/[.!\n]/)[0]?.trim() || a.persona.slice(0, 80);
+    return `${a.name} (${a.id}, ${extractPronouns(a.persona)}) — ${firstClause}`;
+  });
+  return (
+    `KNOWN COLLEAGUES (never strangers, candidates, or applicants): ${parts.join("; ")}. ` +
+    `React to them as the established coworkers described above.`
+  );
+}
+
+/**
+ * Exp-3 item 9: exact object-ID catalog. The landmarks line lists
+ * `name (id)` but small models still emit "coffee mug"/"paper"/
+ * "tanya's_desk"-style ids (ticks 10/11). Group the scene's small props by
+ * kind with their exact ids so there is nothing to guess.
+ */
+export function buildObjectIdCatalog(world: World): string {
+  const groups: Array<[string, RegExp]> = [
+    ["Mugs", /mug|cup/i],
+    ["Papers", /paper|document|note/i],
+    ["Desks", /desk|table/i],
+    ["Coffee", /coffee/i],
+    ["Chairs", /chair|sofa|seat/i],
+    ["Laptops", /laptop|monitor/i],
+    ["Doors", /door|entrance|exit/i],
+  ];
+  const lines: string[] = [];
+  for (const [label, re] of groups) {
+    const ids = world.scene.objects
+      .filter((o) => re.test(o.name) || re.test(o.id))
+      .map((o) => `\`${o.id}\``);
+    if (ids.length > 0) lines.push(`${label} are ${ids.join(", ")}`);
+  }
+  if (lines.length === 0) return "Object ids: (no small props in this scene).";
+  return (
+    `OBJECT IDS (use these exact ids — never invent variants like 'coffee mug' or 'paper'; ` +
+    `using any other id fails validation): ${lines.join("; ")}.`
+  );
+}
+
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
 // private memories, beliefs, hidden goals, or unperceived events.
+//
+// Proposal is a slim affordance brainstorm (position + high-priority
+// thoughts + state + goal + perceivables + narrative/history + beliefs +
+// memories + constraints). Persona, emotion, and relationships are
+// deliberately dropped here — Selection (the Laya personality gate) owns
+// personalization. Selection uses the full subjective context instead.
 //
 // Proposal is a slim affordance brainstorm (position + high-priority
 // thoughts + state + goal + perceivables + narrative/history + beliefs +
@@ -184,6 +241,8 @@ export function buildProposalContext(
     repetitionLine,
     "",
     buildRosterAnchor(world),
+    "",
+    buildRelationshipRefresh(world, actorId),
     "",
     "Memories",
     "",
@@ -309,6 +368,7 @@ export function buildSelectionContext(
     "",
     buildIdentityAnchor(world, actorId),
     buildRosterAnchor(world),
+    buildRelationshipRefresh(world, actorId),
     questionsBlock,
     repetitionBlock,
     "",
@@ -361,11 +421,15 @@ export function buildConsequenceContext(
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "If the action says to move toward/close to/next to/beside someone, the new x,y MUST be strictly closer to that actor than the current position (Euclidean distance). Example: an actor at (1,10) moving toward someone at (8,8) could go to (5,8) — never inside a desk rect, stand NEXT to it.",
     "Same rule for NAMED LANDMARKS: if the action names a desk, the coffee machine, the door, or any object above ('my desk', 'west-side desk', 'NW-corner coffee machine'), the new x,y MUST be strictly closer to that object's rectangle than the current position. Never teleport across the room to an unrelated area; never move AWAY from the named target.",
+    "A single turn covers at most 6 cells — a cross-room walk takes several turns of real progress each time, never one teleport and never a token shuffle toward a distant target.",
+    buildObjectIdCatalog(world),
+    "QUOTED-SPEECH COPY RULE: if the action text contains \"...\" segments, copy each one character-for-character into effects.quotedSpeech AND into the narrative. Never invent quotes, never add greetings, never substitute different dialogue.",
     "PHYSICAL CONTACT RULE: if the action shakes hands, hugs, high-fives, pats, kisses, or hands/passes/gives something to someone, the acting actor MUST end ADJACENT to that person (within 2.5 cells Euclidean). A handshake across the room is invalid — walk over first, then touch.",
     "IDENTITY RULE: " + (actor ? `${buildIdentityAnchor(world, action.actorId)} Act out YOUR role only.` : "Act out the acting actor's role only."),
     "ROSTER RULE: " + buildRosterAnchor(world),
+    buildRelationshipRefresh(world, action.actorId),
     "PRONOUN RULE: preserve every actor's pronouns exactly as used in their persona and the world above — never flip he/him to she/her or vice versa. If the scenario says Dana is he/him, every verb and pronoun for Dana stays he/him.",
-    "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence.",
+    "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence. Handshake/hug/hand-over sets contactActorId and ends adjacent; omitting the verb from the narrative never excuses omitting the patch.",
     "",
     `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
       perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"

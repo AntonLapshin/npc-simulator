@@ -2,11 +2,69 @@ import type { Action, ActionSemantics, ConsequenceResult, ValidationResult, Worl
 import { consequenceResultSchema } from "../schemas.js";
 import { distance, isInsideScene, isPointBlocked, pointInRect } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
+import { MAX_STEP_DISTANCE, requiredProgress } from "./movementAssist.js";
 import { effectsToSemantics } from "./actionSemantics.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 
 /** Physical-contact radius: touching requires ending this close (Euclidean). */
 export const CONTACT_RADIUS = 2.5;
+
+/** Edit distance between two strings (case-insensitive). */
+function editDistance(a: string, b: string): number {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  const dp: number[][] = Array.from({ length: x.length + 1 }, (_, i) =>
+    Array.from({ length: y.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= x.length; i++) {
+    for (let j = 1; j <= y.length; j++) {
+      dp[i]![j]! = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + (x[i - 1] === y[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[x.length]![y.length]!;
+}
+
+/**
+ * Exp-3 item 7: fuzzy id repair. The validator already names the unknown
+ * id — append the closest roster ids (edit distance, normalized names
+ * compared so "coffee mug" meets "lounge_mug") so the retry can succeed
+ * instead of falling back. Returns e.g. `"anton_mug", "dana_mug"` or "".
+ */
+export function suggestSimilarIds(unknownId: string, candidates: string[], k = 3): string {
+  const norm = (s: string): string[] => {
+    const base = [s.toLowerCase()];
+    // "tanya's_desk"-style possessives: compare the de-possessivized form too.
+    const deposs = s.toLowerCase().replace(/['']s/g, "s").replace(/_/g, " ");
+    if (deposs !== base[0]) base.push(deposs);
+    return base;
+  };
+  const scored = candidates.map((c) => {
+    const variants = norm(c);
+    const uVariants = norm(unknownId);
+    let best = Infinity;
+    for (const cv of variants) {
+      for (const uv of uVariants) {
+        // Token overlap shortcut: "coffee mug" shares "mug" with "*_mug".
+        const cToks = new Set(cv.split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+        const uToks = new Set(uv.split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+        const shared = [...uToks].filter((t) => cToks.has(t)).length;
+        const d = editDistance(uv, cv) - shared * 3;
+        if (d < best) best = d;
+      }
+    }
+    return { id: c, score: best };
+  });
+  scored.sort((a, b) => a.score - b.score || a.id.localeCompare(b.id));
+  return scored
+    .slice(0, k)
+    .filter((s) => s.score <= Math.max(unknownId.length, 4) + 4)
+    .map((s) => `"${s.id}"`)
+    .join(", ");
+}
 
 /**
  * Validate ConsequenceResult output. Checks schema, referenced ids,
@@ -130,7 +188,13 @@ export function validateConsequence(
 
   for (const patch of normalized.objectPatches) {    const obj = objectById.get(patch.objectId);
     if (!obj) {
-      errors.push(`unknown object id: ${patch.objectId}`);
+      const hint = suggestSimilarIds(
+        patch.objectId,
+        world.scene.objects.map((o) => o.id),
+      );
+      errors.push(
+        `unknown object id: ${patch.objectId}${hint ? ` — did you mean ${hint}?` : ""} Only the listed object ids exist — never invent variants like 'coffee mug' or 'paper'.`,
+      );
       continue;
     }
     for (const field of ["x", "y", "w", "h"] as const) {
@@ -183,6 +247,8 @@ export function validateConsequence(
       errors.push(...validateContactAdjacency(world, normalized, action, resolved));
       errors.push(...validateAddresseePatch(world, normalized, action, resolved));
       errors.push(...validateActingActorPresence(normalized, action, resolved));
+      errors.push(...validateActionVerbCoverage(world, action, normalized));
+      errors.push(...validateObserverSubject(world, normalized, action));
     }
   } else {
     errors.push(...validateNarrativePlaceholder(normalized.narrative));
@@ -222,6 +288,15 @@ function validateMovementIntent(
     );
     return errors;
   }
+  // Exp-3 item 4: per-turn displacement cap. A glance must not teleport 9+
+  // cells (ticks 8/20); cross-room walks are multi-turn arcs.
+  const step = Math.hypot(patch.x - actor.x, patch.y - actor.y);
+  if (step > MAX_STEP_DISTANCE + 1e-9) {
+    errors.push(
+      `acting actor (${action.actorId}) moves ${step.toFixed(1)} cells in one turn (from (${actor.x}, ${actor.y}) to (${patch.x}, ${patch.y})): a single turn covers at most ${MAX_STEP_DISTANCE} cells — land closer and continue next turn`,
+    );
+    return errors;
+  }
   // When the judge resolved a movement target, the new position must
   // actually get closer to that actor (id comparison — never substring
   // search on raw text, so pronouns and descriptions resolve correctly).
@@ -234,6 +309,17 @@ function validateMovementIntent(
         errors.push(
           `action says to move toward ${target.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${target.id} at (${target.x}, ${target.y})`,
         );
+      } else {
+        // Exp-3 item 4: real progress for named cross-room walks — a
+        // 0.8-cell shuffle toward a 12-cell-distant target is not a walk.
+        // Tolerance of one cell covers integer-grid quantization (a full
+        // 6-cell diagonal step closes ~5.9 cells of Euclidean distance).
+        const need = requiredProgress(oldDist);
+        if (need > 0 && oldDist - newDist < need - 1.0) {
+          errors.push(
+            `action says to move toward ${target.id} ${oldDist.toFixed(1)} cells away but only closes ${(oldDist - newDist).toFixed(1)} cells: make real progress (at least ${need.toFixed(1)} cells) or arrive — a token shuffle toward a distant target is not the walk`,
+          );
+        }
       }
     }
   }
@@ -267,15 +353,19 @@ function distanceToRect(px: number, py: number, rect: { x: number; y: number; w:
  */
 const ARRIVAL_RADIUS = 4;
 
-function narrativeClaimsArrival(narrative: string, objName: string, objId: string): boolean {
+function narrativeClaimsArrival(narrative: string, objName: string, objId: string, strict = false): boolean {
   const lower = narrative.toLowerCase();
   const idSpaced = objId.toLowerCase().replace(/_/g, " ");
   const names = new Set([objName.toLowerCase(), objId.toLowerCase(), idSpaced]);
-  // Also match the trailing kind word ("the coffee machine", "his desk").
+  // Also match the trailing kind word ("the coffee machine", "his desk") —
+  // but ONLY in non-strict mode: for *other* landmarks a bare kind word
+  // ("at his desk") cannot tell whose desk is meant, so it must not accuse
+  // the wrong object (exp-3 item 4 wrong-desk check uses strict mode).
   const kind = objName.toLowerCase().split(/\s+/).slice(-1)[0] ?? "";
   const mentions =
     [...names].some((n) => n.length >= 3 && lower.includes(n)) ||
-    (kind.length >= 4 && new RegExp(`\\b(at|to|beside|near|by)\\s+(?:the|his|her|their|my)?\\s*${kind}\\b`).test(lower));
+    (!strict &&
+      (kind.length >= 4 && new RegExp(`\\b(at|to|beside|near|by)\\s+(?:the|his|her|their|my)?\\s*${kind}\\b`).test(lower)));
   if (!mentions) return false;
   return /\b(at|arrives?|arrived|reaches?|reached|sits?(?:\s+down)?\s+at|fills?|pours?|brews?|begins?\s+(typing|work)|starts?\s+(typing|work)|is\s+(now\s+)?at)\b/i.test(narrative);
 }
@@ -308,6 +398,28 @@ function validateDestinationObject(
     errors.push(
       `narrative claims to be AT ${obj.name} (${obj.id}) but ends at (${patch.x}, ${patch.y}), ${newDist.toFixed(1)} cells away: land within ${ARRIVAL_RADIUS} cells of it (next to it, never inside) or drop the arrival claim`,
     );
+  } else {
+    // Exp-3 item 4: real progress for named cross-room walks (tick 15: a
+    // 1-cell shuffle toward a 12-cell-distant desk passed as "progress").
+    // One-cell tolerance covers integer-grid quantization (see above).
+    const need = requiredProgress(oldDist);
+    if (need > 0 && oldDist - newDist < need - 1.0) {
+      errors.push(
+        `action says to move toward ${obj.name} (${obj.id}) ${oldDist.toFixed(1)} cells away but only closes ${(oldDist - newDist).toFixed(1)} cells: make real progress (at least ${need.toFixed(1)} cells) or arrive — a token shuffle is not the walk`,
+      );
+    }
+  }
+  // Exp-3 item 4: forbid claiming a DIFFERENT landmark ("stands next to
+  // Tanya's desk" for "my desk" — tick 15). Strict name/id matching only:
+  // a bare kind word ("at his desk") cannot identify the object.
+  for (const other of world.scene.objects) {
+    if (other.id === obj.id) continue;
+    if (narrativeClaimsArrival(normalized.narrative, other.name, other.id, true)) {
+      errors.push(
+        `narrative claims arrival at ${other.name} (${other.id}) but the action targets ${obj.name} (${obj.id}): move toward the named target, never claim a different landmark`,
+      );
+      break;
+    }
   }
   return errors;
 }
@@ -619,6 +731,171 @@ function validateObjectGrounding(
   return errors;
 }
 
+/**
+ * Exp-3 item 2 (strict half): action-side verb coverage. The pose/prop/
+ * object/contact gates read the *narrative*, so a consequence can dodge
+ * them by omitting the verb ("stands" for a "sit" action, no "pour" for a
+ * pour action, speech-only for a handshake). The action text is never
+ * checked against patches — now it is:
+ * - contact verb + named roster actor in the action → the narrative must
+ *   mention the contact (handshake→shake/hand, hug→hug, ...). Adjacency is
+ *   already enforced via semantics; this closes the silent-drop half.
+ * - sit/stand in the action → a matching pose patch (or the narrative
+ *   describing it — the narrative-side gate already demands the patch then).
+ * - pour/brew/fill/open/boot in the action → an objectPatch or prop patch,
+ *   regardless of what the narrative says.
+ * - ask (or "?") in the action → the narrative must keep the question (a
+ *   "?" or an ask-verb); answering-by-thanking flips fail here.
+ */
+function validateActionVerbCoverage(
+  world: World,
+  action: Action,
+  normalized: {
+    narrative: string;
+    actorPatches: { actorId: string; pose?: string; prop?: string | null }[];
+    objectPatches: { objectId: string }[];
+  },
+): string[] {
+  const errors: string[] = [];
+  const text = action.text;
+  const narrative = normalized.narrative;
+  const actingPatch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+
+  const namesRosterActor =
+    world.actors.filter((a) => a.id !== action.actorId).some((a) => {
+      const lowered = text.toLowerCase();
+      return (
+        (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) ||
+        (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase()))
+      );
+    });
+
+  if (
+    /\b(handshake|shake\s+.*hands?|shake\s+.*hand|hug|embrace|kiss|high[\s-]?five|fist[\s-]?bump|\bpat\b|slap|hands?\s+over|handing|hands?\s+(him|her|them)|give\s+.*(coffee|cup)|pass\s+.*(coffee|cup))\b/i.test(
+      text,
+    ) &&
+    namesRosterActor
+  ) {
+    if (!/\b(shake|shook|hands?|hug|embrace|kiss|high[\s-]?five|fist|pat|slap|give|gave|pass|hand)\b/i.test(narrative)) {
+      errors.push(
+        `action describes physical contact ("${text.slice(0, 80)}") but the narrative never mentions it: narrate the handshake/hug/handover (dodging the verb does not excuse dropping the contact)`,
+      );
+    }
+  }
+
+  const sitMatch = /\bsit\b|\bsits\b|\bsitting\b|\bsat\b|\btake[sn]?\s+a\s+seat\b/i.test(text);
+  const standMatch = /\bstand\b|\bstands\b|\bstanding\b|\bstood\b|\bstand\s+up\b/i.test(text);
+  if (sitMatch && !standMatch) {
+    const poseOk =
+      actingPatch?.pose === "sit" || /\b(sit|sits|sitting|sat|seat|seated)\b/i.test(narrative);
+    if (!poseOk) {
+      errors.push(
+        `action says to sit ("${text.slice(0, 80)}") but the consequence neither sets pose ("sit") nor describes sitting: sitting without the matching patch is incomplete (saying "stands" instead fails)`,
+      );
+    }
+  } else if (standMatch && !sitMatch) {
+    const poseOk =
+      actingPatch?.pose === "stand" || /\b(stand|stands|standing|stood)\b/i.test(narrative);
+    if (!poseOk) {
+      errors.push(
+        `action says to stand ("${text.slice(0, 80)}") but the consequence neither sets pose ("stand") nor describes standing`,
+      );
+    }
+  }
+
+  // "open" counts only as a verb with an object ("open the door", "open his
+  // laptop") — never as an adjective ("an open and welcoming demeanor").
+  if (
+    /\b(brew|brews|pour|pours|fill|fills|boot|boots|mak(e|es|ing)\s+coffee)\b/i.test(text) ||
+    /\bopens?\s+(?:his|her|their|my|the|a|an|that|this)\s+[a-z]+\b/i.test(text)
+  ) {
+    const backed =
+      normalized.objectPatches.length > 0 || actingPatch?.prop !== undefined;
+    if (!backed) {
+      errors.push(
+        `action says to pour/brew/open ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch`,
+      );
+    }
+  }
+
+  if (/\bask\w*\b|\?/.test(text)) {
+    if (!narrative.includes("?") && !/\bask\w*|questions?\b/i.test(narrative)) {
+      errors.push(
+        `action asks a question ("${text.slice(0, 80)}") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)`,
+      );
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Exp-3 item 5: observer-as-subject prose check (tick 13 repro). The
+ * narrative must describe ONLY the acting actor — the name audit catches
+ * unknown names, but a roster observer cast as the grammatical subject
+ * ("Anton shakes Tanya's hand." on Tanya's turn) sails through. Split the
+ * narrative into clauses (sentence boundaries and "and"-joins) and fail
+ * clauses led by a roster observer's name/id directly followed by an
+ * observable-action verb. Name-as-landmark ("toward Jeff") and possessives
+ * ("Tanya's hand") do not match — only Name + verb.
+ */
+const OBSERVER_SUBJECT_VERBS = new Set(
+  [
+    "is", "was", "are", "were", "has", "had",
+    "says", "said", "speak", "speaks", "spoke", "talks", "talked", "tells", "told",
+    "asks", "asked", "replies", "replied", "answers", "answered", "shouts", "shouted",
+    "whispers", "whispered", "mutters", "muttered", "calls", "called", "thanks", "thanked",
+    "greets", "greeted", "welcomes", "welcomed", "waves", "waved",
+    "walks", "walked", "goes", "went", "comes", "came", "moves", "moved",
+    "stands", "stood", "sits", "sat", "turns", "turned", "approaches", "approached",
+    "enters", "entered", "leaves", "left", "returns", "returned", "joins", "joined",
+    "follows", "followed", "runs", "ran",
+    "looks", "looked", "watches", "watched", "sees", "saw", "nods", "nodded",
+    "smiles", "smiled", "laughs", "laughed", "shakes", "shook", "hugs", "hugged",
+    "hands", "handed", "gives", "gave", "takes", "took", "picks", "picked",
+    "opens", "opened", "pours", "poured", "types", "typed", "sips", "sipped",
+    "gestures", "gestured", "points", "pointed", "shrugs", "shrugged",
+  ].map((w) => w.toLowerCase()),
+);
+
+function validateObserverSubject(
+  world: World,
+  normalized: { narrative: string },
+  action: Action,
+): string[] {
+  const observers = world.actors.filter((a) => a.id !== action.actorId);
+  if (observers.length === 0) return [];
+  const names: Array<{ token: string; id: string }> = [];
+  for (const o of observers) {
+    names.push({ token: o.name.toLowerCase(), id: o.id });
+    names.push({ token: o.id.toLowerCase(), id: o.id });
+    const first = o.name.toLowerCase().split(/[^a-z0-9]+/)[0];
+    if (first && first.length >= 3) names.push({ token: first, id: o.id });
+  }
+  const clauses = normalized.narrative
+    .split(/[.!?;]+\s*|\s+and\s+/i)
+    .map((c) => c.replace(/^["'(\[]+/, "").trim().toLowerCase())
+    .filter((c) => c.length > 0);
+  for (const clause of clauses) {
+    for (const { token, id } of names) {
+      if (token.length < 2) continue;
+      if (!clause.startsWith(token)) continue;
+      const rest = clause.slice(token.length);
+      // Name must be a whole word followed by whitespace + verb
+      // ("Anton shakes..." matches; "Anton's hand" and "Anton," do not).
+      const verbMatch = rest.match(/^\s+([a-z]+)/);
+      if (!verbMatch) continue;
+      if (OBSERVER_SUBJECT_VERBS.has(verbMatch[1]!)) {
+        return [
+          `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
+        ];
+      }
+      break; // clause starts with this observer's name but no verb — no error
+    }
+  }
+  return [];
+}
+
 /** Double- and single-quoted segments (content length >= 2). */
 function quotedSegments(text: string): string[] {
   const out: string[] = [];
@@ -645,6 +922,23 @@ function sameStem(a: string, b: string): boolean {
   return a.slice(0, 4) === b.slice(0, 4);
 }
 
+/**
+ * Exp-3 item 2 (lenient half): an interrogative quote ("could you show me
+ * where my desk is?") survives as a paraphrase when the narrative keeps the
+ * question structure — a "?" or an ask-verb (asks for directions) — plus at
+ * least one shared content word (the topic, e.g. "desk"). This passes the
+ * tick-3 paraphrase ("Anton asks Tanya for directions to his desk") while
+ * still failing truncations ("Hi, I'm Anton" keeps no ?/ask verb) and
+ * flipped speech ("thanks Anton, looking pleased" has no ask verb).
+ */
+function questionPreserved(actionQuote: string, narrative: string): boolean {
+  if (!actionQuote.includes("?")) return false;
+  const hasQuestionForm = narrative.includes("?") || /\bask\w*|questions?\b/i.test(narrative);
+  if (!hasQuestionForm) return false;
+  const words = contentWords(actionQuote);
+  return words.some((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
+}
+
 /** Action implies speech even without quotes — judged by Decision AI, never regex. */
 function validateSpeechPreservation(semantics: ActionSemantics, narrative: string): string[] {
   const errors: string[] = [];
@@ -660,14 +954,17 @@ function validateSpeechPreservation(semantics: ActionSemantics, narrative: strin
   // wholly different sentence or a truncation to a greeting fragment fails).
   // Applies to user turns and NPC turns alike: the exact-words rule is not
   // NPC-only. Require at least half of each quote's content words to
-  // survive (single-word quotes require the one word), so "Hi, I'm Anton,
-  // where is my desk?" cannot collapse to just "Hi, I'm Anton."
+  // survive for short quotes (1-3 words: all-but-one may be reworded), and
+  // floor(n/2) for longer quotes — so "Hi, I'm Anton,
+  // where is my desk?" cannot collapse to just "Hi, I'm Anton", while a
+  // 5-word question may keep 2 words plus its question structure (see the
+  // interrogative path below).
   for (const q of actionQuotes) {
     const words = contentWords(q);
     if (words.length === 0) continue;
     const kept = words.filter((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
-    const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);
-    if (kept.length < need) {
+    const need = words.length <= 3 ? Math.ceil(words.length / 2) : Math.floor(words.length / 2);
+    if (kept.length < need && !questionPreserved(q, narrative)) {
       errors.push(
         `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — quote or closely paraphrase the FULL utterance, never invent different dialogue or truncate it to a fragment`,
       );

@@ -1,5 +1,6 @@
 import type {
   Action,
+  ActionSemantics,
   ConsequenceResult,
   EngineConfig,
   World,
@@ -98,6 +99,67 @@ export function stripSelectionPrefix(text: string): string {
 /** Offline default: keyword-based mock judge (zero network calls). */
 const defaultSemanticJudge: SemanticJudge = new MockSemanticJudge();
 
+/** True when every validation error is a speech-rendering nit (dropped/invented wording). */
+export function isSpeechOnlyFailure(errors: string[]): boolean {
+  if (errors.length === 0) return false;
+  return errors.every((e) => /exact words|invents dialogue/.test(e));
+}
+
+/**
+ * Exp-3 item 6: partial-apply / salvage instead of all-or-nothing fallback.
+ * Ticks 3/9 showed whole good turns (valid movement + adjacency) discarded
+ * for a speech nit plus a stray hallucinated patch — and 57% "Nothing
+ * changes." is what actually stalls a scenario. Salvage strips patches that
+ * reference nonexistent actors/objects (clear hallucinations like a `jeff`
+ * patch), revalidates, and:
+ * - returns the salvaged result when fully valid, or
+ * - returns it with the remaining speech misses downgraded to warnings
+ *   (movement + thoughts apply; the speech miss is logged, not fatal).
+ * Anything else (physics, movement, contact, addressee, verb-coverage
+ * failures) still falls back — salvage never invents positions or speech.
+ */
+export function trySalvageConsequence(
+  world: World,
+  action: Action,
+  result: ConsequenceResult,
+  semantics: ActionSemantics | undefined,
+): { salvaged: ConsequenceResult; warnings: string[] } | null {
+  if (!semantics) return null;
+  const actorIds = new Set(world.actors.map((a) => a.id));
+  const objectIds = new Set(world.scene.objects.map((o) => o.id));
+  const strippedActor = result.actorPatches.filter((p) => !actorIds.has(p.actorId));
+  const strippedObject = result.objectPatches.filter((p) => !objectIds.has(p.objectId));
+  if (strippedActor.length === 0 && strippedObject.length === 0) {
+    // Nothing salvageable to strip — but a pure speech nit on an otherwise
+    // valid turn is still worth applying with a warning.
+    const revalidation = validateConsequence(world, result, action, semantics);
+    if (revalidation.valid) return { salvaged: result, warnings: [] };
+    if (isSpeechOnlyFailure(revalidation.errors)) {
+      return { salvaged: result, warnings: revalidation.errors };
+    }
+    return null;
+  }
+  const salvaged: ConsequenceResult = {
+    ...structuredClone(result),
+    actorPatches: result.actorPatches.filter((p) => actorIds.has(p.actorId)),
+    objectPatches: result.objectPatches.filter((p) => objectIds.has(p.objectId)),
+  };
+  // Salvage preserves real effects: the acting actor must remain patched —
+  // otherwise the turn's only content was hallucinated (e.g. a lone `ghost`
+  // patch) and an emptied husk is no better than the fallback.
+  if (!salvaged.actorPatches.some((p) => p.actorId === action.actorId)) {
+    return null;
+  }
+  const revalidation = validateConsequence(world, salvaged, action, semantics);
+  if (revalidation.valid) {
+    return { salvaged, warnings: [] };
+  }
+  if (isSpeechOnlyFailure(revalidation.errors)) {
+    return { salvaged, warnings: revalidation.errors };
+  }
+  return null;
+}
+
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
 export async function resolveWithValidation(
   world: World,
@@ -107,6 +169,8 @@ export async function resolveWithValidation(
   const config = depsConfig(deps);
   const logger = deps.logger;
   let feedback: string | undefined;
+  let lastResult: ConsequenceResult | undefined;
+  let lastSemantics: ActionSemantics | undefined;
 
   for (let attempt = 1; attempt <= Math.max(1, config.maxRetries + 1); attempt++) {
     let result: ConsequenceResult;
@@ -164,6 +228,8 @@ export async function resolveWithValidation(
       deps.semanticJudge ?? defaultSemanticJudge,
       logger,
     );
+    lastResult = result;
+    lastSemantics = resolved.semantics;
     const validation = validateConsequence(world, result, action, resolved.semantics);
     if (validation.valid) {
       logger.log({
@@ -284,6 +350,27 @@ export async function resolveWithValidation(
       output: { feedback },
       validationErrors: validation.errors,
     });
+  }
+
+  // Exp-3 item 6: before giving up to "Nothing changes.", try to salvage
+  // the last attempt — keep valid movement/patches, warn on speech nits.
+  if (lastResult && lastSemantics) {
+    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics);
+    if (salvage) {
+      logger.log({
+        module: "turn",
+        event: "partial_applied",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, result: lastResult },
+        output: { salvaged: salvage.salvaged, warnings: salvage.warnings },
+        ...(salvage.warnings.length > 0
+          ? { error: `speech warnings (applied anyway): ${salvage.warnings.join(" | ")}` }
+          : {}),
+      });
+      return salvage.salvaged;
+    }
   }
 
   logger.log({

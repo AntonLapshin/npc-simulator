@@ -39,7 +39,11 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
   async resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
-    const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${consequenceSuffix()}`;
+    // Exp-3 item 12: first attempts get the short core prompt (identity +
+    // roster + movement + speech + turn discipline + minimal field rules);
+    // retries get the full rule text plus validation feedback, where the
+    // rarely-firing rules (arrival radius, mask lists) actually help.
+    const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${consequenceSuffix(feedback ? "full" : "short")}`;
 
     const result = await completeJson({
       logger: this.logger,

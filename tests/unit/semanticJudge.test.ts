@@ -91,8 +91,10 @@ describe("resolveActionSemantics", () => {
     expect(resolved).toEqual({
       source: "effects",
       semantics: { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
+      disagreements: ["moves conflict: effects=true judge=false (kept OR)"],
     });
     expect(logger.store.events()).toContain("semantic_resolved");
+    expect(logger.store.events()).toContain("judge_disagreement");
   });
 
   it("widens lying effects via the judge (merged source)", async () => {
@@ -146,7 +148,7 @@ describe("resolveActionSemantics", () => {
       failing,
       logger,
     );
-    expect(resolved).toEqual({ source: "fail-open", semantics: undefined });
+    expect(resolved).toEqual({ source: "fail-open", semantics: undefined, disagreements: [] });
     expect(logger.store.events()).toContain("semantic_failed");
   });
 

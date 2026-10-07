@@ -17,6 +17,29 @@ import { canMoveBetween } from "./pathfinding.js";
 
 export type MoveSuggestion = { x: number; y: number };
 
+/**
+ * Exp-3 item 4: per-turn displacement cap (half the default perception
+ * radius of 12). A glance must not teleport 9-13 cells (ticks 8/20), and
+ * cross-room walks become multi-turn arcs instead of instant jumps. The
+ * validator rejects larger single-turn displacements; the suggestion helper
+ * below only proposes within-cap steps.
+ */
+export const MAX_STEP_DISTANCE = 6;
+
+/**
+ * Exp-3 item 4: minimum real progress for a named cross-room walk. Mere
+ * strictly-closer lets a 12-cell "walk to my desk" succeed with a 0.8-cell
+ * shuffle (tick 15). When starting more than PROGRESS_THRESHOLD cells from
+ * a named landmark/actor, the turn must close at least half the distance
+ * or spend the full step allowance — whichever is smaller.
+ */
+export const PROGRESS_THRESHOLD = 8;
+
+export function requiredProgress(oldDist: number): number {
+  if (oldDist <= PROGRESS_THRESHOLD) return 0;
+  return Math.min(oldDist / 2, MAX_STEP_DISTANCE);
+}
+
 function isFree(world: World, x: number, y: number): boolean {
   const p = { x, y };
   return isInsideScene(world.scene, p) && !isPointBlocked(world.scene, p);
@@ -72,6 +95,9 @@ export function suggestMoveTarget(
     for (let y = 0; y < world.scene.height; y++) {
       if (x === actor.x && y === actor.y) continue;
       if (!isFree(world, x, y)) continue;
+      // Exp-3 item 4: never suggest a teleport — one step covers at most
+      // MAX_STEP_DISTANCE cells.
+      if (Math.hypot(x - actor.x, y - actor.y) > MAX_STEP_DISTANCE + 1e-9) continue;
       if (hasTarget || hasObjectTarget) {
         const d = distToTarget(x, y);
         // Must be strictly closer (with a small epsilon for int coords).

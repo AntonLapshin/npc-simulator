@@ -71,7 +71,34 @@ export function selectionSuffix(): string {
   ].join("\n");
 }
 
-export function consequenceSuffix(): string {
+export function consequenceSuffix(mode: "short" | "full" = "full"): string {
+  // Exp-3 item 12: the full suffix is ~150 lines of rules — failure modes
+  // ("Nothing changes", "Consequence:" as actor, echoing the action) smell
+  // like instruction overload for small models. First attempts get the
+  // short core (identity + roster + movement + speech + turn discipline +
+  // minimal field rules, incl. the exp-3 one-liners); retries get the full
+  // text plus validation feedback.
+  if (mode === "short") {
+    return [
+      "Output Schema",
+      "",
+      CONSEQUENCE_OUTPUT_SCHEMA,
+      "",
+      "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}",
+      "",
+      "FIELD RULES (must follow exactly, or the output is rejected):",
+      "actorPatches MUST be a real JSON array of objects with \"actorId\" (never \"id\"); objectPatches a real array with \"objectId\" (never \"id\"). Do NOT nest objectPatches inside actorPatches.",
+      "\"reasoning\" is REQUIRED (never omit it).",
+      "EFFECTS: \"moved\" true ONLY for the acting actor's own whole-body locomotion (a position change — never for looking, glancing, asking, sipping, reviewing, typing); emit x,y IFF moved, strictly closer to any named person/landmark, at most 6 cells per turn, never inside furniture. \"spoke\" true when words are uttered; \"quotedSpeech\" copies action-text quotes character-for-character (never invent quotes). Set destination/addressee/contact ids to exact roster/landmark ids.",
+      "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose. Pick up/hold/open/boot sets prop and/or objectPatches. Omitting the verb from the narrative never excuses omitting the patch.",
+      "IDENTITY: act out ONLY the acting actor's role — never another character's job, pronouns, or skills.",
+      "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
+      "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
+      "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
+      "Return JSON only, matching the schema above.",
+      "Return COMPACT single-line JSON (no pretty-print, no markdown).",
+    ].join("\n");
+  }
   return [
     "Output Schema",
     "",
@@ -108,6 +135,9 @@ export function consequenceSuffix(): string {
     "\"spoke\" is true when the acting actor utters words; \"quotedSpeech\" lists the exact uttered segments",
     "(empty array when nothing is said). Quote or closely paraphrase the FULL utterance — never truncate a",
     "longer speech to a fragment and never invent different dialogue.",
+    "QUOTED-SPEECH COPY RULE: if the action text contains \"...\" segments, copy each one",
+    "character-for-character into \"quotedSpeech\" AND into the narrative. Never invent quotes,",
+    "never add greetings, never substitute different dialogue.",
     "",
     "IDENTITY RULE: act out ONLY the acting actor's role, goal, and skills from the context. You are NOT any",
     "other listed character — a recruiter never sets up a development environment; a QA engineer never does",
@@ -117,11 +147,16 @@ export function consequenceSuffix(): string {
     "ROSTER RULE: only the actors in the context ROSTER exist — never invent, address, or describe anyone",
     "else (no extra names, no interviewer, no newcomers). Treat listed colleagues as known hired coworkers,",
     "never as strangers, candidates, or applicants.",
+    "OBJECT IDS: use the exact ids from the OBJECT IDS line in the context (mugs are `*_mug`, papers are",
+    "`*_papers`, desks are `*_desk`) — never write 'coffee mug', 'paper', or any other invented id.",
+    "Using any other id fails validation.",
     "",
     "POSE/PROP/OBJECT RULE: sitting/standing/kneeling sets pose; picking up/holding/carrying a cup/laptop",
     "sets prop (null when put down); pouring, opening, moving, or changing anything in the world sets",
     "objectPatches. Minimalism does NOT excuse dropping these — an action that sits, holds, pours, or opens",
-    "without the matching patch is incomplete.",
+    "without the matching patch is incomplete. Handshake/hug/hand-over sets contactActorId and ends",
+    "adjacent; sit/stand sets pose; pick up/hold/open/boot sets prop and/or objectPatches.",
+    "Omitting the verb from the narrative does not excuse omitting the patch.",
     "",
     "The full actorPatch fields are: actorId (required), x, y, state,",
     "emotion, goal, thoughts (one-time private inner reaction, never spoken aloud, never narrated — rewrite it for every perceiving actor; be blunt, candid, profane/explicit when in-character),",
