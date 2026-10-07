@@ -36,6 +36,8 @@
 // Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}.
 // Simple-tier model override: LLM_SIMPLE_MODEL.
 
+import { errorMessage } from "../util/errors.js";
+
 export interface LLMProvider {
   /** Complete a system+user prompt pair. Resolves with raw text (JSON expected). */
   complete(systemPrompt: string, userPrompt: string): Promise<string>;
@@ -67,10 +69,6 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

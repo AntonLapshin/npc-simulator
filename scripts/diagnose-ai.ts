@@ -7,7 +7,7 @@
 // Exit code is 1 when any check FAILs, 0 otherwise. Secrets are never printed.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ import {
   type LLMProvider,
 } from "../src/llm/index.js";
 import { createTestLogger } from "../src/logging/logger.js";
+import { loadEnvFile } from "../src/util/loadEnv.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LIVE = process.argv.includes("--live");
@@ -36,20 +37,7 @@ const fail = (name: string, detail = "") => checks.push({ name, status: "FAIL", 
 
 // Load .env (if present) without overriding real environment variables.
 function loadDotEnv(): boolean {
-  const file = join(ROOT, ".env");
-  if (!existsSync(file)) return false;
-  for (const line of readFileSync(file, "utf-8").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-    const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
-    if (!key || process.env[key] !== undefined) continue;
-    let value = trimmed.slice(trimmed.indexOf("=") + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    process.env[key] = value;
-  }
-  return true;
+  return loadEnvFile(ROOT);
 }
 
 function run(cmd: string, args: string[], timeoutMs = 30_000): { ok: boolean; out: string } {

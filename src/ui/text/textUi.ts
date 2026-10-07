@@ -21,7 +21,6 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Action, Actor, World } from "../../types.js";
@@ -47,6 +46,7 @@ import {
   formatLogEntry,
 } from "./commands.js";
 import { loggedTicks, renderStoryRange, renderTurnStory } from "../../logging/storyTrace.js";
+import { loadEnvFile } from "../../util/loadEnv.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
@@ -599,27 +599,10 @@ function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
 }
 
 async function main(): Promise<void> {
-  // Load .env (if present) without overriding real env vars (mirrors diagnose-ai).
+  // Load .env (if present) without overriding real env vars.
   // Skipped under Vitest so tests stay hermetic.
   if (process.env["VITEST"] === undefined) {
-    const { readFileSync } = await import("node:fs");
-    const file = join(ROOT, ".env");
-    if (existsSync(file)) {
-      for (const line of readFileSync(file, "utf-8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-        const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
-        if (!key || process.env[key] !== undefined) continue;
-        let value = trimmed.slice(trimmed.indexOf("=") + 1).trim();
-        if (
-          (value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))
-        ) {
-          value = value.slice(1, -1);
-        }
-        process.env[key] = value;
-      }
-    }
+    loadEnvFile(ROOT);
   }
 
   let opts: TextUiOptions & { help: boolean };

@@ -10,6 +10,7 @@ import type { z } from "zod";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { formatRepairPrompt, parseJsonObject } from "./json.js";
+import { errorMessage } from "../util/errors.js";
 
 export type LlmModule = "proposal" | "selection" | "consequence" | "semantic";
 
@@ -50,10 +51,6 @@ export type CompleteJsonResult<T> =
       /** Raw LLM outputs from every failed parse attempt, in order (Exp-6 item 4). */
       rawAttempts: string[];
     };
-
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
 
 /**
  * Exp-6 item 3: normalize a parse error into a repeat signature. Digit
@@ -121,7 +118,7 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
         actorId: opts.actorId,
         input: { ...(opts.input as Record<string, unknown>), attempt },
         prompt: fullPrompt(opts.systemPrompt, userPrompt),
-        error: errMsg(err),
+        error: errorMessage(err),
       });
       continue;
     }
@@ -143,7 +140,7 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
     } catch (err) {
       // Malformed JSON, truncated response, or schema mismatch (§16.3):
       // retry with a formatting-correction prompt appended.
-      const message = errMsg(err);
+      const message = errorMessage(err);
       rawAttempts.push(raw);
       const signature = parseErrorSignature(message);
       identicalStreak = signature === lastErrorSignature ? identicalStreak + 1 : 1;

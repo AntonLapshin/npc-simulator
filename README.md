@@ -233,7 +233,7 @@ conventions) live in [`src/ui/graphic/README.md`](src/ui/graphic/README.md).
 
 ```bash
 npm run dev            # run src/index.ts
-npm test               # vitest (88 tests: unit, integration, golden)
+npm test               # vitest (unit, integration, golden)
 npm run test:graphic   # graphic UI: smoke + bundle + jsdom dom test
 npm run typecheck      # tsc --noEmit
 npm run diagnose          # unified: graphic-UI availability + offline AI checks
@@ -247,21 +247,35 @@ npm run diagnose:ui       # graphic-UI availability only (sibling npc-simulator-
 ```text
 src/
   types.ts schemas.ts config.ts      # domain types, Zod schemas, defaults
-  engine/                            # scenarioLoader, worldStore, turnOrchestrator,
-                                     # contextBuilder, physicalValidator, patchApplier,
-                                     # geometry, pathfinding, perceptionHelpers, persistence
-  intelligence/                      # Proposal/Selection/Consequence interfaces
+  util/                              # shared low-level helpers (errors, .env loader)
+  engine/                            # scenarioLoader, worldStore, contextBuilder,
+                                     # patchApplier, geometry, pathfinding,
+                                     # perceptionHelpers, persistence,
+                                     # actionSemantics, deterministicSemantics,
+                                     # movementAssist
+    turnOrchestrator.ts              # turn loop: proposal → selection →
+                                     # consequence → validate → apply
+    turnSalvage.ts                   # degraded-path salvage tiers + honest notes
+    turnLiveness.ts                  # NPC liveness floor (fallback streak)
+    turnOutcomes.ts                  # per-turn outcome accounting (SLO)
+    physicalValidator.ts             # validateConsequence entry point
+    validate/                        # focused validation check groups:
+                                     # movement, narrative, objects, speech,
+                                     # textUtils (id suggestions)
+  intelligence/                      # Proposal/Selection/Consequence/SemanticJudge
+                                     # interfaces (types.ts)
   llm/                               # providers + real LLM engines (Milestone 2)
   mocks/                             # deterministic engines (Milestone 1)
-  logging/                           # Logger, LogStore, JSONL writer
+  logging/                           # Logger, LogStore, JSONL writer, storyTrace
    ui/text/                           # textUi.ts (CLI loop), commands.ts (Milestone 3)
    ui/graphic/                        # thin graphic console (Milestone 4):
                                       # index.html + js/{app,main,sceneBridge,sim,ui}
                                       # + styles/ + tools/ + tests/
                                       # scene layer via ui-lib/ → ../../../../npc-simulator-ui
                                       # (see src/ui/graphic/README.md)
-   editor/                            # Milestone 5 placeholder
-scenarios/office.json                # golden office scenario
+scenarios/office.json                # golden office scenario (you play Jeff)
+scenarios/office-anton.json          # office scenario with Anton as the user
+                                     # character (default for `npm start`)
 tests/{unit,integration,golden}/
 logs/ saves/                         # git-ignored runtime artifacts
 ../npc-simulator-ui/                 # sibling visual scene project (objects,

@@ -30,7 +30,6 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { dirname, join, resolve, extname, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { World } from "../../types.js";
@@ -44,6 +43,7 @@ import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
 import { renderTurnStory } from "../../logging/storyTrace.js";
+import { loadEnvFile } from "../../util/loadEnv.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GRAPHIC_ROOT = resolve(HERE);
@@ -205,25 +205,9 @@ type TurnEvent = {
 };
 
 async function main(): Promise<void> {
+  // Skipped under Vitest so tests stay hermetic.
   if (process.env["VITEST"] === undefined) {
-    const { readFileSync } = await import("node:fs");
-    const file = join(REPO_ROOT, ".env");
-    if (existsSync(file)) {
-      for (const line of readFileSync(file, "utf-8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-        const key = trimmed.slice(0, trimmed.indexOf("=")).trim();
-        if (!key || process.env[key] !== undefined) continue;
-        let value = trimmed.slice(trimmed.indexOf("=") + 1).trim();
-        if (
-          (value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))
-        ) {
-          value = value.slice(1, -1);
-        }
-        process.env[key] = value;
-      }
-    }
+    loadEnvFile(REPO_ROOT);
   }
 
   let opts: GraphicOptions;
