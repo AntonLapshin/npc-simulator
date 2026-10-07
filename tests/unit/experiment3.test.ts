@@ -741,6 +741,158 @@ describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
   });
 });
 
+describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
+  it("fails speech dropped without a trace, passes preserved thanks (tick 18)", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Thank N for the welcome and head to the desk." };
+    const dropped = validateConsequence(
+      world,
+      {
+        ...baseResult("U looks around the office."),
+        actorPatches: [{ actorId: "u", thoughts: "Nice place." }],
+      },
+      action,
+      stillSemantics(),
+    );
+    expect(dropped.valid).toBe(false);
+    expect(dropped.errors.join(" ")).toMatch(/renders no speech/);
+
+    const kept = validateConsequence(
+      world,
+      {
+        ...baseResult("U thanks N for the welcome."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Grateful." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      action,
+      stillSemantics(),
+    );
+    expect(kept).toEqual({ valid: true, errors: [] });
+  });
+
+  it("greet/welcome may be rendered non-verbally (golden-path guard)", () => {
+    const world = makeTinyWorld();
+    world.actors.find((a) => a.id === "n")!.name = "Jeff";
+    const v = validateConsequence(
+      world,
+      {
+        ...baseResult("U walks toward Jeff and stops near him."),
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Friendly." },
+          { actorId: "n", thoughts: "Welcoming." },
+        ],
+      },
+      { actorId: "u", text: "Walk over to Jeff and welcome him." },
+      { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
+    );
+    expect(v).toEqual({ valid: true, errors: [] });
+  });
+
+  it("fails pick up/hold with no backing patch, passes with a prop patch", () => {
+    const world = officeWorld();
+    for (const text of ["Pick up the mug from the desk.", "Hold the cup while waiting."]) {
+      const dropped = validateConsequence(
+        world,
+        {
+          ...baseResult("Anton stands by the desk."),
+          actorPatches: [{ actorId: "u", thoughts: "Coffee." }],
+        },
+        { actorId: "u", text },
+        stillSemantics(),
+      );
+      expect(dropped.valid, text).toBe(false);
+      expect(dropped.errors.join(" "), text).toMatch(/pick up\/hold/);
+    }
+    const held = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton holds the cup."),
+        actorPatches: [{ actorId: "u", prop: "cup", thoughts: "Warm." }],
+      },
+      { actorId: "u", text: "Hold the cup while waiting." },
+      stillSemantics(),
+    );
+    expect(held).toEqual({ valid: true, errors: [] });
+  });
+
+  it("fails far handshakes even without a declared contact id, passes adjacent ones (tick 12)", () => {
+    const world = officeWorld();
+    // u (Anton) at (1,1), n (Nadia) at (4,4): 4.2 cells apart — no contact declared.
+    const far = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton shakes Nadia's hand."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Firm grip." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      { actorId: "u", text: "Shake Nadia's hand warmly." },
+      stillSemantics(),
+    );
+    expect(far.valid).toBe(false);
+    expect(far.errors.join(" ")).toMatch(/adjacent/);
+
+    // Adjacent: Nadia one cell away, handshake narrated — passes.
+    world.actors.find((a) => a.id === "n")!.x = 2;
+    world.actors.find((a) => a.id === "n")!.y = 1;
+    const near = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton shakes Nadia's hand."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Firm grip." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      { actorId: "u", text: "Shake Nadia's hand warmly." },
+      stillSemantics(),
+    );
+    expect(near).toEqual({ valid: true, errors: [] });
+  });
+
+  it("surfaces fuzzy id suggestions in retry feedback so the retry can succeed (ticks 10/11)", async () => {
+    const logger = new Logger({ sessionId: "exp3-phase3-retry", writeToFile: false });
+    const world = officeWorld();
+    const seenFeedback: (string | undefined)[] = [];
+    const attempts: ConsequenceResult[] = [
+      {
+        narrative: "Anton sets down the mug.",
+        actorPatches: [{ actorId: "u", thoughts: "Done." }],
+        objectPatches: [{ objectId: "coffee mug", description: "Used." }],
+        reasoning: "r",
+      },
+      {
+        narrative: "Anton sets down the mug.",
+        actorPatches: [{ actorId: "u", thoughts: "Done." }],
+        objectPatches: [{ objectId: "anton_mug", description: "Used." }],
+        reasoning: "r",
+      },
+    ];
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: {
+        resolve: async (_w: World, _a: { actorId: string; text: string }, feedback?: string) => {
+          seenFeedback.push(feedback);
+          return structuredClone(attempts[seenFeedback.length - 1]!);
+        },
+      } as never,
+      config: { ...makeTestDeps(logger).config!, maxRetries: 1, autosaveEnabled: false },
+    });
+    const out = await resolveWithValidation(
+      world,
+      { actorId: "u", text: "Set down the coffee mug." },
+      deps,
+    );
+    expect(out.narrative).not.toBe("Nothing changes.");
+    expect(out.objectPatches).toEqual([{ objectId: "anton_mug", description: "Used." }]);
+    // The retry saw the validator's "did you mean" hint, not a bare unknown-id.
+    expect(seenFeedback[1]).toMatch(/did you mean/);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+  });
+});
+
 describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
   it("hasDisplacementToken: perception/cognition/resumed activity carry no token", () => {
     for (const text of [

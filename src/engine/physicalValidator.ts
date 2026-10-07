@@ -735,7 +735,7 @@ function validateObjectGrounding(
       );
     }
   }
-  if (/\b(picks?\s+up|picking\s+up|picked\s+up|grabs?|takes? (?:the|his|her|a|an) (?:laptop|mug|cup|bag|chair|papers?|phone|monitor))\b/i.test(text)) {
+  if (/\b(picks?\s+up|picking\s+up|picked\s+up|grabs?|takes? (?:the|his|her|their|my|your|its|a|an) (?:laptop|mug|cup|bag|chair|papers?|phone|monitor))\b/i.test(text)) {
     if (!propPatched && !hasObjectPatch) {
       errors.push(
         `narrative describes picking something up but no prop/object patch backs it: set prop on the acting actor (or an objectPatch for what moved)`,
@@ -753,6 +753,18 @@ function validateObjectGrounding(
     if (!propPatched && !hasObjectPatch && !holdsSomething) {
       errors.push(
         `narrative describes sipping/drinking/typing but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
+      );
+    }
+  }
+  // Phase 3 (exp-3 item 2, tick 11 shape): holding/carrying is an object
+  // interaction like picking up — a narrative that holds a cup with no
+  // prop/object patch is ungrounded, even when the verb is "hold".
+  // ("carry on" / "held a meeting" are not object verbs — excluded so
+  // task-resumption prose never trips this gate.)
+  if (/\b(holds?|holding|carr(?:y|ies|ied|ying))\b(?!\s+on\b)/i.test(text)) {
+    if (!propPatched && !hasObjectPatch && !holdsSomething) {
+      errors.push(
+        `narrative describes holding/carrying but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
       );
     }
   }
@@ -780,7 +792,7 @@ function validateActionVerbCoverage(
   action: Action,
   normalized: {
     narrative: string;
-    actorPatches: { actorId: string; pose?: string; prop?: string | null }[];
+    actorPatches: { actorId: string; x?: number; y?: number; pose?: string; prop?: string | null }[];
     objectPatches: { objectId: string }[];
   },
 ): string[] {
@@ -797,6 +809,15 @@ function validateActionVerbCoverage(
         (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase()))
       );
     });
+  /** Roster actors (other than the acting actor) named in the action text. */
+  const namedRosterActors = world.actors.filter((a) => {
+    if (a.id === action.actorId) return false;
+    const lowered = text.toLowerCase();
+    return (
+      (a.id.toLowerCase().length >= 2 && lowered.includes(a.id.toLowerCase())) ||
+      (a.name.toLowerCase().length >= 2 && lowered.includes(a.name.toLowerCase()))
+    );
+  });
 
   if (
     /\b(handshake|shake\s+.*hands?|shake\s+.*hand|hug|embrace|kiss|high[\s-]?five|fist[\s-]?bump|\bpat\b|slap|hands?\s+over|handing|hands?\s+(him|her|them)|give\s+.*(coffee|cup)|pass\s+.*(coffee|cup))\b/i.test(
@@ -808,6 +829,28 @@ function validateActionVerbCoverage(
       errors.push(
         `action describes physical contact ("${text.slice(0, 80)}") but the narrative never mentions it: narrate the handshake/hug/handover (dodging the verb does not excuse dropping the contact)`,
       );
+    }
+    // Phase 3 (exp-3 item 2, tick 12 symmetric hole): the semantics-owned
+    // adjacency gate only fires when effects/judge declare contactActorId —
+    // a consequence that silently drops the contact declaration dodges it.
+    // The action text itself names the contact, so require the acting actor
+    // to end adjacent to at least one named roster actor regardless of
+    // what was declared.
+    const actor = world.actors.find((a) => a.id === action.actorId);
+    if (actor && namedRosterActors.length > 0) {
+      const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+      const endX = patch?.x ?? actor.x;
+      const endY = patch?.y ?? actor.y;
+      const close = namedRosterActors.some(
+        (t) => Math.hypot(endX - t.x, endY - t.y) <= CONTACT_RADIUS,
+      );
+      if (!close) {
+        const t = namedRosterActors[0]!;
+        const dist = Math.hypot(endX - t.x, endY - t.y).toFixed(1);
+        errors.push(
+          `action describes physical contact with ${t.id} but ends at (${endX}, ${endY}), ${dist} cells away: end adjacent (within ${CONTACT_RADIUS} cells) before touching — a handshake across the room is not contact`,
+        );
+      }
     }
   }
 
@@ -846,11 +889,58 @@ function validateActionVerbCoverage(
     }
   }
 
+  // Phase 3 (exp-3 item 2): taking hold of something is an object
+  // interaction like pouring — "Set down the mug" / "Hold the cup" with no
+  // prop/object patch dodges the grounding gate by omission. "take" only
+  // counts with a concrete object ("take the laptop" — never "take a walk",
+  // "take a seat", "take notes"); "carry on" is resumption, not carrying.
+  if (
+    /\bpick(?:s|ed|ing)?\s+up\b/i.test(text) ||
+    /\bgrab(?:s|bed|bing)?\b/i.test(text) ||
+    /\bholds?\b|\bholding\b/i.test(text) ||
+    /\bcarr(?:y|ies|ied|ying)\b(?!\s+on\b)/i.test(text) ||
+    /\btakes?\s+(?:the|his|her|their|my|your|its|a|an)\s+(?:laptop|mug|cup|bag|chair|papers?|phone|monitor)\b/i.test(text)
+  ) {
+    const backed =
+      normalized.objectPatches.length > 0 || actingPatch?.prop !== undefined;
+    if (!backed) {
+      errors.push(
+        `action says to pick up/hold ("${text.slice(0, 80)}") but no objectPatch/prop patch backs it: omitting the verb from the narrative does not excuse omitting the patch`,
+      );
+    }
+  }
+
   if (/\bask\w*\b|\?/.test(text)) {
     if (!narrative.includes("?") && !/\bask\w*|questions?\b/i.test(narrative)) {
       errors.push(
         `action asks a question ("${text.slice(0, 80)}") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)`,
       );
+    }
+  }
+
+  // Phase 3 (exp-3 item 2, tick 18): speech dropped without a trace. The
+  // quote gate only guards quoted segments, and the ask gate only guards
+  // questions — so "Thank both, then head to the desk" narrated as "looks
+  // around" passes with the entire utterance erased (the judge even agreed
+  // speaks=false). When the action text carries an explicitly verbal verb
+  // (thank/say/tell — ask/? stays with the ask gate above), the narrative
+  // must render speech: a quote or a speech verb of its own.
+  // Greet/welcome are deliberately excluded: they can be rendered
+  // non-verbally (walking over, waving), and the golden path relies on it.
+  if (
+    /\b(say|says|said|tell|tells|told|thank|thanks|thanked|answer|answers|answered|repl(?:y|ies|ied)|mention|mentions|mentioned|explain|explains|explained|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\b/i.test(text) ||
+    /\bcall\s+out\b/i.test(text)
+  ) {
+    if (!/\bask\w*\b|\?/.test(text)) {
+      const rendersSpeech =
+        narrative.includes("?") ||
+        quotedSegments(narrative).length > 0 ||
+        /\b(say|says|said|tell|tells|told|thank|thanks|thanked|greet|greets|greeted|greeting|welcome|welcomes|welcomed|ask|asks|asked|answer|answers|answered|repl(?:y|ies|ied)|mentions?|mentioned|explain|explains|explained|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\b/i.test(narrative);
+      if (!rendersSpeech) {
+        errors.push(
+          `action says something ("${text.slice(0, 80)}") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior`,
+        );
+      }
     }
   }
 
