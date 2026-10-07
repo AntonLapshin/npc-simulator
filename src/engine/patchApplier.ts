@@ -35,10 +35,18 @@ export function applyConsequence(
     if (patch.beliefsAppend) actor.beliefs.push(...patch.beliefsAppend);
     if (patch.relationshipsAppend) actor.relationships.push(...patch.relationshipsAppend);
 
-    // Trim memory arrays (beliefs/relationships are unbounded per plan;
-    // only memories and history are trimmed).
+    // Trim memory arrays. Phase 5: beliefs/relationships are capped too
+    // (previously unbounded — compounding state is what drowns long runs);
+    // prompt rendering summarizes instead of trimming, so nothing is lost
+    // from the model's view when these caps drop old entries.
     if (actor.memories.length > config.maxMemoriesPerActor) {
       actor.memories.splice(0, actor.memories.length - config.maxMemoriesPerActor);
+    }
+    if (actor.beliefs.length > config.maxBeliefsPerActor) {
+      actor.beliefs.splice(0, actor.beliefs.length - config.maxBeliefsPerActor);
+    }
+    if (actor.relationships.length > config.maxRelationshipsPerActor) {
+      actor.relationships.splice(0, actor.relationships.length - config.maxRelationshipsPerActor);
     }
   }
 

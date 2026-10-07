@@ -86,6 +86,8 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       turnIndex: world.turnIndex,
       actorId: action.actorId,
       prompt: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`,
+      promptChars: `${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`.length,
+      promptTokensEstimate: Math.ceil(`${LLM_SYSTEM_PROMPT}\n\n${userPrompt}`.length / 4),
       rawResponse: result.raw,
       parsedResponse: result.value,
       reasoning: result.value.reasoning,

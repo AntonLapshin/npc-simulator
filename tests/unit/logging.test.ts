@@ -86,13 +86,20 @@ describe("contextBuilder", () => {
     expect(selectionCtx).toContain("Do x.");
   });
 
-  it("consequence context contains the full world", () => {
+  it("consequence context ships a slim snapshot, not the full world", () => {
     const world = makeTinyWorld();
+    const u = world.actors.find((a) => a.id === "u")!;
+    u.memories = ["OWN_U_MEMORY"];
     const n = world.actors.find((a) => a.id === "n")!;
     n.memories = ["SECRET_N_MEMORY"];
     const ctx = buildConsequenceContext(world, { actorId: "u", text: "Hi" });
-    expect(ctx).toContain("SECRET_N_MEMORY");
+    // Acting actor's memories (summarized) and positions are visible…
+    expect(ctx).toContain("OWN_U_MEMORY");
+    expect(ctx).toContain("All actor positions");
     expect(ctx).toContain("Hi");
+    // …but other actors' compounding private lists never enter the prompt.
+    expect(ctx).not.toContain("SECRET_N_MEMORY");
+    expect(ctx).not.toContain("Full Objective World");
   });
 
   it("consequence context includes validation feedback on retry", () => {

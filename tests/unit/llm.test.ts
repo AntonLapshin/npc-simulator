@@ -335,7 +335,7 @@ describe("lenient consequence parsing for small models", () => {
 });
 
 describe("subjective vs objective contexts (§16.6)", () => {
-  it("proposal/selection hide other actors' private knowledge; consequence sees all", async () => {
+  it("proposal/selection hide other actors' private knowledge; consequence sees involved state, not far privates", async () => {
     const logger = createTestLogger();
     const provider = new StubProvider([proposalJson, selectionJson, consequenceJson]);
     const world = loadOfficeScenario();
@@ -356,8 +356,13 @@ describe("subjective vs objective contexts (§16.6)", () => {
       expect(prompt).not.toContain("The design deadline is close.");
       expect(prompt).not.toContain("Finish an urgent design draft.");
     }
-    // The consequence engine receives the full objective world.
-    expect(consequencePrompt).toContain("The design deadline is close.");
-    expect(consequencePrompt).toContain("Finish an urgent design draft.");
+    // The consequence engine receives the slim objective snapshot (Phase 5):
+    // acting actor + perceivers in detail, every position, but NOT the
+    // compounding private lists of far actors (Dan is ~14 cells away).
+    expect(consequencePrompt).toContain("Introduce himself to the team.");
+    expect(consequencePrompt).toContain("Finish a small engineering task before lunch.");
+    expect(consequencePrompt).toContain("All actor positions");
+    expect(consequencePrompt).not.toContain("The design deadline is close.");
+    expect(consequencePrompt).not.toContain("Finish an urgent design draft.");
   });
 });

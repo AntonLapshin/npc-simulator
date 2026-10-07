@@ -202,6 +202,20 @@ export type EngineConfig = {
   proposalHistoryLimit: number;
   /** Max suggestions requested from the Proposal Engine per turn. */
   maxProposalSuggestions: number;
+  /** Stored-world cap for beliefs per actor (Phase 5 memory budget). */
+  maxBeliefsPerActor: number;
+  /** Stored-world cap for relationships per actor (Phase 5 memory budget). */
+  maxRelationshipsPerActor: number;
+  /** Newest list entries rendered verbatim in prompts; older ones fold into a digest (Phase 5). */
+  memorySummaryKeepNewest: number;
+  /** Char budget per memories/beliefs/relationships prompt section (Phase 5). */
+  promptListBudgetChars: number;
+  /** Char budget for the recent-history block in prompts (Phase 5). */
+  promptHistoryBudgetChars: number;
+  /** History entries scanned for unanswered questions (Phase 5). */
+  openQuestionScanWindow: number;
+  /** Radius for the slim consequence snapshot (Phase 5 context budget). */
+  consequenceSnapshotRadius: number;
 };
 
 export type ValidationResult = {

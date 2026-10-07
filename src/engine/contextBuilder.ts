@@ -1,5 +1,11 @@
 import type { Action, Actor, SceneObject, World } from "../types.js";
 import { defaultConfig } from "../config.js";
+import { distance } from "./geometry.js";
+import {
+  resolveDestinationActorId,
+  resolveDestinationObjectId,
+  resolveMentionedActorId,
+} from "./deterministicSemantics.js";
 import {
   getVisibleActors,
   getAudibleActors,
@@ -9,6 +15,126 @@ import {
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
+}
+
+/** Rough token estimate (chars / 4) — same convention as the log fields. */
+export function estimatePromptTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Phase 5 memory-growth metric: bytes of compounding state (memories,
+ * beliefs, relationships, history) across all actors. Log per session to
+ * publish the memory-growth curve (plan Phase 6); prompt rendering must
+ * keep per-turn tokens flat while this grows.
+ */
+export function worldMemoryBytes(world: World): number {
+  let bytes = 0;
+  for (const a of world.actors) {
+    for (const list of [a.memories, a.beliefs, a.relationships]) {
+      for (const entry of list) bytes += entry.length;
+    }
+  }
+  for (const entry of world.history) bytes += entry.length;
+  return bytes;
+}
+
+/** Entry counts backing the memory-growth curve (plan Phase 6). */
+export function memoryGrowthStats(world: World): {
+  memoryEntries: number;
+  beliefEntries: number;
+  relationshipEntries: number;
+  historyEntries: number;
+  memoryBytes: number;
+} {
+  let memoryEntries = 0;
+  let beliefEntries = 0;
+  let relationshipEntries = 0;
+  for (const a of world.actors) {
+    memoryEntries += a.memories.length;
+    beliefEntries += a.beliefs.length;
+    relationshipEntries += a.relationships.length;
+  }
+  return {
+    memoryEntries,
+    beliefEntries,
+    relationshipEntries,
+    historyEntries: world.history.length,
+    memoryBytes: worldMemoryBytes(world),
+  };
+}
+
+/**
+ * Phase 5 rolling summarization: render a memories/beliefs/relationships
+ * list within a fixed char budget. Exact-duplicate entries collapse, the
+ * newest `keepNewest` entries render verbatim (they drive the arc), and
+ * everything older folds into one "Earlier (N entries, summarized)" digest
+ * line of first-clauses — summarized, never silently trimmed, so per-turn
+ * prompt tokens stay flat as stored memory compounds.
+ */
+export function summarizeListForPrompt(
+  entries: string[],
+  keepNewest = defaultConfig.memorySummaryKeepNewest,
+  budgetChars = defaultConfig.promptListBudgetChars,
+): string {
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const e of entries) {
+    const key = e.trim().toLowerCase();
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(e);
+  }
+  if (deduped.length === 0) return "(none)";
+  const newest = deduped.slice(-Math.max(1, keepNewest));
+  const older = deduped.slice(0, Math.max(0, deduped.length - newest.length));
+  const lines = newest.map((m) => `- ${m}`);
+  if (older.length > 0) {
+    // Digest: first clause of each older entry (the fact, not the wording).
+    const clauses = older.map((e) => e.split(/[.!\n]/)[0]?.trim() || e.slice(0, 80));
+    let digest = `Earlier (${older.length} entries, summarized): ${clauses.join("; ")}`;
+    const digestBudget = Math.max(200, Math.floor(budgetChars / 2));
+    if (digest.length > digestBudget) digest = digest.slice(0, digestBudget - 3) + "...";
+    lines.unshift(`- ${digest}`);
+  }
+  let out = lines.join("\n");
+  if (out.length > budgetChars) {
+    // Hard cap: keep the newest lines (they carry the live arc), note the cut.
+    const kept: string[] = [];
+    let used = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!;
+      if (used + line.length + 1 > budgetChars && kept.length > 0) break;
+      kept.unshift(line);
+      used += line.length + 1;
+    }
+    out = kept.join("\n") + "\n- (older entries omitted for budget; see digest above)";
+  }
+  return out;
+}
+
+/**
+ * Phase 5 history budget: newest entries joined within a char budget,
+ * head-truncated with an explicit note (never silently dropped from view).
+ */
+export function formatHistoryForPrompt(
+  history: string[],
+  maxEntries: number,
+  budgetChars = defaultConfig.promptHistoryBudgetChars,
+): string {
+  const tail = history.slice(-Math.max(1, maxEntries));
+  if (tail.length === 0) return "(no history yet)";
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i]!;
+    if (used + line.length + 1 > budgetChars && kept.length > 0) break;
+    kept.unshift(line);
+    used += line.length + 1;
+  }
+  const omitted = tail.length - kept.length;
+  const body = kept.join("\n");
+  return omitted > 0 ? `(${omitted} older entries omitted for budget)\n${body}` : body;
 }
 
 export type SubjectiveContextOptions = {
@@ -58,20 +184,41 @@ export const MAX_RECENT_OWN_ACTIONS = 5;
  * Scans recent history for entries containing "?" that mention the actor
  * by name/id — or a bare "you" question from someone else — newest last.
  * Pure helper (no LLM): the model still decides how to answer.
+ *
+ * Phase 5 (longevity): questions PERSIST until answered. A question stays
+ * open across any number of intervening turns (scan window covers
+ * `openQuestionScanWindow` entries, not just the prompt history slice) and
+ * closes only once the addressee speaks afterwards — a later entry authored
+ * by `actorId` counts as their chance to answer. This stops "where is my
+ * desk?"/"first task?" from silently expiring into re-asks (Exp-3 ticks
+ * 14/17/20).
  */
 export function getOpenQuestions(world: World, actorId: string, limit = MAX_OPEN_QUESTIONS): string[] {
   const actor = getActorById(world, actorId);
   if (!actor) return [];
   const nameLower = actor.name.toLowerCase();
   const idLower = actor.id.toLowerCase();
-  const entries = world.history.slice(-defaultConfig.proposalHistoryLimit);
+  const scanWindow = Math.max(
+    defaultConfig.openQuestionScanWindow,
+    defaultConfig.proposalHistoryLimit,
+  );
+  const entries = world.history.slice(-scanWindow);
+  const authorPrefixes = [`${actor.name}:`, `${actor.id}:`];
   const out: string[] = [];
-  for (const entry of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
     if (!entry.includes("?")) continue;
     const lower = entry.toLowerCase();
     const mentionsMe = lower.includes(nameLower) || lower.includes(idLower) || /\byou\b/.test(lower);
     const mine = lower.startsWith(`${nameLower}:`) || lower.startsWith(`${idLower}:`);
-    if (mentionsMe && !mine) out.push(entry);
+    if (!mentionsMe || mine) continue;
+    // Answered once the addressee authored any later entry (their response
+    // turn) — until then the question stays open no matter how many other
+    // turns intervene.
+    const answered = entries
+      .slice(i + 1)
+      .some((later) => authorPrefixes.some((p) => later.startsWith(p)));
+    if (!answered) out.push(entry);
   }
   return out.slice(-limit);
 }
@@ -160,6 +307,39 @@ export function buildRelationshipRefresh(world: World, actorId: string): string 
 }
 
 /**
+ * Phase 5 per-actor newcomer refresh (Exp-3 item 13 / Exp-2 item 13, still
+ * open: the global "known hired coworker" line is ignored and Tanya
+ * stranger-framed Anton 3×). For each colleague this actor sees, pull the
+ * hiring/referral/history sentences from that colleague's PUBLIC persona
+ * (role + referral facts, e.g. "hired backend dev, ex-Sixt with Tanya,
+ * referred by her") and restate them as established fact — never a
+ * stranger/candidate. Only persona text is used (no leaked goals,
+ * memories, or thoughts), and the line is emitted in *subjective*
+ * (proposal/selection) contexts so the viewer stops re-framing known
+ * coworkers. Returns "" when no colleague carries referral/history facts
+ * (e.g. tiny test worlds) so the prompt pays nothing.
+ */
+export function buildCoworkerAnchor(world: World, actorId: string): string {
+  const viewer = getActorById(world, actorId);
+  if (!viewer) return "";
+  const factRe = /referr|sixt|first day|new coworker|new backend|joined (this|the) team|hired/i;
+  const lines: string[] = [];
+  for (const other of world.actors) {
+    if (other.id === actorId) continue;
+    const facts = other.persona
+      .split(/(?<=[.!])\s+|\n+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0 && factRe.test(s));
+    if (facts.length === 0) continue;
+    lines.push(
+      `${other.name} (${other.id}): ${facts.join(" ")} — established hired coworker, never a stranger/candidate/applicant.`,
+    );
+  }
+  if (lines.length === 0) return "";
+  return `KNOWN HISTORY (do not re-frame as strangers): ${lines.join(" ")}`;
+}
+
+/**
  * Exp-3 item 9: exact object-ID catalog. The landmarks line lists
  * `name (id)` but small models still emit "coffee mug"/"paper"/
  * "tanya's_desk"-style ids (ticks 10/11). Group the scene's small props by
@@ -215,7 +395,7 @@ export function buildProposalContext(
   const objects = getVisibleObjects(world, actorId);
   const historyLimit = resolveHistoryLimit(opts);
   const maxSuggestions = resolveMaxSuggestions(opts);
-  const recentHistory = world.history.slice(-historyLimit).join("\n") || "(no history yet)";
+  const recentHistory = formatHistoryForPrompt(world.history, historyLimit);
   const openQuestions = getOpenQuestions(world, actorId);
   const questionsLine =
     openQuestions.length > 0
@@ -226,6 +406,7 @@ export function buildProposalContext(
     recentOwn.length > 0
       ? `Your recent actions (do NOT repeat yourself):\n${recentOwn.map((a) => `- ${a}`).join("\n")}\nDo not propose an action you already took above unless the situation clearly changed.`
       : "Your recent actions: (none yet)";
+  const coworkerAnchor = buildCoworkerAnchor(world, actorId);
 
   return [
     "Current Actor",
@@ -243,14 +424,15 @@ export function buildProposalContext(
     buildRosterAnchor(world),
     "",
     buildRelationshipRefresh(world, actorId),
+    ...(coworkerAnchor !== "" ? ["", coworkerAnchor] : []),
     "",
     "Memories",
     "",
-    formatList(actor.memories),
+    summarizeListForPrompt(actor.memories),
     "",
     "Beliefs",
     "",
-    formatList(actor.beliefs),
+    summarizeListForPrompt(actor.beliefs),
     "",
     "Perceived Environment",
     "",
@@ -284,7 +466,7 @@ function buildFullActorContext(
   const visible = getVisibleActors(world, actorId);
   const objects = getVisibleObjects(world, actorId);
   const historyLimit = resolveHistoryLimit(opts);
-  const recentHistory = world.history.slice(-historyLimit).join("\n") || "(no history yet)";
+  const recentHistory = formatHistoryForPrompt(world.history, historyLimit);
 
   return [
     "Current Actor",
@@ -299,15 +481,15 @@ function buildFullActorContext(
     "",
     "Memories",
     "",
-    formatList(actor.memories),
+    summarizeListForPrompt(actor.memories),
     "",
     "Beliefs",
     "",
-    formatList(actor.beliefs),
+    summarizeListForPrompt(actor.beliefs),
     "",
     "Relationships",
     "",
-    formatList(actor.relationships),
+    summarizeListForPrompt(actor.relationships),
     "",
     "Perceived Environment",
     "",
@@ -363,12 +545,14 @@ export function buildSelectionContext(
           "Do not pick or invent an action you already took above unless the situation clearly changed. Greeting, welcoming, or walking over to the same person twice in a row is a repeat — choose something that moves the scene forward.",
         ].join("\n")
       : "";
+  const coworkerAnchor = buildCoworkerAnchor(world, actorId);
   return [
     fullContext,
     "",
     buildIdentityAnchor(world, actorId),
     buildRosterAnchor(world),
     buildRelationshipRefresh(world, actorId),
+    ...(coworkerAnchor !== "" ? [coworkerAnchor] : []),
     questionsBlock,
     repetitionBlock,
     "",
@@ -386,30 +570,119 @@ export function buildSelectionContext(
   ].join("\n");
 }
 
-// Consequence context includes the full objective world because it
-// updates all affected actors and objects.
+// Consequence context uses a slim objective snapshot (Phase 5 context
+// budget) because it updates all affected actors and objects — but shipping
+// the full world JSON grows linearly with memories/history and drowns small
+// models (~15 min/21 turns, infeasible at 200 turns). The snapshot carries
+// only what adjudication needs: the acting actor in detail, every actor's
+// position (movement/adjacency reasoning), perceivers + named targets in
+// detail, nearby + named-target objects with rects, bounded history, and
+// the exact-id catalog (kept as a separate line below).
+export function getPerceivingActors(world: World, action: Action): Actor[] {
+  const actor = getActorById(world, action.actorId);
+  if (!actor) return [];
+  return world.actors.filter((o) => {
+    if (o.id === action.actorId) return true;
+    const from = { x: o.x, y: o.y };
+    const to = { x: actor.x, y: actor.y };
+    return (
+      getVisibleActors(world, o.id).some((a) => a.id === action.actorId) ||
+      getAudibleActors(world, o.id).some((a) => a.id === action.actorId) ||
+      Math.abs(from.x - to.x) + Math.abs(from.y - to.y) <= 2
+    );
+  });
+}
+
+function formatSnapshotActor(a: Actor, thoughtsBudget = 160): string {
+  const bits = [`${a.name} (${a.id}) at (${a.x}, ${a.y})`, `state=${a.state}`, `emotion=${a.emotion}`, `goal=${a.goal}`];
+  if (a.pose) bits.push(`pose=${a.pose}`);
+  if (a.prop) bits.push(`prop=${a.prop}`);
+  if (a.thoughts) {
+    const t = a.thoughts.length > thoughtsBudget ? a.thoughts.slice(0, thoughtsBudget - 3) + "..." : a.thoughts;
+    bits.push(`thoughts="${t}"`);
+  }
+  return bits.join(", ");
+}
+
+function formatSnapshotObject(o: SceneObject): string {
+  const desc = o.description.length > 120 ? o.description.slice(0, 117) + "..." : o.description;
+  return `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h}) [${o.passable ? "passable" : "blocked"}]: ${desc}`;
+}
+
+/**
+ * Phase 5 slim objective snapshot for the consequence call. Bounded by the
+ * snapshot radius + named targets: far-actor memories and far furniture
+ * never enter the prompt, so per-turn tokens stay flat as the run
+ * compounds. Named movement/speech targets are always included even when
+ * far (the walk needs their positions).
+ */
+export function buildSlimObjectiveSnapshot(
+  world: World,
+  action: Action,
+  radius = defaultConfig.consequenceSnapshotRadius,
+): string {
+  const actor = getActorById(world, action.actorId);
+  const at = actor ? { x: actor.x, y: actor.y } : { x: 0, y: 0 };
+  const destActorId = actor ? resolveDestinationActorId(world, action.actorId, action.text) : undefined;
+  const mentionedActorId = actor ? resolveMentionedActorId(world, action.actorId, action.text) : undefined;
+  const destObjectId = resolveDestinationObjectId(world, action.text, action.actorId);
+  const textLower = action.text.toLowerCase();
+
+  const detailIds = new Set<string>();
+  if (actor) detailIds.add(actor.id);
+  for (const p of getPerceivingActors(world, action)) detailIds.add(p.id);
+  if (destActorId) detailIds.add(destActorId);
+  if (mentionedActorId) detailIds.add(mentionedActorId);
+  const detailActors = world.actors.filter((a) => detailIds.has(a.id));
+
+  const targetObjectIds = new Set<string>();
+  if (destObjectId) targetObjectIds.add(destObjectId);
+  const nearbyObjects = world.scene.objects.filter((o) => {
+    if (targetObjectIds.has(o.id)) return false;
+    // Named anywhere in the action text ("pour from the coffee machine").
+    if (o.id.toLowerCase().length >= 3 && textLower.includes(o.id.toLowerCase())) {
+      targetObjectIds.add(o.id);
+      return false;
+    }
+    if (o.name.toLowerCase().length >= 3 && textLower.includes(o.name.toLowerCase())) {
+      targetObjectIds.add(o.id);
+      return false;
+    }
+    const center = { x: o.x + o.w / 2, y: o.y + o.h / 2 };
+    return distance(at, center) <= radius;
+  });
+  const targetObjects = world.scene.objects.filter((o) => targetObjectIds.has(o.id));
+
+  const stats = memoryGrowthStats(world);
+  const lines = [
+    `Scene: ${world.scene.width}x${world.scene.height}, bounds 0,0 to ${world.scene.width},${world.scene.height}. Tick ${world.tick}. Narrative: ${world.narrative}`,
+    `Acting actor: ${actor ? `${formatSnapshotActor(actor)}, goal=${actor.goal}` : "(unknown)"}`,
+    `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
+    `Involved actors (detail): ${detailActors.map((a) => formatSnapshotActor(a)).join(" | ") || "(none)"}`,
+  ];
+  if (actor) {
+    lines.push(`Acting actor memories (latest + digest): ${summarizeListForPrompt(actor.memories, 5).replace(/\n/g, " ")}`);
+  }
+  lines.push(
+    `Nearby objects (within ${radius} cells): ${nearbyObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
+    `Named-target objects (always included): ${targetObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
+    `Recent history: ${formatHistoryForPrompt(world.history, 8).replace(/\n/g, " ")}`,
+    `Memory stats: ${world.actors.length} actors, ${stats.historyEntries} history entries, ${stats.memoryBytes} bytes compounding (prompt stays flat via summaries).`,
+  );
+  return lines.join("\n");
+}
+
 export function buildConsequenceContext(
   world: World,
   action: Action,
   feedback?: string,
 ): string {
   const actor = getActorById(world, action.actorId);
-  const perceivers = actor
-    ? world.actors.filter((o) => {
-        if (o.id === action.actorId) return true;
-        const from = { x: o.x, y: o.y };
-        const to = { x: actor.x, y: actor.y };
-        return (
-          getVisibleActors(world, o.id).some((a) => a.id === action.actorId) ||
-          getAudibleActors(world, o.id).some((a) => a.id === action.actorId) ||
-          Math.abs(from.x - to.x) + Math.abs(from.y - to.y) <= 2
-        );
-      })
-    : [];
+  const perceivers = getPerceivingActors(world, action);
   const lines = [
-    "Full Objective World",
+    "Objective Snapshot (slim — nearby actors/objects + named targets; far state omitted for budget)",
     "",
-    JSON.stringify(world),
+    buildSlimObjectiveSnapshot(world, action),
     "",
     "Current Action",
     "",

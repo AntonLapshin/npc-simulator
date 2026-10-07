@@ -92,12 +92,12 @@ Touches: `src/engine/turnOrchestrator.ts`, `src/engine/patchApplier.ts`, `src/en
 
 Problem: appends without consolidation drift (Tanya stranger-frames Anton at 0/6/15; Dana re-asks fit at 14/17/20; recruiter codes at tick 20). Full world JSON in every consequence call grows linearly; 4 LLM calls/NPC turn ≈ 15 min/21 turns — a 200-turn run is infeasible as-is.
 
-Tasks:
-- [ ] Rolling summarization per actor: relationship state, open questions, current project. Summarize, don't just trim.
-- [ ] Per-actor refresh line in Tanya/Dana subjective contexts only: "Anton: hired backend dev, ex-Sixt with Tanya (referred by her) — never stranger/candidate." (Exp-2 item 13, still open.)
-- [ ] Shrink consequence payload: slim objective snapshot (nearby actors/objects + targets) instead of full world; move rarely-firing rules (arrival radius, mask lists) into retry feedback only; trim ~150-line consequence prompt for small models.
-- [ ] Ship exact ID list into every consequence call (mugs/papers/desks + "never write 'coffee mug'").
-- [ ] Add quoted-speech copy rule + contact/pose/prop one-liners (§5 items 10–11) as part of the trimmed prompt.
+Tasks (implemented — see `tests/unit/phase5.test.ts`):
+- [x] Rolling summarization per actor: relationship state, open questions, current project. Summarize, don't just trim.
+- [x] Per-actor refresh line in Tanya/Dana subjective contexts only: "Anton: hired backend dev, ex-Sixt with Tanya (referred by her) — never stranger/candidate." (Exp-2 item 13, still open.)
+- [x] Shrink consequence payload: slim objective snapshot (nearby actors/objects + targets) instead of full world; move rarely-firing rules (arrival radius, mask lists) into retry feedback only; trim ~150-line consequence prompt for small models.
+- [x] Ship exact ID list into every consequence call (mugs/papers/desks + "never write 'coffee mug'").
+- [x] Add quoted-speech copy rule + contact/pose/prop one-liners (§5 items 10–11) as part of the trimmed prompt.
 
 Exit: stranger/candidate frames gone over 20+ turns; open questions ("where is my desk?", "first task?") persist until answered; per-turn tokens flat, not linear; 200-turn run time-bounded.
 

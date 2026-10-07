@@ -10,6 +10,22 @@ export const defaultConfig: EngineConfig = {
   autosaveEnabled: true,
   proposalHistoryLimit: 20,
   maxProposalSuggestions: 10,
+  // Phase 5 (longevity: compounding memory + context budget). Prompt-side
+  // rendering summarizes instead of trimming, so per-turn tokens stay flat
+  // while the stored world keeps full detail up to the caps above.
+  /** Stored-world cap for beliefs/relationships per actor (memories use maxMemoriesPerActor). */
+  maxBeliefsPerActor: 30,
+  maxRelationshipsPerActor: 30,
+  /** Newest memory/belief/relationship entries rendered verbatim in prompts; older ones fold into a one-line digest. */
+  memorySummaryKeepNewest: 8,
+  /** Char budget per memories/beliefs/relationships prompt section (older entries summarized, never dropped silently). */
+  promptListBudgetChars: 1200,
+  /** Char budget for the recent-history block in prompts (head-truncated with a note). */
+  promptHistoryBudgetChars: 2000,
+  /** History entries scanned for unanswered questions (persist until the addressee responds). */
+  openQuestionScanWindow: 60,
+  /** Radius around the acting actor for the slim consequence snapshot (nearby actors/objects + named targets). */
+  consequenceSnapshotRadius: 12,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {
