@@ -150,11 +150,13 @@ export async function resolveWithValidation(
       actorId: action.actorId,
       message: `validating consequence (attempt ${attempt})…`,
     });
-    // Effects-first: the consequence's self-declaration wins when present
-    // (no extra LLM call); otherwise the SemanticJudge classifies the
-    // action text; otherwise physics-only (fail-open). Judge output is
-    // logged per turn (semantic_resolved/semantic_completed) for
-    // observability, like selection_completed.
+    // Merged semantics: the consequence's self-declared `effects` are
+    // checked against an independent classification of the action text
+    // (OR for requirement flags), so a consequence cannot dodge
+    // movement/speech/addressee gates by declaring moved=false/spoke=false.
+    // Judge output is logged per turn
+    // (semantic_resolved/semantic_completed) for observability, like
+    // selection_completed.
     const resolved = await resolveActionSemantics(
       world,
       action,

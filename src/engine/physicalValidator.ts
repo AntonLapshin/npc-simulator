@@ -173,13 +173,21 @@ export function validateConsequence(
   // schema, geometry, and turn structure still guard coherence.
   if (action) {
     const resolved = semantics ?? effectsToSemantics(normalized);
+    errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
+    errors.push(...validateNarrativeActors(world, normalized));
+    errors.push(...validateObjectGrounding(world, normalized, action));
     if (resolved) {
       errors.push(...validateSpeechPreservation(resolved, normalized.narrative));
       errors.push(...validateMovementIntent(world, normalized, action, resolved));
       errors.push(...validateDestinationObject(world, normalized, action, resolved));
       errors.push(...validateContactAdjacency(world, normalized, action, resolved));
       errors.push(...validateAddresseePatch(world, normalized, action, resolved));
+      errors.push(...validateActingActorPresence(normalized, action, resolved));
     }
+  } else {
+    errors.push(...validateNarrativePlaceholder(normalized.narrative));
+    errors.push(...validateNarrativeActors(world, normalized));
+    errors.push(...validateObjectGrounding(world, normalized));
   }
 
   return { valid: errors.length === 0, errors };
@@ -250,10 +258,31 @@ function distanceToRect(px: number, py: number, rect: { x: number; y: number; w:
  * be strictly closer to that object than the old one — same rule as
  * actor destinations. Rejects teleports to unrelated areas and
  * wrong-direction moves.
+ *
+ * Arrival (exp-2 item 6, tick 27 repro): mere "walks toward X" only needs
+ * strictly-closer, but prose that claims completion AT the landmark ("is at
+ * his desk and begins typing", "fills her mug at the machine") must end
+ * within ARRIVAL_RADIUS of it — closer-but-still-across-the-room is not
+ * arrival.
  */
+const ARRIVAL_RADIUS = 4;
+
+function narrativeClaimsArrival(narrative: string, objName: string, objId: string): boolean {
+  const lower = narrative.toLowerCase();
+  const idSpaced = objId.toLowerCase().replace(/_/g, " ");
+  const names = new Set([objName.toLowerCase(), objId.toLowerCase(), idSpaced]);
+  // Also match the trailing kind word ("the coffee machine", "his desk").
+  const kind = objName.toLowerCase().split(/\s+/).slice(-1)[0] ?? "";
+  const mentions =
+    [...names].some((n) => n.length >= 3 && lower.includes(n)) ||
+    (kind.length >= 4 && new RegExp(`\\b(at|to|beside|near|by)\\s+(?:the|his|her|their|my)?\\s*${kind}\\b`).test(lower));
+  if (!mentions) return false;
+  return /\b(at|arrives?|arrived|reaches?|reached|sits?(?:\s+down)?\s+at|fills?|pours?|brews?|begins?\s+(typing|work)|starts?\s+(typing|work)|is\s+(now\s+)?at)\b/i.test(narrative);
+}
+
 function validateDestinationObject(
   world: World,
-  normalized: { actorPatches: { actorId: string; x?: number; y?: number }[] },
+  normalized: { narrative: string; actorPatches: { actorId: string; x?: number; y?: number }[] },
   action: Action,
   semantics: ActionSemantics,
 ): string[] {
@@ -274,6 +303,10 @@ function validateDestinationObject(
   if (!(newDist < oldDist)) {
     errors.push(
       `action says to move toward ${obj.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${obj.name} (${obj.id})`,
+    );
+  } else if (narrativeClaimsArrival(normalized.narrative, obj.name, obj.id) && newDist > ARRIVAL_RADIUS) {
+    errors.push(
+      `narrative claims to be AT ${obj.name} (${obj.id}) but ends at (${patch.x}, ${patch.y}), ${newDist.toFixed(1)} cells away: land within ${ARRIVAL_RADIUS} cells of it (next to it, never inside) or drop the arrival claim`,
     );
   }
   return errors;
@@ -347,6 +380,241 @@ function validateAddresseePatch(
     errors.push(
       `action speaks directly to ${target.id} but ${target.id} has no actorPatch: give every perceiving actor (especially a direct addressee) at least a 'thoughts' reaction patch`,
     );
+  }
+  return errors;
+}
+
+/**
+ * Placeholder/schema-leak gate (exp-2 item 1, tick 4 repro): a narrative of
+ * `"string"`, `"(none)"`, or an echo of the action text means the model
+ * emitted schema filler instead of a consequence. Cheap string check that
+ * runs on every turn, with or without judged semantics.
+ */
+const PLACEHOLDER_NARRATIVES = new Set([
+  "string", "(none)", "none", "n/a", "na", "no change", "(no change)",
+  "no-change", "nothing", "nothing changes", "...", "-", "null", "undefined",
+  "(...)", "tbd",
+]);
+
+function stripForCompare(s: string): string {
+  return s
+    .trim()
+    .replace(/^["'(\[]+/, "")
+    .replace(/["')\].,;:!?]+$/, "")
+    .trim()
+    .toLowerCase();
+}
+
+function validateNarrativePlaceholder(narrative: string, action?: Action): string[] {
+  const stripped = stripForCompare(narrative);
+  if (PLACEHOLDER_NARRATIVES.has(stripped)) {
+    return [
+      `narrative is a placeholder ("${narrative.slice(0, 80)}"): describe ONLY what the acting actor observably does, grounded in the action text — never emit schema filler`,
+    ];
+  }
+  if (action && stripped.length > 0 && stripped === stripForCompare(action.text)) {
+    return [
+      `narrative echoes the action text verbatim instead of describing the outcome: narrate what observably happens as a result of the action`,
+    ];
+  }
+  return [];
+}
+
+/**
+ * Acting-actor presence (exp-2 item 2, tick 11 repro): a turn whose judged
+ * meaning is locomotion or physical contact must leave a trace on the acting
+ * actor itself. Patches on observers only (or no patches at all for contact)
+ * mean the actor did nothing while someone else reacted — reject so the
+ * model retries with the acting actor patched. Symmetric to the existing
+ * observer-move rule. Speech-only turns with zero patches stay allowed
+ * (a greeting need not change state), and fail-open turns without semantics
+ * are untouched.
+ */
+function validateActingActorPresence(
+  normalized: { actorPatches: { actorId: string }[] },
+  action: Action,
+  semantics: ActionSemantics,
+): string[] {
+  const needsActor = semantics.moves || semantics.contactActorId !== undefined;
+  if (!needsActor) return [];
+  const hasActing = normalized.actorPatches.some((p) => p.actorId === action.actorId);
+  if (!hasActing) {
+    const kind = semantics.contactActorId !== undefined ? "physical contact" : "movement";
+    return [
+      `action implies ${kind} but acting actor (${action.actorId}) has no actorPatch (only observers patched, or none): patch the acting actor itself with the movement/contact outcome`,
+    ];
+  }
+  return [];
+}
+
+/** Capitalized words that are never person names (greetings, time, office vocab). */
+const COMMON_CAPITALIZED = new Set(
+  [
+    "morning", "afternoon", "evening", "hello", "hi", "hey", "thanks", "thank",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "office", "coffee", "desk", "laptop", "mug", "chair", "room", "team", "work",
+    "weekend", "lunch", "kitchen", "entrance", "door", "machine", "table", "sofa",
+    "sixt", "qa", "api", "apis", "backend", "frontend",
+    "welcome", "good", "great", "nice", "sorry",
+    "okay", "well", "just", "still", "back", "here", "there", "this", "that",
+    "what", "who", "how", "when", "where", "nothing", "something", "someone",
+  ].map((w) => w.toLowerCase()),
+);
+
+/**
+ * Narrative name audit (exp-2 item 3, ticks 2/5/14 repro): the patch-ID
+ * checks above cannot see names that appear only in prose ("walks closer to
+ * Jeff" with no Jeff patch passes them). Scan the narrative and reasoning
+ * for person mentions in person-context positions (spoken address,
+ * movement toward, or X-does-Y verbs) and fail names that match neither the
+ * roster nor visible object vocabulary. Only person-context matches are
+ * considered — not every capitalized word — so scene prose ("Office",
+ * "Morning") does not trip the gate.
+ */
+function validateNarrativeActors(
+  world: World,
+  normalized: { narrative: string; reasoning?: string },
+): string[] {
+  const roster = new Map<string, string>();
+  for (const a of world.actors) {
+    roster.set(a.name.toLowerCase(), a.id);
+    roster.set(a.id.toLowerCase(), a.id);
+    for (const tok of a.name.toLowerCase().split(/[^a-z0-9]+/)) {
+      if (tok.length >= 3 && !roster.has(tok)) roster.set(tok, a.id);
+    }
+  }
+  const objectTokens = new Set<string>();
+  for (const o of world.scene.objects) {
+    for (const src of [o.name, o.id]) {
+      for (const tok of src.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (tok.length >= 3) objectTokens.add(tok);
+      }
+    }
+  }
+  const text = `${normalized.narrative} ${normalized.reasoning ?? ""}`;
+  const personContext: RegExp[] = [
+    /\b(?:hey|hi|hello|dear|toward|towards|to|with|for|at|near|beside|behind|greets?|greeting|pats?|hugs?|embraces?|handshake with|welcomes?|thanks?|asks?|tells?|sees?|approaches?|walks?(?: closer)? to)\s+([A-Z][a-z]{2,})\b/g,
+    /\b([A-Z][a-z]{2,})\s+(?:says|sips|walks|turns|nods|smiles|laughs|stands|waves|looks|replies|shouts|whispers|types|sits|stands up|picks)\b/g,
+    // Quoted vocatives: "Hey Jeff, welcome!" — the greeting verb sits inside
+    // quotes with punctuation between it and the addressee (tick 5 repro).
+    // Case-sensitive on purpose: with the `i` flag [A-Z] would also match
+    // lowercase words ("Hi all" -> "all").
+    /\b(?:[Hh]ey|[Hh]i|[Hh]ello|[Dd]ear|[Ww]elcome)\s+([A-Z][a-z]{2,})\b/g,
+  ];
+  const suspects = new Set<string>();
+  for (const re of personContext) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) suspects.add(m[1]!);
+  }
+  for (const s of suspects) {
+    const lower = s.toLowerCase();
+    if (roster.has(lower)) continue;
+    if (objectTokens.has(lower)) continue;
+    if (COMMON_CAPITALIZED.has(lower)) continue;
+    return [
+      `narrative names unknown actor "${s}" with no roster entry or patch: only the listed actors exist — describe only them, never invent or address anyone else`,
+    ];
+  }
+  return [];
+}
+
+/**
+ * Mask "return/back to <activity>" so resuming a task ("returns to typing")
+ * is not read as starting an object interaction.
+ */
+function maskResumedActivity(t: string): string {
+  let out = t;
+  out = out.replace(
+    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(
+    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
+    " ",
+  );
+  out = out.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
+  return out;
+}
+
+/**
+ * Object grounding (exp-2 item 7 — 30/30 empty objectPatches repro): prose
+ * that brews, pours, sips, types, opens, picks up, or sits must be backed by
+ * a matching patch. Narrative-side verb matching only (reads structured
+ * output, never interprets action intent — that stays with the judge).
+ * Already-held props satisfy sip/type (sipping from a held cup changes
+ * nothing), but brewing/pouring/picking up always demand a fresh patch.
+ */
+function validateObjectGrounding(
+  world: World,
+  normalized: {
+    narrative: string;
+    actorPatches: { actorId: string; pose?: string; prop?: string | null }[];
+    objectPatches: { objectId: string }[];
+  },
+  action?: Action,
+): string[] {
+  const errors: string[] = [];
+  const text = maskResumedActivity(normalized.narrative);
+  const actingId = action?.actorId;
+  const actingPatch = actingId !== undefined
+    ? normalized.actorPatches.find((p) => p.actorId === actingId)
+    : undefined;
+  const actingWorld = actingId !== undefined
+    ? world.actors.find((a) => a.id === actingId)
+    : undefined;
+  const hasObjectPatch = normalized.objectPatches.length > 0;
+  const holdsSomething =
+    (actingPatch?.prop ?? undefined) !== undefined
+      ? actingPatch!.prop !== null
+      : (actingWorld?.prop ?? null) !== null;
+  const propPatched = actingPatch?.prop !== undefined;
+
+  if (/\b(sits?|sitting|sat)\b|\btakes? a seat\b/i.test(text)) {
+    const poseOk =
+      actingPatch?.pose !== undefined || (actingWorld?.pose ?? "stand") === "sit";
+    if (!poseOk) {
+      errors.push(
+        `narrative describes sitting but no pose patch sets it: include pose ("sit") on the acting actor${actingId ? ` (${actingId})` : ""}`,
+      );
+    }
+  }
+  if (/\b(brews?|brewing|pours?|pouring|fills?(?:ing)? (?:his|her|their|my|the|a) mug|makes? coffee)\b/i.test(text)) {
+    if (!hasObjectPatch && !propPatched) {
+      errors.push(
+        `narrative describes brewing/pouring but no object patch backs it: add an objectPatch for the coffee machine/mug (or a prop patch for the cup picked up)`,
+      );
+    }
+  }
+  if (/\b(picks?\s+up|picking\s+up|picked\s+up|grabs?|takes? (?:the|his|her|a|an) (?:laptop|mug|cup|bag|chair|papers?|phone|monitor))\b/i.test(text)) {
+    if (!propPatched && !hasObjectPatch) {
+      errors.push(
+        `narrative describes picking something up but no prop/object patch backs it: set prop on the acting actor (or an objectPatch for what moved)`,
+      );
+    }
+  }
+  if (/\b(opens?(?:ing)? (?:his|her|their|my|the|a|an) laptop|boots?(?:ing)? (?:up )?(?:his|her|their|my|the|a|an)? ?laptop|powers? on)\b/i.test(text)) {
+    if (!propPatched && !hasObjectPatch && !holdsSomething) {
+      errors.push(
+        `narrative describes opening/booting a laptop but no prop/object patch backs it: set prop ("laptop") on the acting actor or add the matching objectPatch`,
+      );
+    }
+  }
+  if (/\b(sips?|sipping|sipped|drinks?|drinking|drank|swigs?|gulps?|types?|typing|typed)\b/i.test(text)) {
+    if (!propPatched && !hasObjectPatch && !holdsSomething) {
+      errors.push(
+        `narrative describes sipping/drinking/typing but the acting actor holds nothing and no prop/object patch backs it: set prop (cup/laptop) or add the matching objectPatch`,
+      );
+    }
   }
   return errors;
 }

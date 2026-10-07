@@ -133,7 +133,8 @@ describe("golden office-anton replay", () => {
     expect(events).not.toContain("retry_started");
     expect(events).not.toContain("fallback_used");
     expect(logger.store.byEvent("validation_passed")).toHaveLength(3);
-    // Effects declarations drove validation (no judge call needed).
+    // Effects declarations agree with the independent (mock) judge, so the
+    // merged semantics keep source "effects" on all three ticks.
     expect(logger.store.byEvent("semantic_resolved")).toHaveLength(3);
   });
 });

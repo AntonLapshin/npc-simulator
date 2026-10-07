@@ -101,6 +101,43 @@ export function buildIdentityAnchor(world: World, actorId: string): string {
   return `IDENTITY: You are ${actor.name} (${actor.id}). Role: ${actor.persona} Current goal: ${actor.goal}.${notLine} Your next action must fit YOUR role and goal above.`;
 }
 
+/** Pronouns for the roster anchor: explicit tag when present, else inferred. */
+export function extractPronouns(persona: string): string {
+  const lower = persona.toLowerCase();
+  if (/she\/her/.test(lower)) return "she/her";
+  if (/he\/him/.test(lower)) return "he/him";
+  if (/they\/them/.test(lower)) return "they/them";
+  const she = (lower.match(/\b(she|her|hers|herself)\b/g) ?? []).length;
+  const he = (lower.match(/\b(he|him|his|himself)\b/g) ?? []).length;
+  if (she > he && she > 0) return "she/her";
+  if (he > she && he > 0) return "he/him";
+  return "they/them";
+}
+
+/**
+ * Roster + pronoun anchor (exp-2 item 9, ticks 2/3/5/14/15/20/26 repro):
+ * one line naming every actor that exists — with pronouns and positions —
+ * plus an explicit closed-world rule. Embedded in proposal, selection, and
+ * consequence contexts so a small model never invents Jeff/Samantha/Julie/
+ * Lisa/Bob/Mia/Tyrone or an "interviewer". Doubles as the memory-refresh
+ * line (exp-2 item 13): colleagues are listed as known hired coworkers with
+ * their current goal, never strangers or candidates.
+ */
+export function buildRosterAnchor(world: World): string {
+  // Names, pronouns, and positions only — goals/memories stay private to
+  // each actor's own context (subjective contexts must never leak another
+  // actor's hidden state).
+  const parts = world.actors.map(
+    (a) => `${a.name} (${a.id}, ${extractPronouns(a.persona)}) at (${a.x}, ${a.y})`,
+  );
+  return [
+    `ROSTER (the ONLY people who exist here): ${parts.join("; ") || "(none)"}.`,
+    "No one else exists — never invent, address, or describe anyone else (no extra names, no interviewer, no newcomers).",
+    "Treat everyone listed as a known hired coworker per their role above — never as a stranger, candidate, or applicant.",
+    "Preserve every actor's pronouns exactly as listed above in all prose and patches.",
+  ].join(" ");
+}
+
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
 // private memories, beliefs, hidden goals, or unperceived events.
@@ -127,6 +164,11 @@ export function buildProposalContext(
     openQuestions.length > 0
       ? `Open questions addressed to you (answer these before starting anything new):\n${openQuestions.map((q) => `- ${q}`).join("\n")}`
       : "Open questions addressed to you: (none)";
+  const recentOwn = getRecentOwnActions(world, actorId);
+  const repetitionLine =
+    recentOwn.length > 0
+      ? `Your recent actions (do NOT repeat yourself):\n${recentOwn.map((a) => `- ${a}`).join("\n")}\nDo not propose an action you already took above unless the situation clearly changed.`
+      : "Your recent actions: (none yet)";
 
   return [
     "Current Actor",
@@ -138,6 +180,10 @@ export function buildProposalContext(
     `${THOUGHTS_GUIDANCE}: ${actor.thoughts || "(none yet)"}`,
     "",
     questionsLine,
+    "",
+    repetitionLine,
+    "",
+    buildRosterAnchor(world),
     "",
     "Memories",
     "",
@@ -262,6 +308,7 @@ export function buildSelectionContext(
     fullContext,
     "",
     buildIdentityAnchor(world, actorId),
+    buildRosterAnchor(world),
     questionsBlock,
     repetitionBlock,
     "",
@@ -316,6 +363,7 @@ export function buildConsequenceContext(
     "Same rule for NAMED LANDMARKS: if the action names a desk, the coffee machine, the door, or any object above ('my desk', 'west-side desk', 'NW-corner coffee machine'), the new x,y MUST be strictly closer to that object's rectangle than the current position. Never teleport across the room to an unrelated area; never move AWAY from the named target.",
     "PHYSICAL CONTACT RULE: if the action shakes hands, hugs, high-fives, pats, kisses, or hands/passes/gives something to someone, the acting actor MUST end ADJACENT to that person (within 2.5 cells Euclidean). A handshake across the room is invalid — walk over first, then touch.",
     "IDENTITY RULE: " + (actor ? `${buildIdentityAnchor(world, action.actorId)} Act out YOUR role only.` : "Act out the acting actor's role only."),
+    "ROSTER RULE: " + buildRosterAnchor(world),
     "PRONOUN RULE: preserve every actor's pronouns exactly as used in their persona and the world above — never flip he/him to she/her or vice versa. If the scenario says Dana is he/him, every verb and pronoun for Dana stays he/him.",
     "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence.",
     "",

@@ -64,14 +64,14 @@ describe("MockSemanticJudge", () => {
 });
 
 describe("resolveActionSemantics", () => {
-  it("prefers self-declared effects without calling the judge", async () => {
+  it("merges self-declared effects with an independent judge classification", async () => {
     const world = makeTinyWorld();
     const logger = createTestLogger();
     let calls = 0;
     const judge = {
       async classify(_w: World, _a: Action): Promise<ActionSemantics> {
         calls++;
-        throw new Error("must not be called");
+        return { moves: false, speaks: false, quotedSpeech: [] };
       },
     };
     const resolved = await resolveActionSemantics(
@@ -87,12 +87,34 @@ describe("resolveActionSemantics", () => {
       judge,
       logger,
     );
-    expect(calls).toBe(0);
+    expect(calls).toBe(1);
     expect(resolved).toEqual({
       source: "effects",
       semantics: { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
     });
     expect(logger.store.events()).toContain("semantic_resolved");
+  });
+
+  it("widens lying effects via the judge (merged source)", async () => {
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    // Consequence claims nothing happened for a "walk toward N" action —
+    // the independent classification must restore the movement requirement.
+    const resolved = await resolveActionSemantics(
+      world,
+      { actorId: "u", text: "Walk toward N, my friend." },
+      {
+        narrative: "U adjusts his tie.",
+        actorPatches: [{ actorId: "u", thoughts: "Sharp." }],
+        objectPatches: [],
+        reasoning: "r",
+        effects: { moved: false, spoke: false },
+      },
+      new MockSemanticJudge(),
+      logger,
+    );
+    expect(resolved.source).toBe("merged");
+    expect(resolved.semantics).toMatchObject({ moves: true });
   });
 
   it("asks the judge when effects are absent", async () => {

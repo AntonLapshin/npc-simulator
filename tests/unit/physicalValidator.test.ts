@@ -414,6 +414,8 @@ describe("physicalValidator", () => {
 
   it("still reports stillness without semantics (fail-open physics check)", () => {
     const world = makeTinyWorld();
+    // Sipping from an already-held cup changes nothing — no fresh patch owed.
+    world.actors.find((a) => a.id === "u")!.prop = "cup";
     const result: ConsequenceResult = {
       narrative: "U shakes his head and takes a long swig of coffee, gazing at the screen.",
       actorPatches: [{ actorId: "u", thoughts: "Focus." }],
@@ -428,5 +430,24 @@ describe("physicalValidator", () => {
         stillSemantics(),
       ),
     ).toEqual({ valid: true, errors: [] });
+  });
+
+  it("rejects sipping/typing grounding with nothing held and no patch", () => {
+    const world = makeTinyWorld();
+    expect(world.actors.find((a) => a.id === "u")!.prop).toBeNull();
+    const result: ConsequenceResult = {
+      narrative: "U takes a long swig of coffee, gazing at the screen.",
+      actorPatches: [{ actorId: "u", thoughts: "Focus." }],
+      objectPatches: [],
+      reasoning: "r",
+    };
+    const v = validateConsequence(
+      world,
+      result,
+      { actorId: "u", text: "Take a swig of coffee." },
+      stillSemantics(),
+    );
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(" ")).toMatch(/sipping\/drinking\/typing|prop/);
   });
 });

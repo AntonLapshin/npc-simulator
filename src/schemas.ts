@@ -259,6 +259,16 @@ export const objectPatchSchema: z.ZodType<ObjectPatch> = z.preprocess(
   lenientObjectPatchSchema,
 ) as z.ZodType<ObjectPatch>;
 
+export const consequenceEffectsSchema: z.ZodType<ConsequenceEffects> = z.object({
+  moved: z.boolean(),
+  spoke: z.boolean(),
+  quotedSpeech: z.array(z.string()).optional(),
+  destinationActorId: z.string().min(1).optional(),
+  destinationObjectId: z.string().min(1).optional(),
+  addresseeActorId: z.string().min(1).optional(),
+  contactActorId: z.string().min(1).optional(),
+}) as z.ZodType<ConsequenceEffects>;
+
 export const consequenceResultSchema: z.ZodType<ConsequenceResult> = z.preprocess(
   normalizeConsequenceResult,
   z.object({
@@ -266,14 +276,12 @@ export const consequenceResultSchema: z.ZodType<ConsequenceResult> = z.preproces
     actorPatches: z.array(lenientActorPatchSchema),
     objectPatches: z.array(lenientObjectPatchSchema),
     reasoning: z.string().default(""),
-    effects: z
-      .object({
-        moved: z.boolean(),
-        spoke: z.boolean(),
-        quotedSpeech: z.array(z.string()).optional(),
-        destinationActorId: z.string().min(1).optional(),
-      })
-      .optional(),
+    // Full effects shape (see consequenceEffectsSchema): destination ids,
+    // addressee, and contact ids must survive normalization — the validator
+    // reads them via effectsToSemantics. A partial inline object here would
+    // silently strip them (zod drops unknown keys), disabling the
+    // destination/addressee/contact gates whenever the model declares them.
+    effects: consequenceEffectsSchema.optional(),
   }),
 ) as z.ZodType<ConsequenceResult>;
 
@@ -286,16 +294,6 @@ export const actionSemanticsSchema: z.ZodType<ActionSemantics> = z.object({
   addresseeActorId: z.string().min(1).optional(),
   contactActorId: z.string().min(1).optional(),
 }) as z.ZodType<ActionSemantics>;
-
-export const consequenceEffectsSchema: z.ZodType<ConsequenceEffects> = z.object({
-  moved: z.boolean(),
-  spoke: z.boolean(),
-  quotedSpeech: z.array(z.string()).optional(),
-  destinationActorId: z.string().min(1).optional(),
-  destinationObjectId: z.string().min(1).optional(),
-  addresseeActorId: z.string().min(1).optional(),
-  contactActorId: z.string().min(1).optional(),
-}) as z.ZodType<ConsequenceEffects>;
 
 export const engineConfigSchema = z
   .object({

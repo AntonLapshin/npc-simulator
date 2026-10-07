@@ -95,26 +95,48 @@ function mockFindMentionedActorId(
 }
 
 /** Mock-only landmark resolution: object whose id or name appears in the text. */
-function mockFindMentionedObjectId(world: World, actionText: string): string | undefined {
+function mockFindMentionedObjectId(
+  world: World,
+  actionText: string,
+  actingActorId?: string,
+): string | undefined {
   const lowered = actionText.toLowerCase();
   for (const o of world.scene.objects) {
     if (o.id.toLowerCase().length >= 3 && lowered.includes(o.id.toLowerCase())) return o.id;
     if (o.name.toLowerCase().length >= 3 && lowered.includes(o.name.toLowerCase())) return o.id;
   }
-  // Generic landmark words map to the first matching object.
+  // Generic landmark words map to the first matching object — except with a
+  // possessive ("my desk", "my own chair"), which resolves to the acting
+  // actor's own object first (anton_desk for anton's "my desk"). Without
+  // this, "my desk" silently binds to someone else's desk and the
+  // closer-to-target gate then enforces the WRONG destination (exp-2 §6).
+  const possessive = /\bmy\b|\bown\b/i.test(actionText);
   const generic: Array<[RegExp, RegExp]> = [
     [/\bcoffee\b/i, /coffee/i],
     [/\bdesk\b/i, /desk/i],
     [/\bdoor\b/i, /door/i],
     [/\bwall\b/i, /wall/i],
     [/\blaptop\b/i, /laptop/i],
+    [/\bchair\b/i, /chair/i],
+    [/\bmug\b/i, /mug/i],
   ];
   for (const [wordRe, objRe] of generic) {
     if (wordRe.test(actionText)) {
-      const found =
-        world.scene.objects.find((o) => objRe.test(o.name)) ??
-        world.scene.objects.find((o) => objRe.test(o.id));
-      if (found) return found.id;
+      const matches = world.scene.objects.filter(
+        (o) => objRe.test(o.name) || objRe.test(o.id),
+      );
+      if (matches.length === 0) continue;
+      if (possessive && actingActorId) {
+        const actorLower = actingActorId.toLowerCase();
+        const actor = world.actors.find((a) => a.id === actingActorId);
+        const actorName = actor?.name.toLowerCase() ?? actorLower;
+        const owned =
+          matches.find((o) => o.id.toLowerCase().startsWith(`${actorLower}_`)) ??
+          matches.find((o) => o.id.toLowerCase().includes(actorLower)) ??
+          matches.find((o) => o.name.toLowerCase().startsWith(actorName));
+        if (owned) return owned.id;
+      }
+      return matches[0]!.id;
     }
   }
   return undefined;
@@ -145,7 +167,7 @@ export function mockClassifyAction(world: World, action: Action): ActionSemantic
     ? mockFindMentionedActorId(world, action.actorId, action.text)
     : undefined;
   const destinationObjectId = moves
-    ? mockFindMentionedObjectId(world, action.text)
+    ? mockFindMentionedObjectId(world, action.text, action.actorId)
     : undefined;
   const addresseeActorId = speaks
     ? mockFindMentionedActorId(world, action.actorId, action.text)
