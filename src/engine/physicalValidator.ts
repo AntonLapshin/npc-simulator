@@ -4,6 +4,7 @@ import { distance, isInsideScene, isPointBlocked, pointInRect } from "./geometry
 import { canMoveBetween } from "./pathfinding.js";
 import { MAX_STEP_DISTANCE, requiredProgress } from "./movementAssist.js";
 import { effectsToSemantics } from "./actionSemantics.js";
+import { normalizeQuotes } from "./deterministicSemantics.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 
 /** Physical-contact radius: touching requires ending this close (Euclidean). */
@@ -248,6 +249,7 @@ export function validateConsequence(
       errors.push(...validateContactAdjacency(world, normalized, action, resolved));
       errors.push(...validateAddresseePatch(world, normalized, action, resolved));
       errors.push(...validateActingActorPresence(normalized, action, resolved));
+      errors.push(...validateStateCoherence(world, normalized, action));
       errors.push(...validateActionVerbCoverage(world, action, normalized));
       errors.push(...validateObserverSubject(world, normalized, action));
     }
@@ -571,8 +573,115 @@ function validateNarrativePlaceholder(narrative: string, action?: Action): strin
  * (a greeting need not change state), and fail-open turns without semantics
  * are untouched.
  */
-function validateActingActorPresence(
-  normalized: { actorPatches: { actorId: string }[] },
+/**
+ * Exp-6 item 5 (tick 1): state↔pose↔position coherence. The consequence
+ * stood Tanya up, walked her 5.8 cells, and put the laptop down — but her
+ * `state` string still read "sitting at her desk and working on a laptop".
+ * Prose/state drift was free because no check compared them. When a patch
+ * changes the acting actor's pose, prop, or position, the effective
+ * `state` (patch.state ?? world state) must not contradict it:
+ * - pose → stand while the state claims sitting/seated (or pose → sit
+ *   while the state claims standing — "standing desk" furniture excluded);
+ * - prop cleared/swapped while the state still claims to work on/hold it
+ *   ("working on a laptop" with prop=null; a "puts the laptop down"
+ *   release phrasing stays coherent);
+ * - a >2-cell move while the state still claims sitting (the "sitting
+ *   state while standing 5.8 cells away" case) — chair-rolling exempt.
+ * Rejects with a targeted message so the retry fixes the prose; the
+ * validator never rewrites sentences itself.
+ */
+function validateStateCoherence(
+  world: World,
+  normalized: {
+    actorPatches: {
+      actorId: string;
+      x?: number;
+      y?: number;
+      state?: string;
+      pose?: string;
+      prop?: string | null;
+    }[];
+  },
+  action: Action,
+): string[] {
+  const errors: string[] = [];
+  const sittingRe = /\bsit\b|\bsitting\b|\bseated\b/i;
+  const standingRe = /\bstand\b|\bstanding\b(?!\s+desk)|\bstood\b/i;
+  /**
+   * True when the state carries descriptive content beyond the bare
+   * posture word ("sitting at her desk and working on a laptop" vs
+   * "sitting"). The tick-1 failure was a rich stale description feeding
+   * the next turn's proposal context; a bare posture word is the world's
+   * terse status line and stays valid without an update (blessed by the
+   * exp-2/3/4 sit/settle tests).
+   */
+  const isDescriptiveState = (state: string, postureRe: RegExp): boolean => {
+    const stripped = state.replace(postureRe, "").replace(/[^a-z0-9]+/gi, " ").trim();
+    return stripped.length >= 3;
+  };
+  for (const patch of normalized.actorPatches) {
+    const actor = world.actors.find((a) => a.id === patch.actorId);
+    if (!actor) continue;
+    const poseChanged = patch.pose !== undefined && patch.pose !== actor.pose;
+    const propChanged = patch.prop !== undefined && patch.prop !== actor.prop;
+    const moved =
+      patch.x !== undefined &&
+      patch.y !== undefined &&
+      Math.hypot(patch.x - actor.x, patch.y - actor.y) > 2;
+    if (!poseChanged && !propChanged && !moved) continue;
+    const state = patch.state ?? actor.state;
+    const pose = patch.pose ?? actor.pose;
+    if (poseChanged) {
+      if (
+        /^stand$/i.test(patch.pose!) &&
+        sittingRe.test(state) &&
+        isDescriptiveState(state, sittingRe)
+      ) {
+        errors.push(
+          `actor ${patch.actorId}: pose changed to "stand" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (standing, no longer sitting)`,
+        );
+      } else if (
+        /^sit$/i.test(patch.pose!) &&
+        standingRe.test(state) &&
+        isDescriptiveState(state, standingRe)
+      ) {
+        errors.push(
+          `actor ${patch.actorId}: pose changed to "sit" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (sitting, no longer standing)`,
+        );
+      }
+    }
+    if (propChanged && actor.prop) {
+      const oldProp = actor.prop;
+      const releaseRe = new RegExp(
+        `\\b(put|puts|putting|set|sets|setting|plac\\w+|hand\\w+)\\b[^.]{0,40}\\b${oldProp}\\b`,
+        "i",
+      );
+      const stillClaimsProp =
+        new RegExp(`\\b${oldProp}\\b`, "i").test(state) && !releaseRe.test(state);
+      if (stillClaimsProp) {
+        errors.push(
+          `actor ${patch.actorId}: prop changed from "${oldProp}" to ${patch.prop === null ? "null" : `"${patch.prop}"`} but state still reads "${state.slice(0, 80)}": update 'state' to match (no longer working on/holding the ${oldProp})`,
+        );
+      }
+    }
+    if (
+      moved &&
+      !/^stand$/i.test(pose ?? "") &&
+      sittingRe.test(state) &&
+      isDescriptiveState(state, sittingRe)
+    ) {
+      // Rolling a chair is legitimate seated locomotion — exempt it.
+      if (!/\b(roll\w*|wheel\w*|chair)\b/i.test(action.text)) {
+        errors.push(
+          `actor ${patch.actorId}: moved ${Math.hypot(patch.x! - actor.x, patch.y! - actor.y).toFixed(1)} cells but state still reads "${state.slice(0, 80)}": update 'state' (and 'pose') to match — a sitting state cannot walk across the room`,
+        );
+      }
+    }
+  }
+  return errors;
+}
+
+function validateActingActorPresence(  normalized: { actorPatches: { actorId: string }[] },
   action: Action,
   semantics: ActionSemantics,
 ): string[] {
@@ -1161,18 +1270,24 @@ function validateObserverSubject(
 
 /** Double- and single-quoted segments (content length >= 2). */
 function quotedSegments(text: string): string[] {
+  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
+  // segments ("...") are extracted and compare equal to straight-quoted
+  // action text (and vice versa).
+  const normalized = normalizeQuotes(text);
   const out: string[] = [];
   const doubleRe = /"([^"]{2,})"/g;
   let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(text)) !== null) out.push(m[1]!);
+  while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
   // Single quotes: avoid matching apostrophes inside words (don't, I'm).
   const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(text)) !== null) out.push(m[2]!);
+  while ((m = singleRe.exec(normalized)) !== null) out.push(m[2]!);
   return out;
 }
 
 function normLower(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+  // Exp-6 item 2: quote-canonicalized so word comparisons never trip on
+  // curly-vs-straight apostrophes (don't vs don't).
+  return normalizeQuotes(s).toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 /** Content words (len >= 4) lowercased for overlap checks. */

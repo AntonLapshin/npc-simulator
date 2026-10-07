@@ -29,14 +29,52 @@ export type CompleteJsonOptions<T> = {
   extraCheck?: (value: T) => string | undefined;
   /** Module-specific field rules appended to the formatting-retry prompt. */
   repairHint?: string;
+  /**
+   * Exp-6 item 3: consecutive identical parse-error failures before the
+   * loop varies its strategy (one minimal schema-only attempt with no
+   * echoed bad output — re-prompting identically is futile: the model
+   * re-emits the same collapsed shape 4/4). Defaults to 2.
+   */
+  identicalErrorAbortAfter?: number;
+  /** Expected output shape text, used to build the minimal repair prompt. */
+  schemaText?: string;
 };
 
 export type CompleteJsonResult<T> =
   | { ok: true; raw: string; value: T; attempts: number }
-  | { ok: false; error: string; lastRaw?: string; attempts: number };
+  | {
+      ok: false;
+      error: string;
+      lastRaw?: string;
+      attempts: number;
+      /** Raw LLM outputs from every failed parse attempt, in order (Exp-6 item 4). */
+      rawAttempts: string[];
+    };
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Exp-6 item 3: normalize a parse error into a repeat signature. Digit
+ * runs collapse so "position 37" and "position 38" (the systematic
+ * template quirk from the Exp-6 run) count as the same failure.
+ */
+export function parseErrorSignature(message: string): string {
+  return message.toLowerCase().replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 160);
+}
+
+/** Exp-6 item 3: minimal schema-only repair prompt — no echoed bad output. */
+export function minimalRepairPrompt(schemaText?: string): string {
+  const lines = [
+    "Return ONLY the JSON object now.",
+    "Begin your response with { — no analysis, no preamble, no markdown, no commentary.",
+  ];
+  if (schemaText) {
+    lines.push("It must match this schema:", schemaText);
+  }
+  lines.push("Return COMPACT single-line JSON (no pretty-printing).");
+  return lines.join("\n");
 }
 
 function fullPrompt(systemPrompt: string, userPrompt: string): string {
@@ -61,7 +99,12 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
   const baseUserPrompt = opts.userPrompt;
   let userPrompt = baseUserPrompt;
   let lastRaw: string | undefined;
+  const rawAttempts: string[] = [];
   const attempts = Math.max(1, opts.maxRetries + 1);
+  const abortAfter = Math.max(1, opts.identicalErrorAbortAfter ?? 2);
+  let lastErrorSignature: string | undefined;
+  let identicalStreak = 0;
+  let variedStrategy = false;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let raw: string;
@@ -101,6 +144,10 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
       // Malformed JSON, truncated response, or schema mismatch (§16.3):
       // retry with a formatting-correction prompt appended.
       const message = errMsg(err);
+      rawAttempts.push(raw);
+      const signature = parseErrorSignature(message);
+      identicalStreak = signature === lastErrorSignature ? identicalStreak + 1 : 1;
+      lastErrorSignature = signature;
       logger.log({
         module,
         event: failedEvent,
@@ -112,9 +159,39 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
         rawResponse: raw,
         error: message,
       });
+      if (identicalStreak >= abortAfter && !variedStrategy) {
+        // Exp-6 item 3: the repair prompt never converges — the same error
+        // repeats, so the model re-emits the same collapsed shape.
+        // Expecting a different result from an identical prompt is the
+        // loop's design flaw: vary the strategy once (minimal schema-only
+        // prompt, no echoed bad output to anchor on) instead of burning
+        // the remaining attempts identically.
+        variedStrategy = true;
+        userPrompt = minimalRepairPrompt(opts.schemaText);
+        logger.log({
+          module,
+          event: failedEvent,
+          tick: opts.tick,
+          turnIndex: opts.turnIndex,
+          actorId: opts.actorId,
+          input: { ...(opts.input as Record<string, unknown>), attempt },
+          error: `identical parse error repeated ${identicalStreak}x — varying strategy to minimal schema-only prompt`,
+        });
+        continue;
+      }
+      if (identicalStreak > abortAfter) {
+        // The varied strategy failed identically too — stop burning calls.
+        return {
+          ok: false,
+          error: `aborted: identical parse error repeated ${identicalStreak} times ("${signature}")`,
+          lastRaw,
+          attempts: attempt,
+          rawAttempts,
+        };
+      }
       userPrompt = `${baseUserPrompt}\n\n${formatRepairPrompt(raw, message, opts.repairHint)}`;
     }
   }
 
-  return { ok: false, error: "max retries exceeded", lastRaw, attempts };
+  return { ok: false, error: "max retries exceeded", lastRaw, attempts, rawAttempts };
 }

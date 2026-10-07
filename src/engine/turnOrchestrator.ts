@@ -22,6 +22,13 @@ import {
   suggestMoveTarget,
 } from "./movementAssist.js";
 import { validateSelectionForActor } from "./contextBuilder.js";
+import { buildObjectAffordanceNudge } from "./contextBuilder.js";
+import {
+  hasSpeechToken,
+  parseActionQuotes,
+  resolveDeterministicSemantics,
+} from "./deterministicSemantics.js";
+import { tryCloseTruncatedJson } from "../llm/json.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
@@ -553,6 +560,182 @@ export function summarizeTurnOutcomes(
   };
 }
 
+/**
+ * Exp-6 item 3: race a promise against the turn's remaining time budget.
+ * The underlying work keeps running in the background (a promise cannot
+ * be cancelled) — its late result is simply ignored and the turn moves on
+ * to salvage instead of burning more wall time.
+ */
+function withTurnDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (!(ms > 0)) return promise;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("turn deadline exceeded")), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/**
+ * Exp-6 item 4: optional diagnostics a ConsequenceEngine may expose so the
+ * turn can tell a format collapse (nothing ever parsed) apart from a
+ * parsed-but-invalid result. LLMConsequenceEngine implements these;
+ * mock/other engines simply don't, and the tier stays dormant.
+ */
+export type ConsequenceEngineDiagnostics = {
+  getLastRawAttempts(): string[];
+  lastResolveParsed(): boolean;
+};
+
+function readEngineDiagnostics(
+  engine: ConsequenceEngine,
+): { rawAttempts: string[]; parsed: boolean } | undefined {
+  const e = engine as Partial<ConsequenceEngineDiagnostics>;
+  if (
+    typeof e.getLastRawAttempts === "function" &&
+    typeof e.lastResolveParsed === "function"
+  ) {
+    try {
+      return { rawAttempts: e.getLastRawAttempts(), parsed: e.lastResolveParsed() };
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Strip fences/control noise from a donor string extracted from a collapsed output. */
+function cleanDonorString(s: string): string {
+  return s
+    .replace(/```json|```/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 400);
+}
+
+/**
+ * Exp-6 item 4: pull a "narrative"/"thoughts" string out of an unparseable
+ * LLM output. Tries (1) closing truncated JSON (max_tokens cutoffs) and
+ * reading the field leniently — including the acting actor's patch
+ * thoughts — then (2) regex-extracting the quoted string value.
+ */
+function extractDonorString(
+  raw: string,
+  key: "narrative" | "thoughts",
+  actorId?: string,
+): string | undefined {
+  const start = raw.indexOf("{");
+  if (start !== -1) {
+    const closed = tryCloseTruncatedJson(raw.slice(start));
+    if (closed !== undefined) {
+      try {
+        const parsed = JSON.parse(closed) as Record<string, unknown>;
+        const v = parsed[key];
+        if (typeof v === "string" && v.trim().length > 0) return cleanDonorString(v);
+        if (key === "thoughts" && Array.isArray(parsed.actorPatches)) {
+          for (const p of parsed.actorPatches) {
+            if (
+              p !== null &&
+              typeof p === "object" &&
+              (actorId === undefined ||
+                (p as { actorId?: unknown }).actorId === actorId) &&
+              typeof (p as { thoughts?: unknown }).thoughts === "string" &&
+              ((p as { thoughts: string }).thoughts.trim().length > 0)
+            ) {
+              return cleanDonorString((p as { thoughts: string }).thoughts);
+            }
+          }
+        }
+      } catch {
+        // Fall through to the regex path.
+      }
+    }
+  }
+  const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`, "s"));
+  if (m?.[1] !== undefined) {
+    try {
+      const v = JSON.parse(`"${m[1]}"`) as unknown;
+      if (typeof v === "string" && v.trim().length > 0) return cleanDonorString(v);
+    } catch {
+      // Not a decodable string — ignore.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Exp-6 item 4: action-grounded fallback narrative. The action text is the
+ * ground truth of what the actor did — quoting it (or its quoted speech
+ * verbatim) invents nothing, unlike reusing a collapsed "Let me analyze
+ * this…" preamble as visible prose.
+ */
+function synthesizeSalvageNarrative(action: Action, name: string): string {
+  const quotes = parseActionQuotes(action.text);
+  if (quotes.length > 0) {
+    return `${name} says ${quotes.map((q) => `"${q}"`).join(" ")}`;
+  }
+  const t = action.text.trim().replace(/\s+/g, " ");
+  return t.length > 280 ? `${t.slice(0, 277)}…` : t;
+}
+
+/**
+ * Exp-6 item 4: "valid-JSON-at-all-costs" salvage tier. When every
+ * consequence attempt failed to PARSE (format collapse — not a content
+ * violation), build a degraded narrative/thoughts-only payload instead of
+ * "Nothing changes.". Donor prose is only ever used for `thoughts`
+ * (private, never narrated); the visible narrative is always
+ * action-derived, so turn discipline cannot be violated by a collapsed
+ * preamble. An addressee stub mirrors the liveness floor (being spoken to
+ * registers). Applied like liveness — bypassing full validation — with an
+ * honest-history note. Returns null when nothing usable can be built.
+ */
+export function salvageFormatCollapse(
+  world: World,
+  action: Action,
+  rawAttempts: string[],
+): ConsequenceResult | null {
+  if (rawAttempts.length === 0) return null;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const name = actor?.name ?? action.actorId;
+  // Longest raw first: the most complete emission is the best donor.
+  const ordered = [...rawAttempts].sort((a, b) => b.length - a.length);
+  let thoughts: string | undefined;
+  for (const raw of ordered) {
+    thoughts = extractDonorString(raw, "thoughts", action.actorId);
+    if (thoughts) break;
+  }
+  const narrative = synthesizeSalvageNarrative(action, name);
+  if (narrative.trim().length === 0) return null;
+  const actorPatches: ConsequenceResult["actorPatches"] = [];
+  if (thoughts) actorPatches.push({ actorId: action.actorId, thoughts });
+  const addressee = resolveDeterministicSemantics(world, action).addresseeActorId;
+  if (
+    addressee !== undefined &&
+    addressee !== action.actorId &&
+    world.actors.some((a) => a.id === addressee)
+  ) {
+    actorPatches.push({
+      actorId: addressee,
+      thoughts: `Heard ${name} — will pick this up next turn.`,
+    });
+  }
+  const salvaged: ConsequenceResult = {
+    narrative,
+    actorPatches,
+    objectPatches: [],
+    reasoning:
+      "format-collapse salvage: consequence output never parsed as JSON; degraded payload built from the action text and partial model output.",
+    effects: {
+      moved: false,
+      spoke: hasSpeechToken(action.text),
+      quotedSpeech: parseActionQuotes(action.text),
+    },
+  };
+  honestHistoryNotes.set(salvaged, "format-collapse salvage");
+  return salvaged;
+}
+
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
 export async function resolveWithValidation(
   world: World,
@@ -566,11 +749,57 @@ export async function resolveWithValidation(
   let lastResult: ConsequenceResult | undefined;
   let lastSemantics: ActionSemantics | undefined;
 
+  // Exp-6 item 3: total turn wall-time budget for the consequence phase. A
+  // turn burned 47 minutes in Exp-6 with no circuit breaker — when the
+  // deadline hits, the turn stops burning LLM calls and falls through to
+  // salvage → liveness → fallback.
+  const turnTimeoutMs = config.turnTimeoutMs ?? 600_000;
+  const deadlineAt = Date.now() + turnTimeoutMs;
+  const timeLeft = (): number => deadlineAt - Date.now();
+  let deadlineExceeded = false;
+
+  // Exp-6 item 6: the semantic judge classifies the ACTION text —
+  // independent of the consequence result — so start it once, concurrently
+  // with the first consequence call, and reuse it across retry attempts
+  // instead of re-running a judge LLM call per attempt.
+  const judge: SemanticJudge = deps.semanticJudge ?? defaultSemanticJudge;
+  let judgePromise: Promise<ActionSemantics> | undefined;
+  const judgeForAttempt = (): SemanticJudge => ({
+    classify: () => {
+      if (!judgePromise) {
+        judgePromise = Promise.resolve().then(() => judge.classify(world, action));
+      }
+      return judgePromise;
+    },
+  });
+
+  // Exp-6 item 4: track whether the engine EVER produced parseable output
+  // this turn, keeping the raw attempts for the format-collapse tier.
+  let haveParseableResult = false;
+  let turnRawAttempts: string[] = [];
+  let consecutiveParseFailures = 0;
+
+  // Exp-6 item 8: demand the object/prop patch up front in retry feedback
+  // when the action manipulates an object (also present in the initial
+  // consequence context via buildConsequenceContext).
+  const affordanceNudge = buildObjectAffordanceNudge(world, action);
+
   for (let attempt = 1; attempt <= Math.max(1, config.maxRetries + 1); attempt++) {
+    if (timeLeft() <= 0) {
+      deadlineExceeded = true;
+      break;
+    }
     let result: ConsequenceResult;
     try {
-      result = await deps.consequenceEngine.resolve(world, action, feedback);
+      result = await withTurnDeadline(
+        deps.consequenceEngine.resolve(world, action, feedback),
+        timeLeft(),
+      );
     } catch (err) {
+      if (timeLeft() <= 0 || errorMessage(err) === "turn deadline exceeded") {
+        deadlineExceeded = true;
+        break;
+      }
       logger.log({
         module: "consequence",
         event: "consequence_failed",
@@ -592,6 +821,36 @@ export async function resolveWithValidation(
         output: { feedback },
       });
       continue;
+    }
+
+    // Exp-6 item 4: the engine reports whether its output parsed. Two
+    // consecutive unparseable engine calls mean the model is collapsing at
+    // the JSON layer, not the content layer — more full retries won't
+    // help, so stop and let the format-collapse tier salvage below.
+    const diag = readEngineDiagnostics(deps.consequenceEngine);
+    if (diag !== undefined) {
+      turnRawAttempts = diag.rawAttempts;
+      if (diag.parsed) {
+        haveParseableResult = true;
+        consecutiveParseFailures = 0;
+      } else {
+        consecutiveParseFailures += 1;
+        if (consecutiveParseFailures >= 2) {
+          logger.log({
+            module: "turn",
+            event: "consequence_parse_collapse",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action, attempt },
+            output: { consecutiveParseFailures },
+            error:
+              "consequence output failed to parse twice in a row — stopping retries, format-collapse salvage next",
+          });
+          lastResult = result;
+          break;
+        }
+      }
     }
 
     logger.log({
@@ -619,7 +878,7 @@ export async function resolveWithValidation(
       world,
       action,
       result,
-      deps.semanticJudge ?? defaultSemanticJudge,
+      judgeForAttempt(),
       logger,
     );
     lastResult = result;
@@ -802,7 +1061,16 @@ export async function resolveWithValidation(
         "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
     }
 
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}\nReturn corrected JSON only.`;
+    // Exp-6 item 8: when the failure is a missing object/prop/pose patch
+    // for a manipulated object, demand that patch explicitly (naming the
+    // object) instead of only punishing its absence after the fact.
+    const objectAffordanceHint =
+      affordanceNudge !== undefined &&
+      validation.errors.some((e) => /object ?patch|\bprop\b|\bpose\b/i.test(e))
+        ? affordanceNudge
+        : undefined;
+
+    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- ${e}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
     report(deps, {
       stage: "consequence_retry",
@@ -819,6 +1087,41 @@ export async function resolveWithValidation(
       output: { feedback },
       validationErrors: validation.errors,
     });
+  }
+
+  if (deadlineExceeded) {
+    logger.log({
+      module: "turn",
+      event: "turn_deadline_exceeded",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { turnTimeoutMs },
+      error: `consequence phase exceeded its ${turnTimeoutMs}ms wall-time budget — falling through to salvage`,
+    });
+  }
+
+  // Exp-6 item 4: "valid-JSON-at-all-costs" tier — nothing ever parsed, so
+  // the generic salvage below would operate on a "Nothing changes." husk.
+  // A degraded narrative/thoughts payload built from the model's own
+  // (unparseable) emissions beats a total loss. Runs before the
+  // content-salvage ladder; when it finds nothing usable, the ladder below
+  // still gets its chance.
+  if (!haveParseableResult && turnRawAttempts.length > 0) {
+    const degraded = salvageFormatCollapse(world, action, turnRawAttempts);
+    if (degraded) {
+      logger.log({
+        module: "turn",
+        event: "format_salvage_applied",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, rawAttemptCount: turnRawAttempts.length },
+        output: { salvaged: degraded },
+      });
+      return degraded;
+    }
   }
 
   // Exp-3 item 6: before giving up to "Nothing changes.", try to salvage

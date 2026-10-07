@@ -15,6 +15,7 @@ import {
   hasDisplacementToken,
   hasSpeechToken,
   isActorMentioned,
+  normalizeQuotes,
   parseActionQuotes,
   resolveDeterministicSemantics,
 } from "./deterministicSemantics.js";
@@ -24,7 +25,10 @@ export { parseActionQuotes };
 export type SemanticsSource = "effects" | "judge" | "merged" | "fail-open";
 
 function normActionText(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+  // Exp-6 item 2: canonicalize curly quotes before comparing, so a
+  // straight-apostrophe narrative quote still grounds against a
+  // curly-apostrophe action text (and vice versa).
+  return normalizeQuotes(s).toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -303,9 +307,15 @@ export function applyDeterministicGrounding(
   // judge hallucinates it (no forced teleport). Same for `speaks` via the
   // speech-token check (Exp-4 item 3): unquoted explaining/telling/nodding
   // verbs force speaks=true so hollow look-ups cannot pass.
-  // Destination conflicts resolve to the grounded resolution over effects
-  // (Exp-4 tick 10: the consequence's wrong landmark overrode the grounded
-  // one) — computed below after the id grounding.
+  // Destination conflicts: Exp-6 item 1 flipped the Exp-4 tick-10 rule for
+  // OBJECT destinations — a model-declared id that exists in the scene
+  // outranks the fuzzy keyword fallback (ownership heuristic / proximity
+  // tiebreak), which misranked on Exp-6 tick 7. The grounded resolution
+  // still wins when the action text names the target explicitly in a
+  // movement clause (the consequence contradicting the literal text is
+  // the hallucination — Exp-4 tick 10 stays covered). Actor destinations
+  // are always explicit mentions, so grounded still wins those conflicts.
+  // Computed below after the id grounding.
   const tokenMoves = hasDisplacementToken(action.text);
   const tokenSpeaks = hasSpeechToken(action.text);
   const moves = tokenMoves;
@@ -340,9 +350,16 @@ export function applyDeterministicGrounding(
     }
   }
 
-  // Grounded destination wins over effects: when the deterministic
-  // resolution names a different actor/object than the declaration, the
-  // declaration's landmark is the consequence's wrong guess (tick 10).
+  // Exp-6 item 1: model-declared existing ids outrank the deterministic
+  // keyword-first-match. The consequence read the full objective world;
+  // the resolver's generic fallback is a guess (ownership heuristic,
+  // proximity tiebreak) that misranks — tick 7: "his desk" scoped to the
+  // acting actor instead of the named Anton, laundering a wrong-desk pass
+  // through the repair path. The resolver stays the fallback for
+  // undeclared targets (via the judge path below). Safeguard: when the
+  // action text EXPLICITLY names the grounded target in a movement clause
+  // ("Head to Anton's desk"), the consequence contradicting the literal
+  // text is the hallucination — grounded wins, as in Exp-4 tick 10.
   let finalDestinationActorId = destinationActorId;
   let finalDestinationObjectId = destinationObjectId;
   if (
@@ -369,10 +386,19 @@ export function applyDeterministicGrounding(
     finalDestinationObjectId !== undefined &&
     det.destinationObjectId !== finalDestinationObjectId
   ) {
-    disagreements.push(
-      `destination conflict: effects=${finalDestinationObjectId} grounded=${det.destinationObjectId} (kept grounded)`,
-    );
-    finalDestinationObjectId = det.destinationObjectId;
+    const effectsDeclaredExisting =
+      fromEffects?.destinationObjectId === finalDestinationObjectId;
+    if (effectsDeclaredExisting && det.destinationObjectExplicit !== true) {
+      disagreements.push(
+        `destination conflict: effects=${finalDestinationObjectId} grounded=${det.destinationObjectId} (kept effects — grounded came from the fuzzy keyword fallback)`,
+      );
+      // keep finalDestinationObjectId (the model-declared id)
+    } else {
+      disagreements.push(
+        `destination conflict: effects=${finalDestinationObjectId} grounded=${det.destinationObjectId} (kept grounded)`,
+      );
+      finalDestinationObjectId = det.destinationObjectId;
+    }
   }
 
   return {

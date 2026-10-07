@@ -218,6 +218,12 @@ export type EngineConfig = {
   consequenceSnapshotRadius: number;
   /** Consecutive own-turn fallbacks before the NPC liveness floor fires (Exp-5 item 6). */
   livenessFallbackThreshold: number;
+  /**
+   * Exp-6 item 3: wall-clock budget for one turn's consequence phase
+   * (all attempts). When exceeded, the turn stops burning LLM calls and
+   * falls through to salvage → liveness → fallback. Default 10 minutes.
+   */
+  turnTimeoutMs: number;
 };
 
 export type ValidationResult = {

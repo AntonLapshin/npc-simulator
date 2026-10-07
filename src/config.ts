@@ -33,6 +33,11 @@ export const defaultConfig: EngineConfig = {
    * dialogue threads can advance by words even when bodies cannot.
    */
   livenessFallbackThreshold: 3,
+  /**
+   * Exp-6 item 3: wall-clock budget for one turn's consequence phase.
+   * A turn burned 47 minutes in Exp-6 with no circuit breaker.
+   */
+  turnTimeoutMs: 600_000,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {

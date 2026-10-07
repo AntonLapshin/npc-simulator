@@ -13,7 +13,7 @@ import { selectionResultSchema } from "../schemas.js";
 import { buildSelectionContext, detectIdentityLeak, findCoreRepeat } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
-import { LLM_SYSTEM_PROMPT, selectionSuffix } from "./prompts.js";
+import { LLM_SYSTEM_PROMPT, SELECTION_OUTPUT_SCHEMA, selectionSuffix } from "./prompts.js";
 import { completeJson } from "./complete.js";
 
 export const FALLBACK_SELECTION: SelectionResult = {
@@ -68,6 +68,7 @@ export class LLMSelectionEngine implements SelectionEngine {
       input: { actorId, suggestions },
       maxRetries,
       schema: selectionResultSchema,
+      schemaText: SELECTION_OUTPUT_SCHEMA,
       extraCheck: (value) => {
         if (value.action.trim().length === 0) return "empty action text";
         // Exp-4 item 9: the chosen action must be the DECIDING actor's own —

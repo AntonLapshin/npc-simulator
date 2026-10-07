@@ -92,8 +92,9 @@ function extractJsonPayloadInner(raw: string): string {
  * string (if any), drop a trailing partial token (e.g. `"reasoning": "To
  * gauge...` with no close), then append the missing `"]}` closers.
  * Returns the repaired payload when it parses, else undefined.
+ * Exported for the Exp-6 item-4 format-collapse salvage tier.
  */
-function tryCloseTruncatedJson(fragment: string): string | undefined {
+export function tryCloseTruncatedJson(fragment: string): string | undefined {
   let text = fragment.trim();
   if (!text.startsWith("{")) return undefined;
   // Drop a trailing partial string value: `... "key": "unterminated`
@@ -177,6 +178,9 @@ export function formatRepairPrompt(raw: string, error: string, hint?: string): s
     "Your previous response was not valid JSON.",
     `Parse error: ${error}`,
     "Return ONLY the corrected JSON object now.",
+    // Exp-6 item 7: the "Let me analyze this…" preamble caused 14/61 parse
+    // failures — constrain the first token explicitly.
+    "Begin your response with { — no analysis, no preamble, no commentary before the JSON.",
     "Return COMPACT single-line JSON (no pretty-print, no markdown). Keep strings short; include ONLY affected actors/objects.",
     "Do not include markdown, commentary, or extra text.",
   ];

@@ -52,6 +52,13 @@ export type OpenAICompatibleOptions = {
   repeatPenalty?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  /**
+   * Exp-6 item 7: request structured output from the gateway
+   * (`response_format: {type: "json_object"}`) — the single highest-ROI
+   * fix for the "Let me analyze this…" format-collapse failures, when the
+   * backend honors it. Env: LLM_JSON_MODE=1.
+   */
+  jsonMode?: boolean;
   /** Extra fetch init (custom headers, dispatcher, ...). */
   fetchImpl?: typeof fetch;
 };
@@ -85,6 +92,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       repeatPenalty: options.repeatPenalty ?? 1.1,
       maxTokens: options.maxTokens ?? 1500,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      jsonMode: options.jsonMode ?? false,
       apiKey: options.apiKey,
       fetchImpl: options.fetchImpl,
     };
@@ -92,6 +100,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   get model(): string {
     return this.options.model;
+  }
+
+  /** Base URL of the OpenAI-compatible endpoint (for health probing). */
+  get baseUrl(): string {
+    return this.options.baseUrl;
   }
 
   async complete(systemPrompt: string, userPrompt: string): Promise<string> {
@@ -114,6 +127,8 @@ export class OpenAICompatibleProvider implements LLMProvider {
           temperature: this.options.temperature,
           repeat_penalty: this.options.repeatPenalty,
           max_tokens: this.options.maxTokens,
+          // Exp-6 item 7: ask the gateway for a JSON object directly.
+          ...(this.options.jsonMode ? { response_format: { type: "json_object" } } : {}),
         }),
       });
       if (res.status === 429) {
@@ -158,6 +173,7 @@ export class JoinGonkaProvider extends OpenAICompatibleProvider {
     repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
+    jsonMode?: boolean;
     fetchImpl?: typeof fetch;
   }) {
     if (!options.apiKey) throw new Error("JoinGonkaProvider requires an API key");
@@ -169,6 +185,7 @@ export class JoinGonkaProvider extends OpenAICompatibleProvider {
       repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
+      jsonMode: options.jsonMode,
       fetchImpl: options.fetchImpl,
     });
   }
@@ -188,6 +205,7 @@ export class LocalLayaProvider extends OpenAICompatibleProvider {
     repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
+    jsonMode?: boolean;
     fetchImpl?: typeof fetch;
   } = {}) {
     super("laya-local", {
@@ -198,6 +216,7 @@ export class LocalLayaProvider extends OpenAICompatibleProvider {
       repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
+      jsonMode: options.jsonMode,
       fetchImpl: options.fetchImpl,
     });
   }
@@ -224,6 +243,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
     repeatPenalty?: number;
     maxTokens?: number;
     timeoutMs?: number;
+    jsonMode?: boolean;
     fetchImpl?: typeof fetch;
   } = {}) {
     super("ollama", {
@@ -234,6 +254,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
       repeatPenalty: options.repeatPenalty,
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
+      jsonMode: options.jsonMode,
       fetchImpl: options.fetchImpl,
     });
   }
@@ -282,6 +303,14 @@ export type LlmEnvConfig = {
   temperature: number;
   repeatPenalty: number;
   maxTokens: number;
+  /** Exp-6 item 7: request gateway JSON-mode responses (LLM_JSON_MODE=1). */
+  jsonMode: boolean;
+  /**
+   * Exp-6 item 6: token budgets proportional to payload
+   * (LLM_MAX_TOKENS_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}) — the
+   * consequence prompt is the long pole, the semantic judge the short one.
+   */
+  maxTokensByTask: Partial<Record<LlmTask, number>>;
 };
 
 const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
@@ -306,6 +335,14 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
   if (consequence) taskBackends.consequence = consequence;
   if (semantic) taskBackends.semantic = semantic;
   const simpleModel = env["LLM_SIMPLE_MODEL"]?.trim() || undefined;
+  // Exp-6 item 6: token budgets proportional to payload
+  // (LLM_MAX_TOKENS_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}).
+  const maxTokensByTask: Partial<Record<LlmTask, number>> = {};
+  for (const task of ["proposal", "selection", "consequence", "semantic"] as const) {
+    const raw = env[`LLM_MAX_TOKENS_${task.toUpperCase()}`];
+    const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
+    if (Number.isFinite(n) && n > 0) maxTokensByTask[task] = Math.floor(n);
+  }
   return {
     backend,
     simpleBackend,
@@ -330,6 +367,8 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
     temperature: Number(env["LLM_TEMPERATURE"] ?? 0.9),
     repeatPenalty: Number(env["LLM_REPEAT_PENALTY"] ?? 1.1),
     maxTokens: Number(env["LLM_MAX_TOKENS"] ?? 1500),
+    jsonMode: env["LLM_JSON_MODE"] === "1" || env["LLM_JSON_MODE"]?.toLowerCase() === "true",
+    maxTokensByTask,
   };
 }
 
@@ -359,7 +398,15 @@ export function createProviderFromEnv(
   return buildProviderForBackend(cfg, which);
 }
 
-function buildProviderForBackend(cfg: LlmEnvConfig, which: LlmBackend, modelOverride?: string): LLMProvider {
+function buildProviderForBackend(
+  cfg: LlmEnvConfig,
+  which: LlmBackend,
+  modelOverride?: string,
+  task?: LlmTask,
+): LLMProvider {
+  // Exp-6 item 6: token budgets proportional to payload — the per-task
+  // LLM_MAX_TOKENS_* override wins over the global LLM_MAX_TOKENS.
+  const maxTokens = (task !== undefined ? cfg.maxTokensByTask[task] : undefined) ?? cfg.maxTokens;
   if (which === "laya-local") {
     return new LocalLayaProvider({
       baseUrl: cfg.laya.baseUrl,
@@ -367,8 +414,9 @@ function buildProviderForBackend(cfg: LlmEnvConfig, which: LlmBackend, modelOver
       apiKey: cfg.laya.apiKey,
       temperature: cfg.temperature,
       repeatPenalty: cfg.repeatPenalty,
-      maxTokens: cfg.maxTokens,
+      maxTokens,
       timeoutMs: cfg.timeoutMs,
+      jsonMode: cfg.jsonMode,
     });
   }
   if (which === "ollama") {
@@ -378,8 +426,9 @@ function buildProviderForBackend(cfg: LlmEnvConfig, which: LlmBackend, modelOver
       apiKey: cfg.ollama.apiKey,
       temperature: cfg.temperature,
       repeatPenalty: cfg.repeatPenalty,
-      maxTokens: cfg.maxTokens,
+      maxTokens,
       timeoutMs: cfg.timeoutMs,
+      jsonMode: cfg.jsonMode,
     });
   }
   if (!cfg.joingonka.apiKey) {
@@ -391,8 +440,9 @@ function buildProviderForBackend(cfg: LlmEnvConfig, which: LlmBackend, modelOver
     model: modelOverride ?? cfg.joingonka.model,
     temperature: cfg.temperature,
     repeatPenalty: cfg.repeatPenalty,
-    maxTokens: cfg.maxTokens,
+    maxTokens,
     timeoutMs: cfg.timeoutMs,
+    jsonMode: cfg.jsonMode,
   });
 }
 
@@ -408,5 +458,131 @@ export function createProviderForTask(
   const cfg = resolveLlmEnv(env);
   const which = resolveTaskBackend(task, cfg);
   const modelOverride = isSimpleLlmTask(task) ? cfg.simpleModel : undefined;
-  return buildProviderForBackend(cfg, which, modelOverride);
+  return buildProviderForBackend(cfg, which, modelOverride, task);
+}
+
+/**
+ * Exp-6 item 6: provider health probing with model fallback.
+ *
+ * The Exp-6 run burned 37 transport timeouts in 9 turns against a sick
+ * gateway before any turn completed. Probe the OpenAI-compatible
+ * `/models` endpoint with a short timeout; false means "don't send the
+ * next turn's 8 LLM calls here".
+ */
+export async function probeLlmEndpoint(
+  baseUrl: string,
+  opts: { apiKey?: string; timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<boolean> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
+  try {
+    const headers: Record<string, string> = {};
+    if (opts.apiKey) headers["Authorization"] = `Bearer ${opts.apiKey}`;
+    const res = await fetchImpl(joinUrl(baseUrl, "/models"), {
+      headers,
+      signal: controller.signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isTransportError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timed out|rate limited|HTTP 429|HTTP 5\d\d|socket|ECONN|ENOTFOUND|fetch failed|empty response/i.test(
+    msg,
+  );
+}
+
+/**
+ * Exp-6 item 6: failover wrapper. Sends every call to `primary`; on a
+ * transport-class failure (timeout, 429, 5xx, socket) it probes both
+ * backends once and fails over to `fallback` for subsequent calls until
+ * the primary probes healthy again. Content/parse errors are NOT failed
+ * over — those are the caller's to repair, not the backend's fault.
+ */
+export class FailoverProvider implements LLMProvider {
+  readonly name: string;
+  private useFallback = false;
+  private lastProbeAt = 0;
+  private readonly probeCacheMs: number;
+
+  constructor(
+    private readonly primary: LLMProvider,
+    private readonly fallback: LLMProvider,
+    opts: { probeCacheMs?: number } = {},
+  ) {
+    this.name = `failover(${primary.name}→${fallback.name})`;
+    this.probeCacheMs = opts.probeCacheMs ?? 60_000;
+  }
+
+  /** Which backend the next call will use (for logs/tests). */
+  get activeName(): string {
+    return this.useFallback ? this.fallback.name : this.primary.name;
+  }
+
+  private endpointBaseUrl(p: LLMProvider): string | undefined {
+    // OpenAICompatibleProvider exposes baseUrl; foreign providers probe
+    // as healthy (failover still triggers on their transport errors).
+    return p instanceof OpenAICompatibleProvider ? p.baseUrl : undefined;
+  }
+
+  async complete(systemPrompt: string, userPrompt: string): Promise<string> {
+    const active = (): LLMProvider => (this.useFallback ? this.fallback : this.primary);
+    try {
+      return await active().complete(systemPrompt, userPrompt);
+    } catch (err) {
+      if (!isTransportError(err)) throw err;
+      // Transport failure is real signal: fail over immediately for the
+      // retry. The cached probe below only refines stickiness when it has
+      // real endpoint signal (OpenAI-compatible backends); providers
+      // without a probeable endpoint keep the error-driven choice.
+      this.useFallback = !this.useFallback;
+      const now = Date.now();
+      if (now - this.lastProbeAt > this.probeCacheMs) {
+        this.lastProbeAt = now;
+        const primaryUrl = this.endpointBaseUrl(this.primary);
+        const fallbackUrl = this.endpointBaseUrl(this.fallback);
+        const [primaryOk, fallbackOk] = await Promise.all([
+          primaryUrl ? probeLlmEndpoint(primaryUrl) : Promise.resolve(undefined),
+          fallbackUrl ? probeLlmEndpoint(fallbackUrl) : Promise.resolve(undefined),
+        ]);
+        if (primaryOk === true) this.useFallback = false;
+        else if (primaryOk === false && fallbackOk === true) this.useFallback = true;
+      }
+      try {
+        return await active().complete(systemPrompt, userPrompt);
+      } catch {
+        // Both backends failed — surface the first error (it carries the
+        // original context); the caller retries per its own policy.
+        throw err;
+      }
+    }
+  }
+}
+
+/**
+ * Exp-6 item 6: tier-aware provider with a fallback backend. The fallback
+ * defaults to the *other* tier's backend (hosted ⇄ local) so a sick
+ * gateway degrades to local models instead of stalling the session —
+ * pass `fallbackBackend` explicitly to choose.
+ */
+export function createProviderForTaskWithFailover(
+  env: NodeJS.ProcessEnv = process.env,
+  task: LlmTask = "consequence",
+  fallbackBackend?: LlmBackend,
+): LLMProvider {
+  const cfg = resolveLlmEnv(env);
+  const which = resolveTaskBackend(task, cfg);
+  const modelOverride = isSimpleLlmTask(task) ? cfg.simpleModel : undefined;
+  const primary = buildProviderForBackend(cfg, which, modelOverride, task);
+  const fallbackWhich =
+    fallbackBackend ?? (isSimpleLlmTask(task) ? cfg.backend : cfg.simpleBackend);
+  if (fallbackWhich === which) return primary;
+  const fallback = buildProviderForBackend(cfg, fallbackWhich, undefined, task);
+  return new FailoverProvider(primary, fallback);
 }

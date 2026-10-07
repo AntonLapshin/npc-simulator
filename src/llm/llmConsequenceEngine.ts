@@ -14,7 +14,7 @@ import { consequenceResultSchema } from "../schemas.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
-import { LLM_SYSTEM_PROMPT, consequenceSuffix } from "./prompts.js";
+import { LLM_SYSTEM_PROMPT, CONSEQUENCE_OUTPUT_SCHEMA, consequenceSuffix } from "./prompts.js";
 import { completeJson } from "./complete.js";
 
 export const FALLBACK_CONSEQUENCE: ConsequenceResult = {
@@ -35,6 +35,23 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     private readonly provider: LLMProvider,
     private readonly options: LlmConsequenceEngineOptions = {},
   ) {}
+
+  /**
+   * Exp-6 item 4: diagnostics for the "valid-JSON-at-all-costs" salvage
+   * tier. The turn orchestrator reads these after resolve() to tell a
+   * format collapse (nothing ever parsed) apart from a parsed-but-invalid
+   * result. Empty when the last call parsed cleanly.
+   */
+  private lastRawAttempts: string[] = [];
+  private lastParsed = false;
+
+  public getLastRawAttempts(): string[] {
+    return [...this.lastRawAttempts];
+  }
+
+  public lastResolveParsed(): boolean {
+    return this.lastParsed;
+  }
 
   async resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult> {
     const startedAt = Date.now();
@@ -57,11 +74,14 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       input: { action, feedback },
       maxRetries,
       schema: consequenceResultSchema,
+      schemaText: CONSEQUENCE_OUTPUT_SCHEMA,
       repairHint:
         "Field rules: actorPatches must be an array of {\"actorId\": ...} (never \"id\", never a quoted string); " +
         "objectPatches must be an array of {\"objectId\": ...} (never \"id\", never a quoted string); " +
         "\"reasoning\" is required; do not nest objectPatches inside actorPatches.",
     });
+    this.lastParsed = result.ok;
+    this.lastRawAttempts = result.ok ? [] : [...result.rawAttempts];
 
     if (!result.ok) {
       this.logger.log({

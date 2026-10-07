@@ -107,6 +107,8 @@ export class LLMSemanticJudge implements SemanticJudge {
       input: { action },
       maxRetries,
       schema: actionSemanticsSchema,
+      schemaText:
+        '{"moves": boolean, "destinationActorId"?: string, "destinationObjectId"?: string, "speaks": boolean, "quotedSpeech": string[], "addresseeActorId"?: string, "contactActorId"?: string}',
       extraCheck: (value) => {
         if (value.destinationActorId !== undefined && !rosterIds.has(value.destinationActorId))
           return `unknown destinationActorId: ${value.destinationActorId}`;

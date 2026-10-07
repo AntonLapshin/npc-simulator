@@ -12,15 +12,37 @@
 
 import type { Action, World } from "../types.js";
 
+/**
+ * Exp-6 item 2: canonicalize curly/typographic quote characters to their
+ * straight ASCII equivalents before any quote comparison. The tick-7
+ * misfire: the action text used ' (U+2019) while the narrative used ' —
+ * the grounding gate then dropped a perfectly good quote as "ungrounded".
+ * Applied to both sides (action text and narrative) before parsing and
+ * before substring comparison, so mixed typography never breaks grounding.
+ */
+const QUOTE_NORMALIZATIONS: Array<[RegExp, string]> = [
+  [/[‘’‚‛‹›`´]/g, "'"],
+  [/[“”„‟«»]/g, '"'],
+];
+
+export function normalizeQuotes(s: string): string {
+  let out = s;
+  for (const [re, rep] of QUOTE_NORMALIZATIONS) out = out.replace(re, rep);
+  return out;
+}
+
 /** Double- and single-quoted segments (content length >= 2). Format parsing, not a verb ontology. */
 export function parseActionQuotes(text: string): string[] {
+  // Exp-6 item 2: normalize first so curly-quoted segments ("...") are
+  // found and curly apostrophes (don't) canonicalize before comparison.
+  const normalized = normalizeQuotes(text);
   const out: string[] = [];
   const doubleRe = /"([^"]{2,})"/g;
   let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(text)) !== null) out.push(m[1]!);
+  while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
   // Single quotes: avoid matching apostrophes inside words (don't, I'm).
   const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(text)) !== null) out.push(m[2]!);
+  while ((m = singleRe.exec(normalized)) !== null) out.push(m[2]!);
   return out;
 }
 
@@ -153,6 +175,105 @@ function objectMentionVariants(obj: { id: string; name: string }): string[] {
   return [...out];
 }
 
+/** Object mention with plural tolerance ("west-side desks" hits the desks). */
+function mentionsObjectVariant(clause: string, variant: string): boolean {
+  if (mentionsVariant(clause, variant)) return true;
+  return new RegExp(`\\b${escapeRegExp(variant)}s\\b`, "i").test(clause);
+}
+
+/**
+ * Generic kind-word → object matchers, shared by destination resolution
+ * and manipulated-object detection. A "desk" keyword matches "Desk lamp"
+ * and "Anton's desk sign" by NAME — the optional third element (furniture
+ * id filter) drops name-only matches when an id matches, since those are
+ * a prop and a label, not places to stand (Exp-5 tick 15).
+ */
+const GENERIC_OBJECT_KEYWORDS: Array<[RegExp, RegExp, RegExp?]> = [
+  // Exp-4 tick 7: "grab leftover coffee" means the lounge leftovers
+  // (lounge_mug), not the machine fixture — checked before bare coffee.
+  [/\bleftover\b/i, /lounge/i],
+  [/\blounge\b/i, /lounge/i],
+  [/\bcoffee\b/i, /coffee/i],
+  [/\bdesks?\b/i, /desk/i, /desk/i],
+  [/\bdoors?\b/i, /door/i, /door/i],
+  [/\bwalls?\b/i, /wall/i, /wall/i],
+  [/\blaptops?\b/i, /laptop/i],
+  [/\bchairs?\b/i, /chair/i, /chair|sofa/i],
+  [/\bmugs?\b/i, /mug/i],
+];
+
+/**
+ * Objects matching a generic kind word in `text` ("the laptop" →
+ * anton_laptop), ranked for grab mode (props over furniture) when several
+ * match. Used by destination resolution and manipulated-object detection.
+ */
+function matchGenericKindObjects(
+  world: World,
+  text: string,
+  actingActorId?: string,
+): { id: string; name: string }[] {
+  const ids = new Set<string>();
+  const pool: { id: string; name: string; x: number; y: number; w: number; h: number }[] = [];
+  for (const [wordRe, objRe, furnitureIdRe] of GENERIC_OBJECT_KEYWORDS) {
+    if (!wordRe.test(text)) continue;
+    const matches = world.scene.objects.filter(
+      (o) => objRe.test(o.name) || objRe.test(o.id),
+    );
+    const kindMatches =
+      furnitureIdRe !== undefined ? matches.filter((o) => furnitureIdRe.test(o.id)) : matches;
+    for (const o of kindMatches.length > 0 ? kindMatches : matches) {
+      if (!ids.has(o.id)) {
+        ids.add(o.id);
+        pool.push(o);
+      }
+    }
+  }
+  if (pool.length === 0) return [];
+  // Grab-mode ranking prefers the manipulated prop (laptop) over the
+  // furniture (desk) when a clause names both.
+  const ranked = rankDestinationObjects(world, pool, text, actingActorId, "grab");
+  const top = pool.find((o) => o.id === ranked);
+  return top !== undefined ? [{ id: top.id, name: top.name }] : [];
+}
+
+/**
+ * Exp-6 item 8: objects the action text MANIPULATES — an object mention
+ * (by id/name, or by generic kind word like "the laptop") in a clause
+ * carrying a grab/manipulation verb. Distinct from the movement
+ * destination: "walk to the desk to set up the laptop" manipulates the
+ * laptop, not the desk. Used by the object affordance nudge so the retry
+ * feedback can demand the exact object/prop patch up front.
+ */
+const MANIPULATION_CLAUSE_RE =
+  /\b(grab|grabs|grabbing|pick(?:s|ed|ing)?\s+up|pour|pours|pouring|fill|fills|filling|brew|brews|brewing|open|opens|opening|boot|boots|booting|hold|holds|holding|carry|carries|carrying|set\s+up|use|uses|using|sip|sips|sipping|drink|drinks|drinking|sit|sits|sitting|sat)\b/i;
+
+export function findManipulatedObjects(
+  world: World,
+  actionText: string,
+  actingActorId?: string,
+): { id: string; name: string }[] {
+  const out: { id: string; name: string }[] = [];
+  const add = (o: { id: string; name: string }): void => {
+    if (!out.some((e) => e.id === o.id)) out.push({ id: o.id, name: o.name });
+  };
+  for (const clause of splitClauses(actionText)) {
+    if (!MANIPULATION_CLAUSE_RE.test(clause)) continue;
+    let explicit = false;
+    for (const o of world.scene.objects) {
+      if (objectMentionVariants(o).some((v) => mentionsObjectVariant(clause, v))) {
+        add(o);
+        explicit = true;
+      }
+    }
+    // Bare kind words ("set up the laptop", "pour a coffee") carry no
+    // id/name — fall back to the generic kind matchers, grab-ranked.
+    if (!explicit) {
+      for (const o of matchGenericKindObjects(world, clause, actingActorId)) add(o);
+    }
+  }
+  return out;
+}
+
 /**
  * Explicit speech verbs (Exp-4 item 3, tick 14): explaining, telling,
  * asking, nodding-along etc. count as speech even with no quote marks.
@@ -241,9 +362,19 @@ export function rankDestinationObjects(
   const actor = actingActorId ? world.actors.find((a) => a.id === actingActorId) : undefined;
   const actorLower = (actingActorId ?? "").toLowerCase();
   const actorName = actor?.name.toLowerCase() ?? actorLower;
-  // Possessive scope: "my"/"his"/"own" scopes to the acting actor's objects;
-  // "her"/named scopes ("Tanya's", "Dana's desk") scope to that owner.
-  const possessiveSelf = /\b(my|own|his)\b/i.test(actionText);
+  // Possessive scope: "my"/"own" scopes to the acting actor's objects;
+  // "X's" ("Tanya's", "Dana's desk") scopes to that owner. Exp-6 item 1:
+  // "his"/"her"/"their" is third-person — when the text names exactly one
+  // other actor it scopes to THEM ("lead Anton toward his desk" →
+  // Anton's), not to the acting actor (the old code treated "his" as
+  // self-possessive and misranked tanya_desk over anton_desk on tick 7).
+  // With zero or several other actors named it falls back to the acting
+  // actor (subject-possessive, e.g. "Anton walks to his desk").
+  const selfPossessive = /\b(my|own)\b/i.test(actionText);
+  const thirdPossessive = /\b(his|her|their)\b/i.test(actionText);
+  const otherMentioned = world.actors.filter(
+    (a) => a.id !== actingActorId && isActorMentioned(world, actionText, a.id),
+  );
   const namedOwner = world.actors.find(
     (a) =>
       a.id !== actingActorId &&
@@ -251,18 +382,25 @@ export function rankDestinationObjects(
   );
   const ownerPrefix = namedOwner
     ? namedOwner.id.toLowerCase()
-    : possessiveSelf && actorLower
-      ? actorLower
-      : undefined;
+    : thirdPossessive && otherMentioned.length === 1
+      ? otherMentioned[0]!.id.toLowerCase()
+      : (selfPossessive || thirdPossessive) && actorLower
+        ? actorLower
+        : undefined;
+  // Name-prefix check follows the same owner (fixes the old fallback that
+  // compared against the acting actor's name on the third-person path).
+  const ownerName =
+    namedOwner?.name.toLowerCase() ??
+    (thirdPossessive && otherMentioned.length === 1
+      ? otherMentioned[0]!.name.toLowerCase()
+      : actorName);
   const scored = candidates.map((o) => {
     const idLower = o.id.toLowerCase();
     const nameLower = o.name.toLowerCase();
     let ownedScore = 1;
     if (ownerPrefix) {
       ownedScore =
-        idLower.startsWith(`${ownerPrefix}_`) || nameLower.startsWith(namedOwner?.name.toLowerCase() ?? actorName)
-          ? 0
-          : 2;
+        idLower.startsWith(`${ownerPrefix}_`) || nameLower.startsWith(ownerName) ? 0 : 2;
     } else if (actorLower) {
       // No possessive: mildly prefer the actor's own objects over others'
       // (walking to "the desk" from your spawn usually means your desk),
@@ -290,11 +428,22 @@ export function rankDestinationObjects(
  * someone else's laptop-sign when a desk walk is meant — the grab/walk
  * mode is picked from the action verbs).
  */
-export function resolveDestinationObjectId(
+/**
+ * Detailed destination-object resolution with provenance.
+ *
+ * `explicit` is true when the target was named directly in a
+ * movement/grab clause ("walk to Anton's desk", "open the laptop") —
+ * strong textual evidence. False when it came from the generic
+ * keyword/possessive fallback ("his desk" → ownership heuristic) — a
+ * guess the consequence model's declaration may legitimately override
+ * (Exp-6 item 1: model-declared existing ids outrank keyword-first-match;
+ * the resolver stays the fallback for undeclared targets).
+ */
+export function resolveDestinationObjectIdDetailed(
   world: World,
   actionText: string,
   actingActorId?: string,
-): string | undefined {
+): { id: string | undefined; explicit: boolean } {
   const verbRe = new RegExp(`\\b(?:${LOCOMOTION_VERBS})\\w*\\b`, "i");
   const towardRe = /\btoward[s]?\b|\b(?:over to|up to|next to|beside|behind)\b/i;
   const grabRe = /\b(grab|grabs|pick(?:s|ed|ing)?\s+up|pour|pours|fill|fills|brew|open|opens|boot|hold|holds|holding|carry|carries|set\s+up|use|uses|using)\b/i;
@@ -313,12 +462,6 @@ export function resolveDestinationObjectId(
   // walk target is the furniture. A clause whose only hits are signs while
   // naming furniture falls through to ranked generic resolution.
   const furnitureWordRe = /\b(desks?|tables?|chairs?|sofas?|machines?)\b/i;
-  // Exp-5 tick 18: plural-tolerant object mention ("head toward the
-  // west-side desks" must hit the desks, not fall through to the laptop).
-  const mentionsObjectVariant = (clause: string, variant: string): boolean => {
-    if (mentionsVariant(clause, variant)) return true;
-    return new RegExp(`\\b${escapeRegExp(variant)}s\\b`, "i").test(clause);
-  };
   for (const clause of splitClauses(actionText)) {
     if (!verbRe.test(clause) && !towardRe.test(clause) && !grabRe.test(clause)) continue;
     const hits = world.scene.objects.filter((o) =>
@@ -329,30 +472,12 @@ export function resolveDestinationObjectId(
       if (nonSignHits.length > 0 || !furnitureWordRe.test(clause)) {
         const pool = nonSignHits.length > 0 ? nonSignHits : hits;
         const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, clauseMode(clause));
-        if (ranked) return ranked;
+        if (ranked) return { id: ranked, explicit: true };
       }
     }
   }
   const possessive = /\bmy\b|\bown\b/i.test(actionText);
-  // Third element (optional): furniture-kind id filter. A "desk" keyword
-  // matches "Desk lamp" and "Anton's desk sign" by NAME — but those are a
-  // prop and a label, not places to stand (Exp-5 tick 15: anton_lamp won
-  // over anton_desk on a proximity tiebreak). When the filter matches at
-  // least one object id, name-only matches are dropped from the pool.
-  const generic: Array<[RegExp, RegExp, RegExp?]> = [
-    // Exp-4 tick 7: "grab leftover coffee" means the lounge leftovers
-    // (lounge_mug), not the machine fixture — checked before bare coffee.
-    [/\bleftover\b/i, /lounge/i],
-    [/\blounge\b/i, /lounge/i],
-    [/\bcoffee\b/i, /coffee/i],
-    [/\bdesks?\b/i, /desk/i, /desk/i],
-    [/\bdoors?\b/i, /door/i, /door/i],
-    [/\bwalls?\b/i, /wall/i, /wall/i],
-    [/\blaptops?\b/i, /laptop/i],
-    [/\bchairs?\b/i, /chair/i, /chair|sofa/i],
-    [/\bmugs?\b/i, /mug/i],
-  ];
-  for (const [wordRe, objRe, furnitureIdRe] of generic) {
+  for (const [wordRe, objRe, furnitureIdRe] of GENERIC_OBJECT_KEYWORDS) {
     if (wordRe.test(actionText)) {
       const matches = world.scene.objects.filter(
         (o) => objRe.test(o.name) || objRe.test(o.id),
@@ -370,13 +495,26 @@ export function resolveDestinationObjectId(
             : mode;
       if (possessive && actingActorId) {
         const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, grabMode);
-        if (ranked) return ranked;
+        if (ranked) return { id: ranked, explicit: false };
       }
       const ranked = rankDestinationObjects(world, pool, actionText, actingActorId, grabMode);
-      if (ranked) return ranked;
+      if (ranked) return { id: ranked, explicit: false };
     }
   }
-  return undefined;
+  return { id: undefined, explicit: false };
+}
+
+/**
+ * Deterministic movement-target landmark: object whose id or name appears
+ * in a movement-toward clause, else the generic/possessive fallback below.
+ * (See resolveDestinationObjectIdDetailed for provenance details.)
+ */
+export function resolveDestinationObjectId(
+  world: World,
+  actionText: string,
+  actingActorId?: string,
+): string | undefined {
+  return resolveDestinationObjectIdDetailed(world, actionText, actingActorId).id;
 }
 
 export type DeterministicSemantics = {
@@ -384,6 +522,13 @@ export type DeterministicSemantics = {
   quotedSpeech: string[];
   destinationActorId?: string;
   destinationObjectId?: string;
+  /**
+   * Exp-6 item 1: true when destinationObjectId was resolved from a direct
+   * name/id mention in a movement clause (strong textual evidence); false
+   * when it came from the generic keyword/possessive fallback (a guess the
+   * consequence model's declaration may override).
+   */
+  destinationObjectExplicit?: boolean;
   /** First mentioned non-acting actor — the spoken-to candidate. */
   addresseeActorId?: string;
 };
@@ -503,8 +648,11 @@ export function resolveDeterministicSemantics(
   };
   const destActor = resolveDestinationActorId(world, action.actorId, action.text);
   if (destActor !== undefined) out.destinationActorId = destActor;
-  const destObj = resolveDestinationObjectId(world, action.text, action.actorId);
-  if (destObj !== undefined) out.destinationObjectId = destObj;
+  const destObj = resolveDestinationObjectIdDetailed(world, action.text, action.actorId);
+  if (destObj.id !== undefined) {
+    out.destinationObjectId = destObj.id;
+    out.destinationObjectExplicit = destObj.explicit;
+  }
   const mentioned = resolveMentionedActorId(world, action.actorId, action.text);
   if (mentioned !== undefined) out.addresseeActorId = mentioned;
   return out;

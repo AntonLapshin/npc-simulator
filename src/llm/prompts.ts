@@ -20,6 +20,12 @@ export const LLM_SYSTEM_PROMPT = [
   "You must use only information available to the relevant actor when the prompt says so.",
   "Respond only with valid JSON.",
   "Do not include markdown, commentary, or extra text.",
+  // Exp-6 item 7 (reasoning-leak guard): "Let me analyze this…" preambles
+  // caused 14/61 parse failures. Constrain the first token explicitly.
+  "Begin your response with { (the JSON object itself) — never lead with analysis, preamble, or commentary.",
+  // Exp-6 item 8: the model names pipeline stages in-prose ("Consequence"
+  // as an actor) when collapsing — ban the vocabulary outright.
+  "Never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning — describe events, not pipeline stages.",
   "Return COMPACT single-line JSON (no pretty-printing, no newlines inside the JSON) to stay within the token budget.",
 ].join("\n");
 
@@ -97,6 +103,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full"): string {
       "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
       "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
+      // Exp-6 item 8: never name the pipeline in prose.
+      "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning.",
       "Return JSON only, matching the schema above.",
       "Return COMPACT single-line JSON (no pretty-print, no markdown).",
     ].join("\n");
@@ -190,6 +198,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full"): string {
     "never re-emit unchanged walls/furniture. Keep every string short.",
     "The full objectPatch fields are: objectId (required), description,",
     "x, y, w, h, passable, blocksVision, blocksSound.",
+    // Exp-6 item 8: never name the pipeline in prose.
+    "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning — describe events, not pipeline stages.",
     "Return JSON only, matching the schema above.",
     "Return COMPACT single-line JSON (no pretty-print, no markdown).",
   ].join("\n");

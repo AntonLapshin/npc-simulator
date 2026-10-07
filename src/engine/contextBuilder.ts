@@ -2,6 +2,7 @@ import type { Action, Actor, SceneObject, World } from "../types.js";
 import { defaultConfig } from "../config.js";
 import { distance } from "./geometry.js";
 import {
+  findManipulatedObjects,
   resolveDestinationActorId,
   resolveDestinationObjectId,
   resolveMentionedActorId,
@@ -558,6 +559,47 @@ export function buildObjectIdCatalog(world: World): string {
   );
 }
 
+/**
+ * Exp-6 item 8 (object interaction): affordance nudge. Zero object touches
+ * across 70+ turns in four experiments is structural: the engine punishes
+ * missing object/prop patches after the fact but never *demands* them up
+ * front. When the action names a manipulable object (grab/manipulation
+ * verb or a named grab target), return an explicit demand line naming the
+ * exact object id and the required patch — used in the consequence context
+ * and in retry feedback. Returns undefined when the action names nothing
+ * manipulable.
+ */
+const MANIPULATION_VERBS =
+  "pour|pours|pouring|brew|brews|brewing|open|opens|opening|pick|picks|picking|grab|grabs|grabbing|" +
+  "hold|holds|holding|carry|carries|carrying|sip|sips|sipping|drink|drinks|drinking|fill|fills|filling|" +
+  "set\\s+up|boot|boots|booting|move|moves|moving|hand|hands|handing|pass|passes|passing|give|gives|giving|" +
+  "sit|sits|sitting|sat|stand|stands|standing|stood";
+
+export function buildObjectAffordanceNudge(world: World, action: Action): string | undefined {
+  const verbHit = new RegExp(`\\b(?:${MANIPULATION_VERBS})\\b`, "i").test(action.text);
+  // Objects the action text manipulates in a grab/manipulation clause
+  // ("open the laptop" → anton_laptop; "walk to the desk to set up the
+  // laptop" → the laptop, not the desk). Building fabric is not
+  // manipulable.
+  const manipulated = findManipulatedObjects(world, action.text).filter(
+    (o) => !/wall|window|door|sign/i.test(`${o.id} ${o.name}`),
+  );
+  if (!verbHit && manipulated.length === 0) return undefined;
+  const target =
+    manipulated.length > 0
+      ? manipulated.map((o) => `"${o.id}" (${o.name})`).join(", ")
+      : "the named object (resolve its exact id from OBJECT IDS above)";
+  const patchFor =
+    manipulated.length > 0
+      ? manipulated.map((o) => `"${o.id}"`).join(", ")
+      : "the object";
+  return (
+    `OBJECT AFFORDANCE: the action manipulates ${target} — the consequence is INCOMPLETE without its patch: ` +
+    `set 'prop' (cup|laptop|null) and/or an objectPatch for ${patchFor} reflecting the change. ` +
+    `A verb like pour/open/pick up/hold/sit with no backing patch fails validation — emit the patch, do not just narrate the verb.`
+  );
+}
+
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
 // private memories, beliefs, hidden goals, or unperceived events.
@@ -873,6 +915,9 @@ export function buildConsequenceContext(
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action);
+  // Exp-6 item 8: demand the object/prop patch up front when the action
+  // names a manipulable object — don't just punish its absence later.
+  const affordanceNudge = buildObjectAffordanceNudge(world, action);
   const lines = [
     "Objective Snapshot (slim — nearby actors/objects + named targets; far state omitted for budget)",
     "",
@@ -897,6 +942,9 @@ export function buildConsequenceContext(
     buildRelationshipRefresh(world, action.actorId),
     "PRONOUN RULE: preserve every actor's pronouns exactly as used in their persona and the world above — never flip he/him to she/her or vice versa. If the scenario says Dana is he/him, every verb and pronoun for Dana stays he/him.",
     "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence. Handshake/hug/hand-over sets contactActorId and ends adjacent; omitting the verb from the narrative never excuses omitting the patch.",
+    // Exp-6 item 8: demand the object/prop patch up front when the action
+    // names a manipulable object — don't just punish its absence later.
+    ...(affordanceNudge ? [affordanceNudge] : []),
     "",
     `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
       perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"

@@ -15,7 +15,7 @@ import {
 } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
-import { LLM_SYSTEM_PROMPT, proposalSuffix } from "./prompts.js";
+import { LLM_SYSTEM_PROMPT, PROPOSAL_OUTPUT_SCHEMA, proposalSuffix } from "./prompts.js";
 import { completeJson } from "./complete.js";
 
 export const FALLBACK_PROPOSAL: ProposalResult = {
@@ -94,6 +94,7 @@ export class LLMProposalEngine implements ProposalEngine {
       input: { actorId },
       maxRetries,
       schema: proposalResultSchema,
+      schemaText: PROPOSAL_OUTPUT_SCHEMA,
       extraCheck: (value) => {
         const cleaned = normalizeSuggestions(value.suggestions);
         if (cleaned.length === 0) return "no usable suggestions";
