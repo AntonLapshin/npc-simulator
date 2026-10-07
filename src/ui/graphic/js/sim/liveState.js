@@ -42,16 +42,18 @@ export class LiveState {
     const pres = resolvePresentation(presentation, world.actors);
     for (const a of world.actors) {
       const p = pres.get(a.id) || {};
+      const pose = p.pose || "stand";
+      const seated = seatViewXY(world, this.mapper, a.x, a.y, pose);
       this.actors.set(a.id, {
         id: a.id,
         name: a.name,
         color: p.color || "#8fa0c0",
         role: p.role || "",
         prop: p.prop ?? null,
-        pose: p.pose || "stand",
+        pose,
         look: p.look,
-        x: this.mapper.toViewX(a.x),
-        y: this.mapper.toViewY(a.y),
+        x: seated ? seated.x : this.mapper.toViewX(a.x),
+        y: seated ? seated.y : this.mapper.toViewY(a.y),
         wx: a.x,
         wy: a.y,
         dir: "down",
@@ -79,19 +81,24 @@ export class LiveState {
     for (const a of world.actors) {
       seen.add(a.id);
       let v = this.actors.get(a.id);
+      const presNow = resolvePresentation(this._presentation, [a]).get(a.id);
       if (!v) {
         // actor appeared mid-session: materialise with derived presentation
-        const pres = resolvePresentation(null, [a]).get(a.id);
+        const pose0 = presNow?.pose || a.pose || "stand";
+        const seated0 = seatViewXY(world, this.mapper, a.x, a.y, pose0);
         v = {
-          id: a.id, name: a.name, color: pres.color, role: "", prop: pres.prop ?? null, pose: pres.pose || "stand", look: pres.look,
-          x: this.mapper.toViewX(a.x), y: this.mapper.toViewY(a.y), wx: a.x, wy: a.y,
+          id: a.id, name: a.name, color: presNow?.color || "#8fa0c0", role: "", prop: presNow?.prop ?? null, pose: pose0, look: presNow?.look,
+          x: seated0 ? seated0.x : this.mapper.toViewX(a.x), y: seated0 ? seated0.y : this.mapper.toViewY(a.y), wx: a.x, wy: a.y,
           dir: "down", emotion: a.emotion || "neutral", visible: true,
           isUser: a.id === world.userActorId, tween: null,
         };
         this.actors.set(a.id, v);
         this.order.push(a.id);
       }
-      const tx = this.mapper.toViewX(a.x), ty = this.mapper.toViewY(a.y);
+      const poseNow = presNow?.pose || a.pose || v.pose || "stand";
+      const seated = seatViewXY(this.world, this.mapper, a.x, a.y, poseNow);
+      const tx = seated ? seated.x : this.mapper.toViewX(a.x);
+      const ty = seated ? seated.y : this.mapper.toViewY(a.y);
       const moved = Math.abs(tx - (v.tween ? v.tween.x1 : v.x)) > 0.5 || Math.abs(ty - (v.tween ? v.tween.y1 : v.y)) > 0.5;
       if (moved && !immediate) {
         const sx = v.tween ? v.tween.x1 : v.x;
@@ -113,12 +120,11 @@ export class LiveState {
       v.name = a.name;
       // Appearance is data-driven from the actor: pose/prop/color/look
       // follow the world immediately (only positions tween).
-      const pres = resolvePresentation(this._presentation, [a]).get(a.id);
-      if (pres) {
-        v.pose = pres.pose || v.pose || "stand";
-        v.prop = pres.prop ?? v.prop ?? null;
-        v.color = pres.color || v.color;
-        v.look = pres.look || v.look;
+      if (presNow) {
+        v.pose = presNow.pose || v.pose || "stand";
+        v.prop = presNow.prop ?? v.prop ?? null;
+        v.color = presNow.color || v.color;
+        v.look = presNow.look || v.look;
       }
       v.visible = true;
     }
@@ -231,6 +237,54 @@ export class LiveState {
   visualActor(id) {
     return this.actors.get(id) || null;
   }
+}
+
+/**
+ * True for chair-like scene objects (same match as scenarioScene.js:
+ * chair | stool | seat | bench on id + name — descriptions mention
+ * contents and would misclassify, so they are ignored here too).
+ */
+function isSeatObject(o) {
+  const hay = `${o.id || ""} ${o.name || ""}`.toLowerCase();
+  return /chair|stool|seat|bench/.test(hay);
+}
+
+/** Half-open containment, mirroring engine geometry.pointInRect. */
+function pointInSeat(x, y, o) {
+  const w = o.w ?? 1;
+  const h = o.h ?? 1;
+  return x >= (o.x ?? 0) && x < (o.x ?? 0) + w && y >= (o.y ?? 0) && y < (o.y ?? 0) + h;
+}
+
+/**
+ * View-space seat snap for sitters: when a pose=sit actor's world point
+ * lies inside a chair rect, render at that chair's footprint CENTER so the
+ * sit pose (seat plane y-26) lands on the chair asset. Without this, engine
+ * points like (8, 7) map to the tile's top-left corner while the chair
+ * asset centers on (8.5, 7.5) — half a tile off, reading as "outside the
+ * chair". Returns null when no snap applies (stand pose, no chair, …).
+ */
+function seatViewXY(world, mapper, x, y, pose) {
+  if (pose !== "sit" || !world || !mapper) return null;
+  const objects = world.scene?.objects;
+  if (!Array.isArray(objects)) return null;
+  let best = null;
+  let bestArea = Infinity;
+  for (const o of objects) {
+    if (!isSeatObject(o)) continue;
+    if (!pointInSeat(x, y, o)) continue;
+    const area = (o.w ?? 1) * (o.h ?? 1);
+    if (area < bestArea) {
+      bestArea = area;
+      best = o;
+    }
+  }
+  if (!best) return null;
+  // Same center convention as scenarioScene assets + snapshot objects.
+  return {
+    x: mapper.toViewX((best.x || 0) + (best.w || 0) / 2),
+    y: mapper.toViewY((best.y || 0) + (best.h || 0) / 2),
+  };
 }
 
 /** Dominant-axis facing from a movement delta. */

@@ -39,8 +39,11 @@ export class App {
 
   async start() {
     /* ── load the initial world ─────────────────────────────────── */
-    const { world, presentation } = await this.adapter.load();
+    const { world, presentation, debug } = await this.adapter.load();
     this.world = world;
+    // --debug (server flag, see /health debug / __NPC_ENGINE__.debug):
+    // the Timeline then shows the text-UI style story trace per turn.
+    this.debug = Boolean(debug ?? this.adapter.debug);
     // The painted room is driven by the scenario's own scene objects
     // (walls/door/desks/…); only the bundled office keeps its pretty set.
     this.staticScene = buildViewScene(world, presentation);
@@ -122,6 +125,9 @@ export class App {
     this.world = ev.world;
     this.live.applyTurn(ev);
     this.logPanel.append(ev.actionText, ev.world);
+    // Debug Timeline: same story trace the text UI prints after each turn
+    // when started with --debug (server attaches `story` per turn event).
+    if (this.debug && ev.story) this.logPanel.appendDebug(ev.story, ev.tick);
     this._syncPanels();
     this._needsRender = true;
   }

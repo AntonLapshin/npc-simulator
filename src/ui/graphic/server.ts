@@ -43,6 +43,7 @@ import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
+import { renderTurnStory } from "../../logging/storyTrace.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GRAPHIC_ROOT = resolve(HERE);
@@ -195,6 +196,10 @@ type TurnEvent = {
   speech: { text: string; kind: string } | null;
   narrative: string;
   world: World;
+  /** Concise story debug trace for this turn (text-UI `debug on` format, no ANSI colors). Only set when --debug. */
+  story?: string | null;
+  /** Engine tick the turn ran at (matches the story block header). */
+  tick?: number;
 };
 
 async function main(): Promise<void> {
@@ -325,8 +330,25 @@ async function main(): Promise<void> {
           : async () => {
               throw new Error("getUserAction called outside the user turn");
             };
+      const beforeTick = world.tick;
       world = await runTurn(world, deps);
       const actionText = world.history.at(-1) ?? `${actor.name}: ${forcedUserText ?? ""}`;
+      // Debug story trace (same format as the text UI's `debug on` output:
+      // proposal → selection → action → consequence → validation → history).
+      let story: string | null = null;
+      if (opts.debug) {
+        try {
+          const roster = world.actors.map((a) => ({ id: a.id, name: a.name }));
+          story = renderTurnStory(
+            logger.store.all().filter((e) => e.tick === beforeTick),
+            beforeTick,
+            roster,
+            { userActorId: world.userActorId, color: false },
+          );
+        } catch {
+          story = null;
+        }
+      }
       events.push({
         actorId: actor.id,
         isUser: actor.id === world.userActorId,
@@ -334,6 +356,8 @@ async function main(): Promise<void> {
         speech: speechFromAction(actionText),
         narrative: actionText,
         world: structuredClone(world),
+        story,
+        tick: beforeTick,
       });
     };
     const guard = Math.max(1, world.order.length);
@@ -391,7 +415,7 @@ async function main(): Promise<void> {
       }
 
       if (req.method === "GET" && path === "/world") {
-        sendJson(res, 200, { world, presentation: presentation ?? null });
+        sendJson(res, 200, { world, presentation: presentation ?? null, debug: opts.debug ?? false });
         return;
       }
 
@@ -433,7 +457,7 @@ async function main(): Promise<void> {
           sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
           return;
         }
-        sendJson(res, 200, { world, presentation: presentation ?? null });
+        sendJson(res, 200, { world, presentation: presentation ?? null, debug: opts.debug ?? false });
         return;
       }
 
@@ -461,7 +485,7 @@ async function main(): Promise<void> {
           if (opts.debug) {
             console.log(`[graphic] action resolved in ${((Date.now() - t0) / 1000).toFixed(1)}s (${events.length} turn(s))`);
           }
-          sendJson(res, 200, { world, events });
+          sendJson(res, 200, { world, events, debug: opts.debug ?? false });
         } catch (err) {
           sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
         } finally {
@@ -489,7 +513,7 @@ async function main(): Promise<void> {
         // the requested scenario/engines) so it connects back here instead
         // of booting the offline mock scenario.
         const inject =
-          `<script>window.__NPC_ENGINE__=${JSON.stringify({ backend: "same-origin", engine: engineLabel, mock: usingMock, scenario: world.title, scenarioId: world.id })};</script>\n`;
+          `<script>window.__NPC_ENGINE__=${JSON.stringify({ backend: "same-origin", engine: engineLabel, mock: usingMock, scenario: world.title, scenarioId: world.id, debug: opts.debug ?? false })};</script>\n`;
         const html = data.toString("utf-8").replace(`<script type="module" src="js/main.js">`, `${inject}<script type="module" src="js/main.js">`);
         data = Buffer.from(html, "utf-8");
       }

@@ -2,16 +2,21 @@
 //
 // Expected HTTP contract (thin wrapper around the engine's runTurn loop):
 //   GET  {base}/health   → 200 when the server is up (probe/fallback)
-//   GET  {base}/world    → { world, presentation? }   (or a bare World)
-//   POST {base}/action   → body { text } → { world, events? }
+//   GET  {base}/world    → { world, presentation?, debug? } (or a bare World)
+//   POST {base}/action   → body { text } → { world, events?, debug? }
 //        `events` (optional): array of per-turn events
-//          { actorId, isUser, actionText, speech?, narrative?, world? }
-//        replayed in order so the UI animates each turn; without it the
-//        adapter synthesises a single turn event from the world diff.
+//          { actorId, isUser, actionText, speech?, narrative?, world?,
+//            story?, tick? }
+//        `story` is the text-UI style debug trace for that turn (server
+//        sends it only when started with --debug); replayed in order so the
+//        UI animates each turn, with the story appended to the Timeline.
+//        Without `events` the adapter synthesises a single turn event from
+//        the world diff.
 //
 // Emitter events (same as MockAdapter):
 //   "progress" { actorId, stage, message }
-//   "turn"     { world, actorId, isUser, actionText, speech, narrative }
+//   "turn"     { world, actorId, isUser, actionText, speech, narrative,
+//                story?, tick? }
 
 import { Emitter } from "../core/emitter.js";
 import { parseSpeechFromAction } from "./textParse.js";
@@ -31,6 +36,7 @@ export class HttpAdapter extends Emitter {
     this.replayGapMs = replayGapMs;
     this.world = null;
     this.busy = false;
+    this.debug = false;
     this._sse = null;
   }
 
@@ -51,14 +57,29 @@ export class HttpAdapter extends Emitter {
     return res.json();
   }
 
-  /** @returns {Promise<{world, presentation}>} */
+  /** @returns {Promise<{world, presentation, debug}>} */
   async load() {
     const data = await this._json("/world", { method: "GET" });
     const world = data.world || data;
     if (!world || !Array.isArray(world.actors)) throw new Error("Malformed world payload");
     this.world = world;
+    // Debug mode comes from the server (npm start -- --debug): prefer the
+    // explicit /world flag, fall back to the injected __NPC_ENGINE__ marker,
+    // then to ?debug=1 for ad-hoc static hosting.
+    let debug = Boolean(data.debug);
+    try {
+      if (!debug && typeof window !== "undefined" && window.__NPC_ENGINE__) {
+        debug = Boolean(window.__NPC_ENGINE__.debug);
+      }
+      if (!debug && typeof window !== "undefined") {
+        debug = new URLSearchParams(window.location.search).get("debug") === "1";
+      }
+    } catch {
+      // Non-browser contexts (tests) — ignore.
+    }
+    this.debug = debug;
     this._subscribeProgress();
-    return { world, presentation: data.presentation || null };
+    return { world, presentation: data.presentation || null, debug };
   }
 
   /** Stream live turn progress (proposal/selection/consequence) via SSE. */
@@ -105,6 +126,7 @@ export class HttpAdapter extends Emitter {
       });
       const finalWorld = data.world;
       if (!finalWorld) throw new Error("Malformed action response (no world)");
+      if (typeof data.debug === "boolean") this.debug = data.debug;
 
       if (Array.isArray(data.events) && data.events.length) {
         for (const ev of data.events) {
@@ -124,7 +146,7 @@ export class HttpAdapter extends Emitter {
   }
 }
 
-/** Normalise a server-supplied turn event. */
+/** Normalise a server-supplied turn event (keeps the --debug story trace). */
 function normaliseTurn(ev, fallbackWorld) {
   const actionText = ev.actionText || ev.text || "";
   return {
@@ -134,6 +156,8 @@ function normaliseTurn(ev, fallbackWorld) {
     actionText,
     speech: ev.speech || parseSpeechFromAction(actionText),
     narrative: ev.narrative || actionText,
+    story: typeof ev.story === "string" ? ev.story : null,
+    tick: Number.isInteger(ev.tick) ? ev.tick : null,
   };
 }
 
@@ -157,6 +181,8 @@ function turnFromDiff(after, userText) {
     actionText: lastEntry,
     speech: parseSpeechFromAction(lastEntry),
     narrative: lastEntry,
+    story: null,
+    tick: null,
   };
 }
 

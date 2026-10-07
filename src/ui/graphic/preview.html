@@ -144,6 +144,11 @@ kbd{background:rgba(255,255,255,.07);border:1px solid var(--line);border-bottom-
 .ev .tg{font-size:9px;font-weight:800;letter-spacing:.7px;text-transform:uppercase;padding:2px 6px;border-radius:5px;
   margin-right:6px;background:rgba(255,255,255,.08);color:var(--mut)}
 .ev .who{font-weight:700}
+.ev.debug{background:rgba(155,108,245,.07);border-color:rgba(155,108,245,.28)}
+.ev.debug .tg{background:rgba(155,108,245,.25);color:#d7c6ff}
+.ev.debug .ds{flex:1;min-width:0}
+.dbg-pre{margin:6px 0 0;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;line-height:1.55;color:#c9bdf0;max-height:220px;overflow:auto}
 .log-empty{font-size:12px;color:var(--dim);text-align:center;padding:18px 0}
 
 /* ── JSON view ────────────────────────────────────────────────────── */
@@ -506,7 +511,8 @@ const Win = {
   draw(c, win) { 
   const x = win.x, y = win.y, w = win.w, h = win.h;
   c.save();
-  rrPath(c, x, y, w, h, 5);
+  c.beginPath();
+  c.rect(x, y, w, h);
   c.clip();
   const sky = linGrad(c, 0, y, 0, y + h, [[0, "#8fd3ff"], [0.55, "#cfe9ff"], [1, "#ffe9c9"]]);
   c.fillStyle = sky || "#bfe4ff";
@@ -534,12 +540,10 @@ const Win = {
   c.restore();
   c.strokeStyle = "#f7f9fe";
   c.lineWidth = 4;
-  rrPath(c, x, y, w, h, 5);
-  c.stroke();
+  c.strokeRect(x, y, w, h);
   c.strokeStyle = "rgba(60,70,110,.30)";
   c.lineWidth = 1;
-  rrPath(c, x - 2, y - 2, w + 4, h + 4, 6);
-  c.stroke();
+  c.strokeRect(x - 2, y - 2, w + 4, h + 4);
   c.fillStyle = "#f7f9fe";
   c.fillRect(x + w / 2 - 1.5, y, 3, h);
   c.fillStyle = "rgba(255,255,255,.5)";
@@ -560,7 +564,7 @@ const Door = {
   supportsDirection: false,
   variants: ["Default"],
   defaultProps: {
-  asset: "door", id: "door", x: 0, y: 0, w: 130, h: 20,
+  asset: "door", id: "door", x: 0, y: 0, w: 40, h: 20,
   frame: "#8f6b45", label: "ENTRANCE",
 },
 
@@ -575,21 +579,21 @@ const Door = {
   }
   c.fillStyle = "#0a0f1c";
   c.fillRect(d.x, d.y + 2, d.w, d.h);
-  const g = linGrad(c, 0, d.y - 46, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);
+  const g = linGrad(c, 0, d.y - 56, 0, d.y + d.h, [[0, "rgba(120,150,220,.30)"], [1, "rgba(20,26,44,.9)"]]);
   if (g) {
     c.fillStyle = g;
-    c.fillRect(d.x, d.y - 46, d.w, d.h + 46);
+    c.fillRect(d.x, d.y - 56, d.w, d.h + 56);
   }
   c.fillStyle = d.frame;
-  c.fillRect(d.x - 9, d.y - 50, 9, d.h + 50);
-  c.fillRect(d.x + d.w, d.y - 50, 9, d.h + 50);
-  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 9);
+  c.fillRect(d.x - 6, d.y - 60, 6, d.h + 60);
+  c.fillRect(d.x + d.w, d.y - 60, 6, d.h + 60);
+  c.fillRect(d.x - 6, d.y - 66, d.w + 12, 8);
   c.fillStyle = shade(d.frame, 0.28);
-  c.fillRect(d.x - 9, d.y - 56, d.w + 18, 3);
+  c.fillRect(d.x - 6, d.y - 66, d.w + 12, 3);
   c.fillStyle = "rgba(255,255,255,.55)";
-  c.font = "700 9px Outfit, sans-serif";
+  c.font = "700 8px Outfit, sans-serif";
   c.textAlign = "center";
-  c.fillText(d.label, d.x + d.w / 2, d.y - 62);
+  c.fillText(d.label, d.x + d.w / 2, d.y - 71);
   c.textAlign = "left";
 },
   sortY() { 
@@ -845,7 +849,7 @@ function paintBackground(c, scene, dims) {
     c.fillStyle = cor.color;
     c.fillRect(cor.x, cor.y, cor.w, cor.h);
     c.fillStyle = "rgba(255,255,255,.05)";
-    for (let i = 0; i < 4; i++) c.fillRect(cor.x + 8 + i * 30, cor.y + 6, 18, cor.h - 12);
+    for (let sx = cor.x + 8; sx + 18 <= cor.x + cor.w - 8; sx += 30) c.fillRect(sx, cor.y + 6, 18, cor.h - 12);
     c.fillStyle = "rgba(0,0,0,.5)";
     c.fillRect(cor.x, cor.y, cor.w, 4);
   }
@@ -925,7 +929,7 @@ function paintBackground(c, scene, dims) {
 // of the desk in scenes, facing south; the camera sees the desk's south
 // face, the slab top and the drawer pedestal front).
 
-/** Slab (t) at height h on legs + under-desk drawer pedestal on the right. */
+/** Slab (t) at height h on four simple legs (no drawers). */
 const Desk = {
   name: "desk",
   title: "Desk",
@@ -957,29 +961,16 @@ const Desk = {
     c.fillRect(x0 + 14, y0 + 12 - legH, 8, legH);
     c.fillRect(x1 - 22, y0 + 12 - legH, 8, legH);
 
-    /* drawer pedestal (right side), front faces south */
-    const px = x1 - 45, py = y + 2;
-    solidBox(c, px, py, 56, 54, legH, shade(top, -0.04), shade(edge, -0.24), 4);
-    const pfTop = py + 27 - legH;
-    c.fillStyle = "rgba(20,26,48,.16)";
-    c.fillRect(px - 28, pfTop + legH * 0.42, 56, 1);
-    c.fillStyle = "#98a4be";
-    rrPath(c, px - 10, pfTop + legH * 0.52, 20, 3, 1.5);
-    c.fill();
-    rrPath(c, px - 10, pfTop + legH * 0.82, 20, 3, 1.5);
-    c.fill();
-
-    /* front-left leg */
+    /* front legs (left + right), simple square posts */
     c.fillStyle = "#93a0bb";
     c.fillRect(x0 + 14, y1 - 14 - legH, 8, legH);
+    c.fillRect(x1 - 22, y1 - 14 - legH, 8, legH);
     c.fillStyle = "rgba(255,255,255,.22)";
     c.fillRect(x0 + 14, y1 - 14 - legH, 2, legH);
+    c.fillRect(x1 - 22, y1 - 14 - legH, 2, legH);
     c.fillStyle = "#5d6883";
     c.fillRect(x0 + 13, y1 - 17, 10, 3);
-
-    /* modesty rail between leg and pedestal */
-    c.fillStyle = "rgba(120,132,160,.55)";
-    c.fillRect(x0 + 22, y1 - 16 - legH + 4, px - 28 - (x0 + 22), 5);
+    c.fillRect(x1 - 23, y1 - 17, 10, 3);
 
     /* slab */
     gemBox(c, x, y, w, d, h, t, top, shade(edge, -0.1), 8);
@@ -1316,11 +1307,11 @@ const Cup = {
     c.fillStyle = "rgba(30,25,50,.20)";
     ell(c, x, Y + 1.2, 7.2, 3);
     c.fill();
-    /* handle */
+    /* handle — arc ends tuck under the body so it reads attached */
     c.strokeStyle = "#e2dbcd";
     c.lineWidth = 2;
     c.beginPath();
-    c.arc(x + 5.6, Y - 5.4, 3.4, -1.25, 1.25);
+    c.arc(x + 4.0, Y - 5.4, 3.6, -1.45, 1.45);
     c.stroke();
     /* body: slight taper, rounded bottom */
     c.fillStyle = "#f7f4ee";
@@ -1628,16 +1619,17 @@ const CoffeeMachine = {
     c.fillStyle = "#c8d0e0";
     rrPath(c, x - 5, Y - 27, 10, 5, 1.6);
     c.fill();
+    /* coffee stream: spout down into the cup */
     c.fillStyle = "#6b4a2f";
-    rrPath(c, x - 1.6, Y - 22.4, 3.2, 3.4, 1);
+    rrPath(c, x - 1.6, Y - 22.4, 3.2, 8.8, 1);
     c.fill();
 
-    /* cup under the spout */
+    /* cup seated on the drip tray (base tucked behind the tray front) */
     c.fillStyle = "#f7f4ee";
-    rrPath(c, x - 4.6, Y - 19, 9.2, 8.6, 2);
+    rrPath(c, x - 4.6, Y - 14, 9.2, 8.6, 2);
     c.fill();
     c.fillStyle = "rgba(255,255,255,.5)";
-    c.fillRect(x - 3.4, Y - 17.6, 1.6, 6);
+    c.fillRect(x - 3.4, Y - 12.6, 1.6, 6);
 
     /* drip tray */
     c.fillStyle = "#c8d0e0";
@@ -1761,8 +1753,8 @@ const WaterCooler = {
     rrPath(c, x - w / 2 + 3, ty0 + 3, 6, d - 6, 3);
     c.fill();
 
-    /* bottle: water body + cap, seated on the top face */
-    const bTop = ty0 - 40;
+    /* bottle: water body + cap, seated on the middle of the top face */
+    const bTop = ty0 + d / 2 - 42;
     c.fillStyle = "rgba(140,205,255,.55)";
     rrPath(c, x - 13, bTop, 26, 42, 9);
     c.fill();
@@ -1966,14 +1958,14 @@ const Sofa = {
   draw(c, a) {
     const x = a.x, y = a.y, w = a.w || 132, d = a.d || 62;
     const col = a.color || "#9b6cf5";
-    const sh = a.sh || 22, bh = a.bh || 46, ah = a.ah || 32, bt = a.bt || 15, at = a.at || 16;
+    const sh = a.sh || 22, bh = a.bh || 34, ah = a.ah || 26, bt = a.bt || 15, at = a.at || 16;
     ellShadow(c, x, y + d / 2 - 2, w * 0.6, d * 0.52, 0.26);
 
     /* backrest: top edge + inner (south) face visible above the seat */
     const by = y - d / 2 + bt / 2;
     solidBox(c, x, by, w, bt, bh, shade(col, 0.14), shade(col, -0.34), 7);
     c.fillStyle = "rgba(255,255,255,.13)";
-    rrPath(c, x - w / 2 + 7, by + bt / 2 - bh + 8, w - 14, bh - 22, 5);
+    rrPath(c, x - w / 2 + 7, by + bt / 2 - bh + 2, w - 14, 8, 4);
     c.fill();
 
     /* seat carcass */
@@ -3806,20 +3798,20 @@ const OFFICE_FLOOR3_SCENE = {
     world: { w: 1040, h: 730 },
   },
   floor: { x: 60, y: 110, w: 920, h: 550, plank: 56, base: "#efe3cf", tone: "#e6d8bf" },
-  corridor: { x: 435, y: 680, w: 130, h: 50, color: "#1b2438" },
+  corridor: { x: 480, y: 680, w: 40, h: 50, color: "#1b2438" },
   walls: [
     { id: "wN", x: 40, y: 90, w: 960, h: 20, height: 70, face: "#dfe5f2", top: "#f4f7fd", layer: "back" },
     { id: "wW", x: 40, y: 90, w: 20, h: 590, height: 70, face: "#d3dae9", top: "#eef2fa", layer: "back" },
     { id: "wE", x: 980, y: 90, w: 20, h: 590, height: 70, face: "#cbd3e4", top: "#e8edf8", layer: "back" },
-    { id: "wSa", x: 40, y: 660, w: 395, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
-    { id: "wSb", x: 565, y: 660, w: 435, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
+    { id: "wSa", x: 40, y: 660, w: 440, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
+    { id: "wSb", x: 520, y: 660, w: 480, h: 20, height: 16, face: "#c4cde0", top: "#e6ebf6", layer: "front" },
   ],
   windows: [
     { id: "win1", wall: "wN", x: 110, y: 50, w: 180, h: 46, view: "city" },
     { id: "win2", wall: "wN", x: 400, y: 50, w: 170, h: 46, view: "city" },
     { id: "win3", wall: "wN", x: 650, y: 50, w: 180, h: 46, view: "hills" },
   ],
-  door: { id: "door1", x: 435, y: 660, w: 130, h: 20, frame: "#8f6b45", label: "ENTRANCE" },
+  door: { id: "door1", x: 480, y: 660, w: 40, h: 20, frame: "#8f6b45", label: "ENTRANCE" },
   wallDecor: [
     { id: "board1", asset: "whiteboard", x: 852, y: 48, w: 132, h: 50, ink: "#4f7cff" },
     { id: "clock1", asset: "clock", x: 333, y: 64, r: 15 },
@@ -3827,7 +3819,7 @@ const OFFICE_FLOOR3_SCENE = {
   ],
   floorDecals: [
     { id: "rugLounge", asset: "rug", x: 205, y: 285, w: 290, h: 215, color: "#4f7cff", trim: "#9b6cf5" },
-    { id: "rugEntrance", asset: "rug", x: 500, y: 616, w: 212, h: 76, color: "#2ec4a6", trim: "#ffb648" },
+    { id: "rugEntrance", asset: "rug", x: 500, y: 616, w: 120, h: 76, color: "#2ec4a6", trim: "#ffb648" },
     { id: "zoneDesk", asset: "zone", x: 770, y: 390, w: 400, h: 330, color: "#ffb648", label: "DESK POD · A/B" },
     { id: "zoneLounge", asset: "zone", x: 205, y: 285, w: 300, h: 230, color: "#4f7cff", label: "LOUNGE" },
     { id: "zoneKitchen", asset: "zone", x: 520, y: 170, w: 260, h: 110, color: "#2ec4a6", label: "KITCHEN" },
@@ -4564,16 +4556,21 @@ function guessRole(actor) {
 //
 // Expected HTTP contract (thin wrapper around the engine's runTurn loop):
 //   GET  {base}/health   → 200 when the server is up (probe/fallback)
-//   GET  {base}/world    → { world, presentation? }   (or a bare World)
-//   POST {base}/action   → body { text } → { world, events? }
+//   GET  {base}/world    → { world, presentation?, debug? } (or a bare World)
+//   POST {base}/action   → body { text } → { world, events?, debug? }
 //        `events` (optional): array of per-turn events
-//          { actorId, isUser, actionText, speech?, narrative?, world? }
-//        replayed in order so the UI animates each turn; without it the
-//        adapter synthesises a single turn event from the world diff.
+//          { actorId, isUser, actionText, speech?, narrative?, world?,
+//            story?, tick? }
+//        `story` is the text-UI style debug trace for that turn (server
+//        sends it only when started with --debug); replayed in order so the
+//        UI animates each turn, with the story appended to the Timeline.
+//        Without `events` the adapter synthesises a single turn event from
+//        the world diff.
 //
 // Emitter events (same as MockAdapter):
 //   "progress" { actorId, stage, message }
-//   "turn"     { world, actorId, isUser, actionText, speech, narrative }
+//   "turn"     { world, actorId, isUser, actionText, speech, narrative,
+//                story?, tick? }
 
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -4591,6 +4588,7 @@ class HttpAdapter extends Emitter {
     this.replayGapMs = replayGapMs;
     this.world = null;
     this.busy = false;
+    this.debug = false;
     this._sse = null;
   }
 
@@ -4611,14 +4609,29 @@ class HttpAdapter extends Emitter {
     return res.json();
   }
 
-  /** @returns {Promise<{world, presentation}>} */
+  /** @returns {Promise<{world, presentation, debug}>} */
   async load() {
     const data = await this._json("/world", { method: "GET" });
     const world = data.world || data;
     if (!world || !Array.isArray(world.actors)) throw new Error("Malformed world payload");
     this.world = world;
+    // Debug mode comes from the server (npm start -- --debug): prefer the
+    // explicit /world flag, fall back to the injected __NPC_ENGINE__ marker,
+    // then to ?debug=1 for ad-hoc static hosting.
+    let debug = Boolean(data.debug);
+    try {
+      if (!debug && typeof window !== "undefined" && window.__NPC_ENGINE__) {
+        debug = Boolean(window.__NPC_ENGINE__.debug);
+      }
+      if (!debug && typeof window !== "undefined") {
+        debug = new URLSearchParams(window.location.search).get("debug") === "1";
+      }
+    } catch {
+      // Non-browser contexts (tests) — ignore.
+    }
+    this.debug = debug;
     this._subscribeProgress();
-    return { world, presentation: data.presentation || null };
+    return { world, presentation: data.presentation || null, debug };
   }
 
   /** Stream live turn progress (proposal/selection/consequence) via SSE. */
@@ -4665,6 +4678,7 @@ class HttpAdapter extends Emitter {
       });
       const finalWorld = data.world;
       if (!finalWorld) throw new Error("Malformed action response (no world)");
+      if (typeof data.debug === "boolean") this.debug = data.debug;
 
       if (Array.isArray(data.events) && data.events.length) {
         for (const ev of data.events) {
@@ -4684,7 +4698,7 @@ class HttpAdapter extends Emitter {
   }
 }
 
-/** Normalise a server-supplied turn event. */
+/** Normalise a server-supplied turn event (keeps the --debug story trace). */
 function normaliseTurn(ev, fallbackWorld) {
   const actionText = ev.actionText || ev.text || "";
   return {
@@ -4694,6 +4708,8 @@ function normaliseTurn(ev, fallbackWorld) {
     actionText,
     speech: ev.speech || parseSpeechFromAction(actionText),
     narrative: ev.narrative || actionText,
+    story: typeof ev.story === "string" ? ev.story : null,
+    tick: Number.isInteger(ev.tick) ? ev.tick : null,
   };
 }
 
@@ -4717,6 +4733,8 @@ function turnFromDiff(after, userText) {
     actionText: lastEntry,
     speech: parseSpeechFromAction(lastEntry),
     narrative: lastEntry,
+    story: null,
+    tick: null,
   };
 }
 
@@ -4886,16 +4904,18 @@ class LiveState {
     const pres = resolvePresentation(presentation, world.actors);
     for (const a of world.actors) {
       const p = pres.get(a.id) || {};
+      const pose = p.pose || "stand";
+      const seated = seatViewXY(world, this.mapper, a.x, a.y, pose);
       this.actors.set(a.id, {
         id: a.id,
         name: a.name,
         color: p.color || "#8fa0c0",
         role: p.role || "",
         prop: p.prop ?? null,
-        pose: p.pose || "stand",
+        pose,
         look: p.look,
-        x: this.mapper.toViewX(a.x),
-        y: this.mapper.toViewY(a.y),
+        x: seated ? seated.x : this.mapper.toViewX(a.x),
+        y: seated ? seated.y : this.mapper.toViewY(a.y),
         wx: a.x,
         wy: a.y,
         dir: "down",
@@ -4923,19 +4943,24 @@ class LiveState {
     for (const a of world.actors) {
       seen.add(a.id);
       let v = this.actors.get(a.id);
+      const presNow = resolvePresentation(this._presentation, [a]).get(a.id);
       if (!v) {
         // actor appeared mid-session: materialise with derived presentation
-        const pres = resolvePresentation(null, [a]).get(a.id);
+        const pose0 = presNow?.pose || a.pose || "stand";
+        const seated0 = seatViewXY(world, this.mapper, a.x, a.y, pose0);
         v = {
-          id: a.id, name: a.name, color: pres.color, role: "", prop: pres.prop ?? null, pose: pres.pose || "stand", look: pres.look,
-          x: this.mapper.toViewX(a.x), y: this.mapper.toViewY(a.y), wx: a.x, wy: a.y,
+          id: a.id, name: a.name, color: presNow?.color || "#8fa0c0", role: "", prop: presNow?.prop ?? null, pose: pose0, look: presNow?.look,
+          x: seated0 ? seated0.x : this.mapper.toViewX(a.x), y: seated0 ? seated0.y : this.mapper.toViewY(a.y), wx: a.x, wy: a.y,
           dir: "down", emotion: a.emotion || "neutral", visible: true,
           isUser: a.id === world.userActorId, tween: null,
         };
         this.actors.set(a.id, v);
         this.order.push(a.id);
       }
-      const tx = this.mapper.toViewX(a.x), ty = this.mapper.toViewY(a.y);
+      const poseNow = presNow?.pose || a.pose || v.pose || "stand";
+      const seated = seatViewXY(this.world, this.mapper, a.x, a.y, poseNow);
+      const tx = seated ? seated.x : this.mapper.toViewX(a.x);
+      const ty = seated ? seated.y : this.mapper.toViewY(a.y);
       const moved = Math.abs(tx - (v.tween ? v.tween.x1 : v.x)) > 0.5 || Math.abs(ty - (v.tween ? v.tween.y1 : v.y)) > 0.5;
       if (moved && !immediate) {
         const sx = v.tween ? v.tween.x1 : v.x;
@@ -4957,12 +4982,11 @@ class LiveState {
       v.name = a.name;
       // Appearance is data-driven from the actor: pose/prop/color/look
       // follow the world immediately (only positions tween).
-      const pres = resolvePresentation(this._presentation, [a]).get(a.id);
-      if (pres) {
-        v.pose = pres.pose || v.pose || "stand";
-        v.prop = pres.prop ?? v.prop ?? null;
-        v.color = pres.color || v.color;
-        v.look = pres.look || v.look;
+      if (presNow) {
+        v.pose = presNow.pose || v.pose || "stand";
+        v.prop = presNow.prop ?? v.prop ?? null;
+        v.color = presNow.color || v.color;
+        v.look = presNow.look || v.look;
       }
       v.visible = true;
     }
@@ -5075,6 +5099,54 @@ class LiveState {
   visualActor(id) {
     return this.actors.get(id) || null;
   }
+}
+
+/**
+ * True for chair-like scene objects (same match as scenarioScene.js:
+ * chair | stool | seat | bench on id + name — descriptions mention
+ * contents and would misclassify, so they are ignored here too).
+ */
+function isSeatObject(o) {
+  const hay = `${o.id || ""} ${o.name || ""}`.toLowerCase();
+  return /chair|stool|seat|bench/.test(hay);
+}
+
+/** Half-open containment, mirroring engine geometry.pointInRect. */
+function pointInSeat(x, y, o) {
+  const w = o.w ?? 1;
+  const h = o.h ?? 1;
+  return x >= (o.x ?? 0) && x < (o.x ?? 0) + w && y >= (o.y ?? 0) && y < (o.y ?? 0) + h;
+}
+
+/**
+ * View-space seat snap for sitters: when a pose=sit actor's world point
+ * lies inside a chair rect, render at that chair's footprint CENTER so the
+ * sit pose (seat plane y-26) lands on the chair asset. Without this, engine
+ * points like (8, 7) map to the tile's top-left corner while the chair
+ * asset centers on (8.5, 7.5) — half a tile off, reading as "outside the
+ * chair". Returns null when no snap applies (stand pose, no chair, …).
+ */
+function seatViewXY(world, mapper, x, y, pose) {
+  if (pose !== "sit" || !world || !mapper) return null;
+  const objects = world.scene?.objects;
+  if (!Array.isArray(objects)) return null;
+  let best = null;
+  let bestArea = Infinity;
+  for (const o of objects) {
+    if (!isSeatObject(o)) continue;
+    if (!pointInSeat(x, y, o)) continue;
+    const area = (o.w ?? 1) * (o.h ?? 1);
+    if (area < bestArea) {
+      bestArea = area;
+      best = o;
+    }
+  }
+  if (!best) return null;
+  // Same center convention as scenarioScene assets + snapshot objects.
+  return {
+    x: mapper.toViewX((best.x || 0) + (best.w || 0) / 2),
+    y: mapper.toViewY((best.y || 0) + (best.h || 0) / 2),
+  };
 }
 
 /** Dominant-axis facing from a movement delta. */
@@ -5606,8 +5678,11 @@ class App {
 
   async start() {
     /* ── load the initial world ─────────────────────────────────── */
-    const { world, presentation } = await this.adapter.load();
+    const { world, presentation, debug } = await this.adapter.load();
     this.world = world;
+    // --debug (server flag, see /health debug / __NPC_ENGINE__.debug):
+    // the Timeline then shows the text-UI style story trace per turn.
+    this.debug = Boolean(debug ?? this.adapter.debug);
     // The painted room is driven by the scenario's own scene objects
     // (walls/door/desks/…); only the bundled office keeps its pretty set.
     this.staticScene = buildViewScene(world, presentation);
@@ -5689,6 +5764,9 @@ class App {
     this.world = ev.world;
     this.live.applyTurn(ev);
     this.logPanel.append(ev.actionText, ev.world);
+    // Debug Timeline: same story trace the text UI prints after each turn
+    // when started with --debug (server attaches `story` per turn event).
+    if (this.debug && ev.story) this.logPanel.appendDebug(ev.story, ev.tick);
     this._syncPanels();
     this._needsRender = true;
   }
@@ -5908,7 +5986,10 @@ class CastPanel {
 //
 // History entries follow the engine convention "Name: action text".
 // Entries by the user actor are highlighted; quoted speech gets a SAY tag
-// (THINK for inner thoughts), everything else an ACT tag.
+// (THINK for inner thoughts), everything else an ACT tag. When the engine
+// runs with --debug, each turn is followed by a DEBUG row carrying the same
+// concise story trace the text UI prints (proposal → selection → action →
+// consequence → validation → history).
 
 
 class LogPanel {
@@ -5944,6 +6025,17 @@ class LogPanel {
     if (this.autoScroll) this.scrollToBottom();
   }
 
+  /**
+   * Append a --debug story trace for one turn, right after its history
+   * entry (mirrors the text UI's per-turn debug block). No-op for empty
+   * stories so non-debug backends stay clean.
+   */
+  appendDebug(story, tick) {
+    if (!story || !String(story).trim()) return;
+    this.container.appendChild(this._debugRow(tick, String(story)));
+    if (this.autoScroll) this.scrollToBottom();
+  }
+
   scrollToBottom() {
     this.container.scrollTop = this.container.scrollHeight;
   }
@@ -5973,6 +6065,17 @@ class LogPanel {
     ds.appendChild(document.createTextNode(body));
     return el("div", { class: "ev" + (isUser ? " is-user" : "") }, [
       el("span", { class: "tc", text: time }),
+      ds,
+    ]);
+  }
+
+  _debugRow(tick, story) {
+    const label = Number.isInteger(tick) ? `t${tick + 1}·dbg` : "dbg";
+    const pre = el("pre", { class: "dbg-pre" });
+    pre.textContent = story;
+    const ds = el("span", { class: "ds" }, [el("span", { class: "tg", text: "DEBUG" }), pre]);
+    return el("div", { class: "ev debug" }, [
+      el("span", { class: "tc", text: label }),
       ds,
     ]);
   }

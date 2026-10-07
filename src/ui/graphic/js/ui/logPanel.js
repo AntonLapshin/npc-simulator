@@ -2,7 +2,10 @@
 //
 // History entries follow the engine convention "Name: action text".
 // Entries by the user actor are highlighted; quoted speech gets a SAY tag
-// (THINK for inner thoughts), everything else an ACT tag.
+// (THINK for inner thoughts), everything else an ACT tag. When the engine
+// runs with --debug, each turn is followed by a DEBUG row carrying the same
+// concise story trace the text UI prints (proposal → selection → action →
+// consequence → validation → history).
 
 import { el } from "../core/dom.js";
 import { extractQuoted, looksLikeThought } from "../sim/textParse.js";
@@ -40,6 +43,17 @@ export class LogPanel {
     if (this.autoScroll) this.scrollToBottom();
   }
 
+  /**
+   * Append a --debug story trace for one turn, right after its history
+   * entry (mirrors the text UI's per-turn debug block). No-op for empty
+   * stories so non-debug backends stay clean.
+   */
+  appendDebug(story, tick) {
+    if (!story || !String(story).trim()) return;
+    this.container.appendChild(this._debugRow(tick, String(story)));
+    if (this.autoScroll) this.scrollToBottom();
+  }
+
   scrollToBottom() {
     this.container.scrollTop = this.container.scrollHeight;
   }
@@ -69,6 +83,17 @@ export class LogPanel {
     ds.appendChild(document.createTextNode(body));
     return el("div", { class: "ev" + (isUser ? " is-user" : "") }, [
       el("span", { class: "tc", text: time }),
+      ds,
+    ]);
+  }
+
+  _debugRow(tick, story) {
+    const label = Number.isInteger(tick) ? `t${tick + 1}·dbg` : "dbg";
+    const pre = el("pre", { class: "dbg-pre" });
+    pre.textContent = story;
+    const ds = el("span", { class: "ds" }, [el("span", { class: "tg", text: "DEBUG" }), pre]);
+    return el("div", { class: "ev debug" }, [
+      el("span", { class: "tc", text: label }),
       ds,
     ]);
   }
