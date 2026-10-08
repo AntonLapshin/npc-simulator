@@ -292,7 +292,13 @@ if [[ "$RUN_LAYA" == "1" ]]; then
       echo "  starting laya-serve in the background (device=${LAYA_DEVICE:-cpu} preload=${LAYA_PRELOAD:-1}) ..."
       export LAYA_DEVICE="${LAYA_DEVICE:-cpu}"
       export LAYA_PRELOAD="${LAYA_PRELOAD:-1}"
-      start_detached "$ROOT/logs/laya-serve.log" "$SERVE_BIN"
+      # Exp-7 item A1: pass --device explicitly when the binary supports it
+      # (some builds ignore the LAYA_DEVICE env var and sit on the GPU).
+      LAYA_ARGS=()
+      if "$SERVE_BIN" --help 2>/dev/null | grep -q -- "--device"; then
+        LAYA_ARGS+=(--device "${LAYA_DEVICE:-cpu}")
+      fi
+      start_detached "$ROOT/logs/laya-serve.log" "$SERVE_BIN" "${LAYA_ARGS[@]}"
       for _ in $(seq 1 30); do
         sleep 1
         if curl -s -o /dev/null -m 3 "$LAYA_URL/" 2>/dev/null; then break; fi

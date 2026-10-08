@@ -15,6 +15,7 @@ import {
   fuzzyMatchObjectId,
   hasDisplacementToken,
   hasSpeechToken,
+  hasStationaryWorkToken,
   isActorMentioned,
   normalizeQuotes,
   parseActionQuotes,
@@ -348,6 +349,15 @@ export function applyDeterministicGrounding(
   // didn't declare.)
   const isCanonicalSpeechTurn =
     !tokenMoves && quotedSegments(action.text).length > 0;
+  // Exp-7 item A7: stationary-work turn — "types furiously", "stares at
+  // the monitor", "sips coffee". No displacement token, but a
+  // fine-motor/observational verb the model reads as locomotion
+  // (exp-7 B7: 40 judge_vs_effects disagreements, every typing/staring
+  // turn dying on movement.no_position_change). The model's moved=true is
+  // ungrounded here — downgrade instead of demanding x/y for typing.
+  // A displacement token in the same text still wins (walk-then-type).
+  const isStationaryWorkTurn =
+    !tokenMoves && !isCanonicalSpeechTurn && hasStationaryWorkToken(action.text);
   let moves = tokenMoves || merged.moves;
   if (isCanonicalSpeechTurn && moves) {
     moves = false;
@@ -355,10 +365,16 @@ export function applyDeterministicGrounding(
       "moves=true from the merged verdict downgraded: action text is a canonical speech turn (quoted utterance, no displacement token) — the judge hallucinated locomotion",
     );
   }
+  if (isStationaryWorkTurn && moves) {
+    moves = false;
+    disagreements.push(
+      "moves=true from the merged verdict downgraded: action text is stationary work (typing/staring/sipping-class verb, no displacement token) — the model's moved=true is ungrounded, no x/y required",
+    );
+  }
   const speaks = merged.speaks || tokenSpeaks;
   // Skip the "kept" note for canonical speech turns — the downgrade above
   // already logged the disagreement.
-  if (merged.moves && !tokenMoves && !isCanonicalSpeechTurn) {
+  if (merged.moves && !tokenMoves && !isCanonicalSpeechTurn && !isStationaryWorkTurn) {
     // No longer dropped (F1) — but the token/merged disagreement is still
     // logged so the session disagreement rate stays computable.
     disagreements.push(
