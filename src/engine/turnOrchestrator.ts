@@ -45,12 +45,16 @@ import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { getCurrentActor } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import {
+  buildRetryDirective,
   countHardErrors,
   getHonestHistoryNote,
   isFallbackConsequence,
   isSpeechOnlyFailure,
+  pickBestAttempt,
+  recheckAcceptedProse,
   salvageFormatCollapse,
   trySalvageConsequence,
+  type AttemptRecord,
 } from "./turnSalvage.js";
 import { buildLivenessConsequence, consecutiveFallbacks } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
@@ -285,14 +289,11 @@ export async function resolveWithValidation(
   let feedback: string | undefined;
   let lastResult: ConsequenceResult | undefined;
   let lastSemantics: ActionSemantics | undefined;
-  // Item C10 (S7): every attempt's {result, semantics, hardErrorCount} —
-  // salvage runs from the attempt with the FEWEST hard errors, not the
-  // last, and the loop aborts early when hard errors grow twice in a row.
-  const attempts: Array<{
-    result: ConsequenceResult;
-    semantics: ActionSemantics | undefined;
-    hardErrors: number;
-  }> = [];
+  // Item C10 (S7) / Exp-2 item 7: every attempt's {result, semantics,
+  // hardErrorCount, attempt} — salvage runs from the attempt with the
+  // FEWEST hard errors (pickBestAttempt), not the last, and the loop
+  // aborts early when hard errors grow twice in a row.
+  const attempts: AttemptRecord[] = [];
 
   // Exp-6 item 3: total turn wall-time budget for the consequence phase. A
   // turn burned 47 minutes in Exp-6 with no circuit breaker — when the
@@ -470,7 +471,17 @@ export async function resolveWithValidation(
     }
     lastSemantics = semantics;
     const validation = validateConsequence(world, result, action, semantics);
-    if (validation.valid) {
+    // Exp-2 item 5 (S2): final accept gate. The tick-10/11 corrupt
+    // narratives passed validateConsequence outright (wrong-subject prose;
+    // stay-action teleport via self-declared effects.moved), so the
+    // accepted narrative gets one more prose re-check before it may become
+    // canonical history. A rejection is handled exactly like a validation
+    // failure: the attempt is recorded for best-attempt salvage and the
+    // loop retries. Unconditional (ARCHITECTURE P1 correctness fix).
+    const acceptGateErrors = validation.valid
+      ? recheckAcceptedProse(world, action, result)
+      : [];
+    if (validation.valid && acceptGateErrors.length === 0) {
       logger.log({
         module: "validator",
         event: "validation_passed",
@@ -482,6 +493,20 @@ export async function resolveWithValidation(
       });
       return result;
     }
+    // The errors driving the retry below: the validator's, or the final
+    // accept gate's when validation itself passed.
+    const errors = validation.valid ? acceptGateErrors : validation.errors;
+    if (validation.valid) {
+      logger.log({
+        module: "turn",
+        event: "accept_gate_rejected",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, result, attempt },
+        output: { errors: errors.map((e) => `[${e.code}] ${e.message}`) },
+      });
+    }
 
     logger.log({
       module: "validator",
@@ -492,14 +517,16 @@ export async function resolveWithValidation(
       input: { action, result, attempt, semanticsSource, semantics },
       // LogInput.validationErrors is string[] — log the messages; the
       // codes stay on the ValidationError objects in the trace output.
-      validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
+      validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
     });
 
-    // Item C10 (S7): record the failed attempt for best-attempt salvage.
+    // Item C10 (S7) / Exp-2 item 7: record the failed attempt for
+    // best-attempt salvage (fewest hard errors, ties → earliest).
     attempts.push({
       result,
-      semantics: semantics,
-      hardErrors: countHardErrors(validation.errors),
+      semantics,
+      hardErrors: countHardErrors(errors),
+      attempt,
     });
 
     // Deterministic movement repair: small LLMs often narrate movement
@@ -532,7 +559,7 @@ export async function resolveWithValidation(
         // F24: the in-loop repair also covers "make real progress" /
         // token-shuffle failures — try suggestMoveTarget first, then
         // clampMoveToCap below.
-        if (isMovementOnlyFailure(validation.errors) || isRealProgressFailure(validation.errors)) {
+        if (isMovementOnlyFailure(errors) || isRealProgressFailure(errors)) {
           const repaired: ConsequenceResult = structuredClone(result);
           const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
           if (existing) {
@@ -562,7 +589,12 @@ export async function resolveWithValidation(
             action,
             semantics,
           );
-          if (revalidation.valid) {
+          // Exp-2 item 5 (S2): the repaired payload gets the final accept
+          // gate too — a repaired movement must not launder corrupt prose.
+          if (
+            revalidation.valid &&
+            recheckAcceptedProse(world, action, repaired).length === 0
+          ) {
             logger.log({
               module: "validator",
               event: "validation_passed",
@@ -594,9 +626,9 @@ export async function resolveWithValidation(
       // revalidation; otherwise the turn retries/salvages normally.
       // F2: cap detection is code-based. F24: also fires for real-progress
       // failures (suggestMoveTarget above is tried first).
-      const capHit = validation.errors.some((e) => e.code === "movement.over_step_cap");
-      const progressHit = isRealProgressFailure(validation.errors);
-      if ((capHit || progressHit) && isClampableMovementFailure(validation.errors)) {
+      const capHit = errors.some((e) => e.code === "movement.over_step_cap");
+      const progressHit = isRealProgressFailure(errors);
+      if ((capHit || progressHit) && isClampableMovementFailure(errors)) {
         const claimed = result.actorPatches.find((p) => p.actorId === action.actorId);
         const clamped =
           claimed?.x !== undefined && claimed?.y !== undefined
@@ -624,7 +656,11 @@ export async function resolveWithValidation(
             action,
             semantics,
           );
-          if (revalidation.valid) {
+          // Exp-2 item 5 (S2): final accept gate on the clamped payload too.
+          if (
+            revalidation.valid &&
+            recheckAcceptedProse(world, action, clampedResult).length === 0
+          ) {
             logger.log({
               module: "validator",
               event: "validation_passed",
@@ -657,10 +693,10 @@ export async function resolveWithValidation(
     // cleanly; after retries are exhausted the salvage path below applies
     // the same split (keep patches, warn on speech).
     let proseHint: string | undefined;
-    if (isSpeechOnlyFailure(validation.errors)) {
+    if (isSpeechOnlyFailure(errors)) {
       proseHint =
         "The patches are valid — keep every actorPatch/objectPatch exactly as-is and fix ONLY the narrative prose (preserve the action's exact wording).";
-    } else if (validation.errors.some((e) => e.code === "actor.unknown_id" || e.code === "object.unknown_id")) {
+    } else if (errors.some((e) => e.code === "actor.unknown_id" || e.code === "object.unknown_id")) {
       proseHint =
         "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
     }
@@ -671,13 +707,13 @@ export async function resolveWithValidation(
     // F2: gated on error codes, not message prose.
     const objectAffordanceHint =
       affordanceNudge !== undefined &&
-      validation.errors.some((e) => OBJECT_PATCH_ERROR_CODES.has(e.code))
+      errors.some((e) => OBJECT_PATCH_ERROR_CODES.has(e.code))
         ? affordanceNudge
         : undefined;
 
     // Item C1: repeat the actual roster ids in the retry feedback when the
     // failure names unknown actors — retrieval beats recall for small models.
-    const rosterRepeat = validation.errors.some(
+    const rosterRepeat = errors.some(
       (e) => e.code === "narrative.unknown_actor" || e.code === "actor.unknown_id",
     )
       ? `\n${buildRosterRetryLine(world.actors.map((a) => a.id))}`
@@ -696,7 +732,11 @@ export async function resolveWithValidation(
         { logger, tick: world.tick, turnIndex: world.turnIndex, attempt },
       );
     }
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- [${e.code}] ${e.message}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
+    // Coordinator follow-up (Exp-2 M4): the retry feedback leads with a
+    // deterministic "most severe error first, one line" directive instead
+    // of the raw multi-gate dump (which pushed small models
+    // off-distribution); the targeted hints below stay as-is.
+    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
     // Item C10 (S7): abort the retry loop early when the hard-error count
     // grows two attempts in a row — retries amplify (attempt 4 is
@@ -734,7 +774,7 @@ export async function resolveWithValidation(
       actorId: action.actorId,
       input: { action, attempt: attempt + 1 },
       output: { feedback },
-      validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
+      validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
     });
   }
 
@@ -777,16 +817,17 @@ export async function resolveWithValidation(
   // an attempt — keep valid movement/patches, warn on speech nits.
   // Exp-4 item 8: the evaluation (eligible/ineligible + reason) is logged
   // inside trySalvageConsequence as `salvage_evaluated`.
-  // Item C10 (S7): salvage from the attempt with the FEWEST hard
-  // (non-speech-nit) errors, not the last — attempt 1 is systematically
-  // the best.
-  // Exp-2-E item (a): salvage candidate order. The deterministic default
-  // is the fewest-hard-errors attempt only (S7: attempt 1 is systematically
-  // the best); LAYA_SALVAGE_SELECT=1 (off by default) asks Laya which
-  // candidate narrative best matches the action and tries the ranked order,
-  // applying the first salvageable candidate. Any Laya failure degrades to
-  // the deterministic order. When the flag is off the path is unchanged:
-  // only the single fewest-hard-errors attempt is tried.
+  // Item C10 (S7) / Exp-2 item 7: salvage from the attempt with the FEWEST
+  // hard (non-speech-nit) errors, not the last — attempt 1 is
+  // systematically the best. pickBestAttempt is the pure, unit-tested
+  // selection (ties → earliest attempt); deterministicSalvageOrder is the
+  // same ordering over all candidates for the ladder.
+  // Exp-2-E item (a): salvage candidate order. LAYA_SALVAGE_SELECT=1 (off
+  // by default) asks Laya which candidate narrative best matches the action
+  // and tries the ranked order, applying the first salvageable candidate.
+  // Any Laya failure degrades to the deterministic order. When the flag is
+  // off the path is unchanged: only the single fewest-hard-errors attempt
+  // is tried.
   const salvageCandidates = attempts.map((a) => ({
     result: a.result,
     hardErrors: a.hardErrors,
@@ -821,6 +862,21 @@ export async function resolveWithValidation(
     salvageLaya !== undefined
       ? (salvageOrder ?? deterministicOrder)
       : deterministicOrder.slice(0, 1);
+  const bestAttempt = pickBestAttempt(attempts);
+  if (bestAttempt) {
+    logger.log({
+      module: "turn",
+      event: "salvage_best_attempt",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: {
+        pickedAttempt: bestAttempt.attempt,
+        hardErrors: attempts.map((a) => a.hardErrors),
+      },
+    });
+  }
   for (const i of salvageTryOrder) {
     const candidate = attempts[i];
     if (!candidate?.result || !candidate.semantics) continue;

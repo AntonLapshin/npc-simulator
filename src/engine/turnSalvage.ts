@@ -37,6 +37,20 @@ import {
   resolveDeterministicSemantics,
 } from "./deterministicSemantics.js";
 import { tryCloseTruncatedJson } from "../llm/json.js";
+import {
+  findSupplementObserverSubject,
+  recheckAcceptedProse,
+  stripAttributionPrefix,
+} from "./turnSalvageGates.js";
+
+// Re-exported so the retry loop (turnOrchestrator.ts) keeps a single
+// import path for the salvage-side helpers.
+export {
+  pickBestAttempt,
+  recheckAcceptedProse,
+  stripAttributionPrefix,
+} from "./turnSalvageGates.js";
+export type { AttemptRecord } from "./turnSalvageGates.js";
 
 /**
  * Exp-4 item 6 / F23: did this turn fall back? The explicit `fallback`
@@ -309,11 +323,30 @@ export function synthesizeActionNarrative(action: Action, name: string): string 
  * of a nonexistent person — as a thought. A thought mentioning anyone
  * outside the roster is replaced with a neutral line; clean thoughts pass
  * through untouched. Pure.
+ *
+ * Exp-2 item 7: `strippedActorIds` additionally names actors whose patches
+ * were just stripped as hallucinations (ids, matched case-insensitively as
+ * whole words) plus unknown person names harvested from the original
+ * narrative — thoughts naming them are false memories of actors that do
+ * not exist and must never survive salvage, even when the narrative prose
+ * itself passed the gates.
  */
-export function sanitizeThoughts(thoughts: string | undefined, world: World): string | undefined {
+export function sanitizeThoughts(
+  thoughts: string | undefined,
+  world: World,
+  strippedActorIds: readonly string[] = [],
+): string | undefined {
   if (thoughts === undefined) return undefined;
-  if (findUnknownPersonNames(world, thoughts).length === 0) return thoughts;
-  return "Staying focused on what's in front of me.";
+  if (findUnknownPersonNames(world, thoughts).length > 0) {
+    return "Staying focused on what's in front of me.";
+  }
+  for (const id of strippedActorIds) {
+    if (id.length < 2) continue;
+    if (new RegExp(`\\b${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(thoughts)) {
+      return "Staying focused on what's in front of me.";
+    }
+  }
+  return thoughts;
 }
 
 /** True when an object within interact radius matches the prop noun. */
@@ -411,6 +444,24 @@ export function trySalvageConsequence(
       objectPatches: result.objectPatches.filter((p) => objectIds.has(p.objectId)),
     };
   }
+  // Exp-2 item 7 (S1/S7): names that must never leak into salvaged
+  // thoughts — stripped (hallucinated) actor ids plus unknown person names
+  // harvested from the original narrative ("Liam" in "Liam greets…").
+  // Applied to every remaining patch below, whether or not the prose
+  // itself failed the gates.
+  const strippedActorNames = new Set<string>();
+  for (const p of strippedActor) strippedActorNames.add(p.actorId);
+  for (const n of findUnknownPersonNames(world, result.narrative)) strippedActorNames.add(n);
+  const strippedNameList = [...strippedActorNames];
+  if (strippedNameList.length > 0) {
+    candidate = {
+      ...candidate,
+      actorPatches: candidate.actorPatches.map((p) => ({
+        ...p,
+        thoughts: sanitizeThoughts(p.thoughts, world, strippedNameList),
+      })),
+    };
+  }
   // Item C5 (S2): re-run the prose gates on the stripped candidate —
   // patch-stripping must not launder hallucinated prose into canonical
   // history (tick 10 "Liam greets everyone", tick 12 "John takes a drink
@@ -418,12 +469,21 @@ export function trySalvageConsequence(
   // When the prose fails, rebuild it from the action text (ground truth)
   // and sanitize every thoughts patch — never implant thoughts naming
   // stripped actors (the tick-10 "Another day, same Liam." false memory).
+  //
+  // Exp-2 item 5: the observer gates run on the attribution-stripped
+  // narrative — a leading "Ana: " prefix hid the true grammatical subject
+  // ("Jeff introduces…") from the clause-leading-name match — plus the
+  // verb-agnostic supplement, which catches the "introduces" verb the
+  // validator's list misses.
+  const actorName = world.actors.find((a) => a.id === action.actorId)?.name ?? action.actorId;
+  const proseNarrative = stripAttributionPrefix(candidate.narrative, actorName, action.actorId);
   const proseErrors = [
     ...validateNarrativeActors(world, {
       narrative: candidate.narrative,
       reasoning: candidate.reasoning,
     }),
-    ...validateObserverSubject(world, { narrative: candidate.narrative }, action),
+    ...validateObserverSubject(world, { narrative: proseNarrative }, action),
+    ...findSupplementObserverSubject(world, proseNarrative, action),
   ];
   if (proseErrors.length > 0) {
     const actor = world.actors.find((a) => a.id === action.actorId);
@@ -456,7 +516,7 @@ export function trySalvageConsequence(
       narrative: cleanNarrative,
       actorPatches: candidate.actorPatches.map((p) => ({
         ...p,
-        thoughts: sanitizeThoughts(p.thoughts, world),
+        thoughts: sanitizeThoughts(p.thoughts, world, strippedNameList),
       })),
     };
   }
@@ -482,8 +542,24 @@ export function trySalvageConsequence(
     c: ConsequenceResult,
   ): { salvaged: ConsequenceResult; warnings: ValidationError[] } | null => {
     const revalidation = validateConsequence(world, c, action, semantics, cfg);
-    if (revalidation.valid) return { salvaged: c, warnings: [] };
-    if (isSpeechOnlyFailure(revalidation.errors)) {
+    if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
+      // Exp-2 item 5 (S2): final accept gate — the tick-10/11 narratives
+      // passed the full suite outright, so the accepted narrative gets one
+      // more prose re-check before it may become canonical history.
+      const gateErrors = recheckAcceptedProse(world, action, c);
+      if (gateErrors.length > 0) {
+        logger?.log({
+          module: "turn",
+          event: "salvage_accept_gate_rejected",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, candidate: c },
+          output: { errors: gateErrors.map((e) => `[${e.code}] ${e.message}`) },
+        });
+        return null;
+      }
+      if (revalidation.valid) return { salvaged: c, warnings: [] };
       return { salvaged: c, warnings: revalidation.errors };
     }
     return null;
@@ -529,7 +605,20 @@ export function trySalvageConsequence(
   const withProp = repairMissingPropStub(world, action, propBase);
   const tiered = withProp ?? propBase;
   const revalidation = validateConsequence(world, tiered, action, semantics, cfg);
-  if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
+  // Exp-2 item 5 (S2): same final accept gate as accept() above — the
+  // tier-2 downgrade must not launder a corrupt narrative either.
+  const tierGateErrors = recheckAcceptedProse(world, action, tiered);
+  if (tierGateErrors.length > 0) {
+    logger?.log({
+      module: "turn",
+      event: "salvage_accept_gate_rejected",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action, candidate: tiered },
+      output: { errors: tierGateErrors.map((e) => `[${e.code}] ${e.message}`) },
+    });
+  } else if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
     evaluate(
       true,
       withProp !== null
@@ -543,7 +632,7 @@ export function trySalvageConsequence(
       warnings: revalidation.valid ? [] : revalidation.errors,
     });
   }
-  if (isTier2Salvageable(revalidation.errors)) {
+  if (tierGateErrors.length === 0 && isTier2Salvageable(revalidation.errors)) {
     evaluate(
       true,
       "tier-2 degraded: clampable movement + thoughts kept, speech/object wording logged as warnings",
@@ -666,6 +755,9 @@ export function salvageFormatCollapse(
     thoughts = extractDonorString(raw, "thoughts", action.actorId);
     if (thoughts) break;
   }
+  // Exp-2 item 7: donor thoughts come from unvalidated model output — never
+  // implant a false memory of a nonexistent actor as a thought.
+  if (thoughts) thoughts = sanitizeThoughts(thoughts, world);
   const narrative = synthesizeSalvageNarrative(action, name);
   if (narrative.trim().length === 0) return null;
   const actorPatches: ConsequenceResult["actorPatches"] = [];
@@ -704,4 +796,32 @@ export function salvageFormatCollapse(
 /** Attach an honest-history note to a consequence result (used by the liveness floor). */
 export function setHonestHistoryNote(result: ConsequenceResult, note: string): void {
   honestHistoryNotes.set(result, note);
+}
+
+/**
+ * Coordinator follow-up (Exp-2 M4 retry divergence): deterministic
+ * "most severe error first, one line" retry-feedback directive. The Laya
+ * expansion worker evaluated a decision-model approach for "which error to
+ * fix first" and rejected it — the subtask is already encodable
+ * deterministically. Severity follows the existing salvage taxonomy:
+ * hard gates (physics, movement, contact, discipline, prose — never
+ * downgradable) first, then tier-2 wording misses (salvageable), then
+ * speech nits (downgradable noise) last; ties keep original order (stable
+ * sort). Replaces the raw multi-gate error dump in the retry feedback —
+ * the dump pushed small models off-distribution (attempt 4 systematically
+ * worse than attempt 1). Pure.
+ */
+function retryDirectiveSeverity(code: string): number {
+  if (SPEECH_ONLY_CODES.has(code)) return 2;
+  if (TIER2_CODES.has(code)) return 1;
+  return 0;
+}
+
+export function buildRetryDirective(errors: ValidationError[]): string {
+  if (errors.length === 0) {
+    return "Fix this first: [unknown] the previous output was rejected with no details — re-emit the consequence with valid patches and grounded prose.";
+  }
+  const [top] = [...errors].sort((a, b) => retryDirectiveSeverity(a.code) - retryDirectiveSeverity(b.code));
+  const oneLine = top!.message.replace(/\s+/g, " ").trim().slice(0, 220);
+  return `Fix this first: [${top!.code}] ${oneLine}`;
 }
