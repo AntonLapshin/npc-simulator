@@ -29,9 +29,15 @@ import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
 import {
   clampMoveToCap,
   isClampableMovementFailure,
+  stepTowardPoint,
   suggestMoveTarget,
 } from "./movementAssist.js";
-import { vetoAwayFromNarrativeTarget } from "./textHints.js";
+import {
+  narrativeApproachTarget,
+  narrativeTargetPosition,
+  vetoAwayFromNarrativeTarget,
+  type NamedDestination,
+} from "./textHints.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 import {
   hasSpeechToken,
@@ -149,6 +155,11 @@ function applySalvageMovementRepair(
   // Exp-3 item 7 (S5, A3): veto a repair that steps AWAY from the
   // narrative's named approach target — a wrong-direction repair is worse
   // than no repair (the turn falls through to fallback instead).
+  //
+  // Exp-4 item 5 (S2): re-steer instead of giving up — a capped step
+  // TOWARD the narrative's named target keeps the salvage honest AND
+  // moving. Null only when no legal toward-step exists.
+  let resteeredTarget: NamedDestination | null = null;
   if (suggestion) {
     const vetted = vetoAwayFromNarrativeTarget(
       world,
@@ -156,8 +167,24 @@ function applySalvageMovementRepair(
       candidate.narrative,
       suggestion,
     );
-    if (!vetted) return null;
-    suggestion = vetted;
+    if (!vetted) {
+      const tp = narrativeTargetPosition(
+        world,
+        action.actorId,
+        candidate.narrative,
+      );
+      const resteered =
+        tp !== null ? stepTowardPoint(world, action.actorId, tp.x, tp.y) : null;
+      if (!resteered) return null;
+      resteeredTarget = narrativeApproachTarget(
+        world,
+        action.actorId,
+        candidate.narrative,
+      );
+      suggestion = resteered;
+    } else {
+      suggestion = vetted;
+    }
   }
   if (!suggestion) return null;
   const repaired: ConsequenceResult = structuredClone(candidate);
@@ -174,11 +201,21 @@ function applySalvageMovementRepair(
   }
   if (repaired.effects) {
     repaired.effects.moved = true;
-    if (semantics.destinationActorId !== undefined) {
-      repaired.effects.destinationActorId = semantics.destinationActorId;
+    // Exp-4 item 5 (S2): a re-steered repair declares the narrative's
+    // target, matching what the prose claims.
+    const effDestActorId =
+      resteeredTarget?.kind === "actor"
+        ? resteeredTarget.id
+        : semantics.destinationActorId;
+    const effDestObjectId =
+      resteeredTarget?.kind === "object"
+        ? resteeredTarget.id
+        : semantics.destinationObjectId;
+    if (effDestActorId !== undefined) {
+      repaired.effects.destinationActorId = effDestActorId;
     }
-    if (semantics.destinationObjectId !== undefined) {
-      repaired.effects.destinationObjectId = semantics.destinationObjectId;
+    if (effDestObjectId !== undefined) {
+      repaired.effects.destinationObjectId = effDestObjectId;
     }
   }
   return repaired;

@@ -36,10 +36,18 @@ import {
   isClampableMovementFailure,
   isMovementOnlyFailure,
   isRealProgressFailure,
+  stepTowardPoint,
   suggestMoveTarget,
 } from "./movementAssist.js";
-import { vetoAwayFromNarrativeTarget } from "./textHints.js";
+import {
+  narrativeApproachTarget,
+  narrativeTargetPosition,
+  vetoAwayFromNarrativeTarget,
+  type NamedDestination,
+} from "./textHints.js";
 import { suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
+import { collapseDoubledPrefix } from "./validate/narrative.js";
+import { propStubForGroundingErrors } from "./validate/objects.js";
 import { buildObjectAffordanceNudge } from "./contextBuilder.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { buildRosterRetryLine, type TurnEngines } from "../llm/index.js";
@@ -472,6 +480,26 @@ export async function resolveWithValidation(
       }
     }
     lastSemantics = semantics;
+    // Exp-4 item 6 (S4): deterministic doubled-prefix repair — "Dana:
+    // Dana: …" collapses to "Dana: …" instead of tripping the voice gate
+    // every attempt. First-person prose is NOT auto-rewritten (too risky);
+    // it fails the voice gate with a targeted retry hint.
+    {
+      const actor = world.actors.find((a) => a.id === action.actorId);
+      const collapsed = collapseDoubledPrefix(result.narrative, actor?.name);
+      if (collapsed !== result.narrative) {
+        logger.log({
+          module: "validator",
+          event: "narrative_prefix_collapsed",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { narrative: result.narrative },
+          output: { narrative: collapsed },
+        });
+        result.narrative = collapsed;
+      }
+    }
     const validation = validateConsequence(world, result, action, semantics);
     // Exp-2 item 5 (S2): final accept gate. The tick-10/11 corrupt
     // narratives passed validateConsequence outright (wrong-subject prose;
@@ -551,6 +579,14 @@ export async function resolveWithValidation(
       // Exp-3 item 7 (S5, A3 — tick-28 repro): veto a repair that steps
       // AWAY from the narrative's named approach target. Veto-only: the
       // turn retries/salvages instead of applying corrupt movement.
+      //
+      // Exp-4 item 5 (S2): a veto without a constructive alternative froze
+      // the avatar for 27 of 30 exp-4 ticks (veto → retry → retry →
+      // fallback, zero displacement). When the veto fires, re-steer: take
+      // a capped step TOWARD the narrative's named target instead of
+      // retrying into the same wall. Only when no legal toward-step
+      // exists does the turn fall through to retry/salvage.
+      let resteeredTarget: NamedDestination | null = null;
       if (suggestion) {
         const vetted = vetoAwayFromNarrativeTarget(
           world,
@@ -559,27 +595,67 @@ export async function resolveWithValidation(
           suggestion,
         );
         if (!vetted) {
-          logger.log({
-            module: "validator",
-            event: "movement_repair_vetoed",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target — vetoed, turn retries instead`,
-          });
+          const tp = narrativeTargetPosition(
+            world,
+            action.actorId,
+            result.narrative,
+          );
+          const resteered =
+            tp !== null
+              ? stepTowardPoint(world, action.actorId, tp.x, tp.y)
+              : null;
+          if (resteered) {
+            resteeredTarget = narrativeApproachTarget(
+              world,
+              action.actorId,
+              result.narrative,
+            );
+            logger.log({
+              module: "validator",
+              event: "movement_repair_resteered",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target — re-steered to a capped step toward it (${resteered.x}, ${resteered.y}) instead of retrying`,
+            });
+            suggestion = resteered;
+          } else {
+            logger.log({
+              module: "validator",
+              event: "movement_repair_vetoed",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target and no legal toward-step exists — vetoed, turn retries instead`,
+            });
+            suggestion = null;
+          }
+        } else {
+          suggestion = vetted;
         }
-        suggestion = vetted;
       }
       if (suggestion) {
-        const dest = semantics.destinationActorId
-          ? ` strictly closer to ${semantics.destinationActorId}`
-          : semantics.destinationObjectId
-            ? ` strictly closer to ${semantics.destinationObjectId}`
+        // Exp-4 item 5 (S2): the hint names the effective destination —
+        // the narrative's target after a re-steer, the judged one
+        // otherwise — so retry feedback steers toward the same point the
+        // repair would take.
+        const hintDestActorId =
+          resteeredTarget?.kind === "actor"
+            ? resteeredTarget.id
+            : semantics.destinationActorId;
+        const hintDestObjectId =
+          resteeredTarget?.kind === "object"
+            ? resteeredTarget.id
+            : semantics.destinationObjectId;
+        const dest = hintDestActorId
+          ? ` strictly closer to ${hintDestActorId}`
+          : hintDestObjectId
+            ? ` strictly closer to ${hintDestObjectId}`
             : "";
         movementHint =
           `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
           ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
-          `Set effects.moved=true${semantics.destinationActorId ? ` and effects.destinationActorId="${semantics.destinationActorId}"` : ""}${semantics.destinationObjectId ? ` and effects.destinationObjectId="${semantics.destinationObjectId}"` : ""}.`;
+          `Set effects.moved=true${hintDestActorId ? ` and effects.destinationActorId="${hintDestActorId}"` : ""}${hintDestObjectId ? ` and effects.destinationObjectId="${hintDestObjectId}"` : ""}.`;
         // F24: the in-loop repair also covers "make real progress" /
         // token-shuffle failures — try suggestMoveTarget first, then
         // clampMoveToCap below.
@@ -598,11 +674,23 @@ export async function resolveWithValidation(
           }
           if (repaired.effects) {
             repaired.effects.moved = true;
-            if (semantics.destinationActorId !== undefined) {
-              repaired.effects.destinationActorId = semantics.destinationActorId;
+            // Exp-4 item 5 (S2): a re-steered repair steps toward the
+            // narrative's target, not the judged one — declare that
+            // destination so the revalidation checks coherence against
+            // what the narrative actually claims.
+            const effDestActorId =
+              resteeredTarget?.kind === "actor"
+                ? resteeredTarget.id
+                : semantics.destinationActorId;
+            const effDestObjectId =
+              resteeredTarget?.kind === "object"
+                ? resteeredTarget.id
+                : semantics.destinationObjectId;
+            if (effDestActorId !== undefined) {
+              repaired.effects.destinationActorId = effDestActorId;
             }
-            if (semantics.destinationObjectId !== undefined) {
-              repaired.effects.destinationObjectId = semantics.destinationObjectId;
+            if (effDestObjectId !== undefined) {
+              repaired.effects.destinationObjectId = effDestObjectId;
             }
           }
           // Re-validate against the same judged semantics (effects may now
@@ -706,6 +794,56 @@ export async function resolveWithValidation(
             return clampedResult;
           }
         }
+      }
+    }
+
+    // Exp-4 item 10 (S6): deterministic prop-stub repair. When the ONLY
+    // failures are prop-mappable grounding misses (the model narrated sip/
+    // type/open/pick-up/pour but forgot the prop patch), set the prop
+    // deterministically instead of burning retries teaching the
+    // convention. Accepts only when the stubbed payload passes the full
+    // gate; otherwise the turn retries/salvages normally.
+    const stubProp = propStubForGroundingErrors(
+      world,
+      action,
+      result.narrative,
+      errors,
+    );
+    if (stubProp !== null) {
+      const stubbed: ConsequenceResult = structuredClone(result);
+      const existing = stubbed.actorPatches.find(
+        (p) => p.actorId === action.actorId,
+      );
+      if (existing) {
+        existing.prop = stubProp;
+      } else {
+        stubbed.actorPatches.push({ actorId: action.actorId, prop: stubProp });
+      }
+      const revalidation = validateConsequence(world, stubbed, action, semantics);
+      // Exp-2 item 5 (S2): final accept gate on the stubbed payload too.
+      if (
+        revalidation.valid &&
+        recheckAcceptedProse(world, action, stubbed).length === 0
+      ) {
+        logger.log({
+          module: "validator",
+          event: "validation_passed",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, result: stubbed, attempt, semanticsSource, semantics },
+          output: { ...revalidation, repaired: true, propStub: stubProp },
+        });
+        logger.log({
+          module: "turn",
+          event: "object_prop_stub_applied",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, result, attempt },
+          output: { prop: stubProp, repaired: stubbed },
+        });
+        return stubbed;
       }
     }
 
