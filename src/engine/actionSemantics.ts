@@ -20,6 +20,7 @@ import {
   parseActionQuotes,
   resolveDeterministicSemantics,
 } from "./deterministicSemantics.js";
+import { quotedSegments } from "./validate/speech.js";
 
 export { parseActionQuotes };
 
@@ -334,9 +335,30 @@ export function applyDeterministicGrounding(
   const tokenSpeaks = hasSpeechToken(action.text);
   // F1: token evidence ASSERTS movement but never downgrades a true merged
   // verdict to false. `moves = tokenMoves || merged.moves`.
-  const moves = tokenMoves || merged.moves;
+  //
+  // Exp-4 item 3 (S1/M2): the one exception — a canonical speech turn. The
+  // judge hallucinates moves=true on pure-speech actions ("Say to Tanya
+  // '…'", exp-4 moves 7–8): no displacement token in the action text, but
+  // quoted utterances ARE the content. The consequence must then render
+  // movement the action never asked for, and the turn dies inventing walks
+  // ("Anton approaches Tanya's desk") while dropping the quote. When the
+  // action text carries quoted speech but no displacement token, the text
+  // is ground truth: speech-only, moves=false. (F1's OR-rule still
+  // protects the reverse dodge — a consequence narrating movement it
+  // didn't declare.)
+  const isCanonicalSpeechTurn =
+    !tokenMoves && quotedSegments(action.text).length > 0;
+  let moves = tokenMoves || merged.moves;
+  if (isCanonicalSpeechTurn && moves) {
+    moves = false;
+    disagreements.push(
+      "moves=true from the merged verdict downgraded: action text is a canonical speech turn (quoted utterance, no displacement token) — the judge hallucinated locomotion",
+    );
+  }
   const speaks = merged.speaks || tokenSpeaks;
-  if (merged.moves && !tokenMoves) {
+  // Skip the "kept" note for canonical speech turns — the downgrade above
+  // already logged the disagreement.
+  if (merged.moves && !tokenMoves && !isCanonicalSpeechTurn) {
     // No longer dropped (F1) — but the token/merged disagreement is still
     // logged so the session disagreement rate stays computable.
     disagreements.push(

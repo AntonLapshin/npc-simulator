@@ -17,6 +17,7 @@ import {
   getVisibleObjects,
   getActorById,
 } from "./perceptionHelpers.js";
+import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -444,6 +445,10 @@ function buildFailedIntentsLine(world: World, actorId: string, cfg: EngineConfig
   for (let i = world.history.length - 1; i >= 0; i--) {
     const text = world.history[i]!.text;
     if (!prefixes.some((p) => text.startsWith(p))) continue;
+    // Exp-4 item 7 (S3): liveness-floor entries bypass validation — they
+    // neither count as failures nor break the streak (matches
+    // consecutiveIntentFailures).
+    if (text.includes(LIVENESS_HISTORY_MARKER)) continue;
     if (!text.includes(NOT_DONE_SENTINEL)) break;
     const beforeSentinel = text.split(NOT_DONE_SENTINEL)[0] ?? "";
     const triedIdx = beforeSentinel.indexOf(" tried: ");
@@ -501,6 +506,13 @@ export function validateSelectionForActor(
 ): string | undefined {
   const leak = detectIdentityLeak(world, actorId, actionText);
   if (leak !== undefined) return leak;
+  // NOTE (Exp-4 item 6 / S4): no voice gate here. Proposal suggestions are
+  // first-person BY DESIGN ("Write every suggestion from the deciding
+  // actor's own point of view" — the "I" is unambiguous identity
+  // anchoring), so rejecting first-person picks would substitute every
+  // NPC turn to fallback. Voice discipline is enforced where it matters:
+  // the consequence narrative gate (validateNarrativeVoice) keeps
+  // first-person prose out of canonical history.
   const prior = findCoreRepeat(world, actorId, actionText);
   if (prior !== undefined) {
     return (
