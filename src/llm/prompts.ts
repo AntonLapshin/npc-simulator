@@ -64,9 +64,9 @@ export const FULLY_SPOKEN_ACTION_LINE =
   "(never paraphrase — paraphrase drops words and fails validation) and narrate only the non-speech " +
   "frame (posture, gesture, glance); the quote IS the speech, everything else is what the body does.";
 
-/** Legacy positive examples (Anton/Tanya roster) — kept byte-identical when no roster ids are given. */
-const LEGACY_GREETING_EXAMPLE =
-  "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}";
+/** Legacy positive examples (Anton/Tanya roster) — used when no roster ids are given. */
+const LEGACY_SPEECH_EXAMPLE =
+  "Example: {\"narrative\": \"Anton says, \\\"Morning, everyone — first day, be gentle.\\\", waving as he steps inside.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": [\"Morning, everyone — first day, be gentle.\"]}, \"reasoning\": \"Spoken greeting quoted verbatim.\"}";
 const LEGACY_MOVEMENT_EXAMPLE =
   "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"x\": 5, \"y\": 8, \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya.\"}";
 
@@ -74,15 +74,40 @@ const LEGACY_MOVEMENT_EXAMPLE =
  * Exp-2 item 1: positive examples built from real roster actors (see
  * rosterExampleActors). Byte-identical to the legacy strings for the
  * Anton/Tanya roster.
+ *
+ * Exp-6 item 1 (M1): the old example's narrative — "<Name> greets the
+ * office." — became a copy-paste attractor: 5/10 exp-6 user turns
+ * rendered as the bare generic greeting regardless of input (and it
+ * jumped actors). The speech example now carries a real quote, and the
+ * STUB-BAN line below names the attractor shape explicitly.
  */
 function greetingExample(a: { id: string; name: string }): string {
   return (
-    `Example: {"narrative": "${a.name} greets the office.", ` +
+    `Example: {"narrative": "${a.name} says, \\"Morning, everyone — first day, be gentle.\\", waving as he steps inside.", ` +
     `"actorPatches": [{"actorId": "${a.id}", "thoughts": "Hope they like me."}], ` +
-    `"objectPatches": [], "effects": {"moved": false, "spoke": true, "quotedSpeech": []}, ` +
-    `"reasoning": "Greeting is heard by everyone nearby."}`
+    `"objectPatches": [], "effects": {"moved": false, "spoke": true, "quotedSpeech": ["Morning, everyone — first day, be gentle."]}, ` +
+    `"reasoning": "Spoken greeting quoted verbatim."}`
   );
 }
+
+/**
+ * Exp-6 item 1 (M1): the greeting-stub attractor. Never emit a bare
+ * generic greeting as the narrative — "<Name> greets the office." is the
+ * example's placeholder shape, not a real action. When the action has
+ * speech, quote it verbatim (QUOTED-SPEECH COPY RULE); when it has no
+ * speech, narrate the concrete physical beat from the action text.
+ * Parameterized by the roster actor's name so non-Anton rosters never see
+ * an Anton-shaped example (exp-2 item 1).
+ */
+export function stubBanLine(name: string = "Anton"): string {
+  return (
+    "STUB-BAN: never substitute a bare generic greeting for the action's real content — " +
+    `BAD: "${name} greets the office." GOOD: quote the action's actual speech verbatim, or narrate ` +
+    "the concrete physical beat (the step, the reach, the glance) from the action text. " +
+    "A greeting with no quoted words and no physical detail fails validation."
+  );
+}
+export const STUB_BAN_LINE = stubBanLine();
 
 function movementExample(a: { id: string; name: string }, b: { id: string; name: string }): string {
   return (
@@ -154,7 +179,7 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
   // attempt 2 copied the movement example verbatim). Empty roster keeps
   // the legacy examples byte-identical.
   const [exA, exB] = rosterExampleActors(rosterIds);
-  const greetingLine = exA !== undefined ? greetingExample(exA) : LEGACY_GREETING_EXAMPLE;
+  const greetingLine = exA !== undefined ? greetingExample(exA) : LEGACY_SPEECH_EXAMPLE;
   const movementLine =
     exA !== undefined && exB !== undefined ? movementExample(exA, exB) : LEGACY_MOVEMENT_EXAMPLE;
   if (mode === "short") {
@@ -188,6 +213,10 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       "EMOTION: update the acting actor's emotion when the turn changes how they feel (relief when a greeting is returned, frustration when ignored) — one word, never a frozen copy of the old value.",
       // Exp-2 item 3: canonical form for fully-spoken actions.
       FULLY_SPOKEN_ACTION_LINE,
+      // Exp-6 item 1 (M1): the greeting-stub attractor.
+      // Roster-parameterized so non-Anton rosters never see an
+      // Anton-shaped example (exp-2 item 1).
+      stubBanLine(exA?.name),
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
       // Exp-6 item 8: never name the pipeline in prose.
       "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning.",
@@ -288,6 +317,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "If the action text contains quoted/uttered words, the narrative MUST contain",
     "those same words (same wording, not a different greeting or sentence).",
     "Never invent new quoted dialogue that is not in the action text.",
+    // Exp-6 item 1 (M1): the greeting-stub attractor.
+    stubBanLine(exA?.name),
     "Do NOT describe any other actor perceiving, hearing, speaking, moving,",
     "glancing, looking up, or reacting in any way — even passively. You may name",
     "another actor only as a stationary spatial landmark for the acting actor's own",
