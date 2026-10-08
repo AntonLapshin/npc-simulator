@@ -5,6 +5,7 @@ import type { Action, ActionSemantics, EngineConfig, ValidationError, World } fr
 import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity } from "./speech.js";
+import { isNonLocomotionSense } from "./movement.js";
 
 /**
  * Actors that perceived the acting actor's event (mirrors contextBuilder).
@@ -184,7 +185,13 @@ export function validateActingActorPresence(  normalized: { actorPatches: { acto
   action: Action,
   semantics: ActionSemantics,
 ): ValidationError[] {
-  const needsActor = semantics.moves || semantics.contactActorId !== undefined;
+  // Exp-2 item 8 (S4/S5): word-sense override — an interrogative question
+  // or a pure facing turn is not locomotion even when the judged semantics
+  // say moves=true, so it must not demand an acting-actor movement patch
+  // (a speech+facing turn with zero patches stays allowed, like any
+  // speech-only turn). Contact turns are unaffected.
+  const moves = semantics.moves && !isNonLocomotionSense(action.text);
+  const needsActor = moves || semantics.contactActorId !== undefined;
   if (!needsActor) return [];
   const hasActing = normalized.actorPatches.some((p) => p.actorId === action.actorId);
   if (!hasActing) {

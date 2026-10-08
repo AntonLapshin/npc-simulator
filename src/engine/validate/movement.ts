@@ -8,6 +8,61 @@ import { MAX_STEP_DISTANCE, requiredProgress } from "../movementAssist.js";
 export const CONTACT_RADIUS = 2.5;
 
 /**
+ * Exp-2 item 8 (S4/S5): word-sense checks before `moves=true` takes
+ * effect. Two action shapes carry locomotion/pose-looking words without
+ * moving the body:
+ * - Interrogative questions ("where should I sit?"): asking about an
+ *   action never performs it. A question never demands a sit/stand pose
+ *   patch and never relocates the body.
+ * - Facing constructions ("turn to/toward Dan", "face Ana"): rotating in
+ *   place with no step verb is not locomotion.
+ * Both exempt the turn from the locomotion/moves gates below (and
+ * `isInterrogativeQuestion` is exported for the sit-pose gate in
+ * validate/objects.ts). Pure functions; unconditional correctness fixes,
+ * not env-flagged.
+ */
+
+/**
+ * Unambiguous whole-body displacement verbs (true steps — proximity
+ * phrases like "toward" are deliberately excluded because facing uses
+ * them too). Mirrors the locomotion side of DISPLACEMENT_VERBS in
+ * deterministicSemantics.ts; kept local so the facing/question sense
+ * checks stay independent of that over-broad token heuristic (which
+ * counts "toward" as a displacement token).
+ */
+const STEP_VERBS_RE =
+  /\b(walk|walks|walked|walking|go|goes|went|going|move|moves|moved|moving|run|runs|ran|running|step|steps|stepped|stepping|approach|approaches|approached|approaching|enter|enters|entered|entering|leave|leaves|left|leaving|come|comes|came|coming|follow|follows|followed|following|join|joins|joined|head|heads|headed|heading|return|returns|returned|returning|advance|advances|advancing|proceed|proceeds|proceeding|shift|shifts|shifting|slide|slides|sliding|stroll|strolls|strolling|hurry|hurries|hurrying|rush|rushes|rushing|rushed|saunter|saunters|sauntering|drift|drifts|drifting|sidle|sidles|sidling|dance|dances|dancing|slip|slips|slipping|slipped|teleport|teleports|teleporting)\b/i;
+
+const INTERROGATIVE_RE = /\b(who|whom|whose|what|where|when|why|how|which)\b/i;
+
+/**
+ * True when the action text asks a question (a "?" plus an interrogative
+ * word) and carries no genuine movement clause. "Walk to Ana and ask
+ * where I should sit?" still moves — the walk clause wins; only pure
+ * questions ("Ana, where should I sit?") are exempt.
+ */
+export function isInterrogativeQuestion(text: string): boolean {
+  return text.includes("?") && INTERROGATIVE_RE.test(text) && !STEP_VERBS_RE.test(text);
+}
+
+const FACING_RE = /\bturn(?:s|ed|ing)?\s+(?:to|toward|towards)\b|\bface[sd]?\b/i;
+
+/**
+ * True for facing-only turns ("turn to Dan", "turns toward Ana", "face
+ * the room"): a facing construction with no step/movement verb. "Turn to
+ * Dan and walk over" keeps locomotion — the step verb wins. Word-boundary
+ * anchored so "return to Dan" (no boundary before "turn") never matches.
+ */
+export function isFacingOnlyTurn(text: string): boolean {
+  return FACING_RE.test(text) && !STEP_VERBS_RE.test(text);
+}
+
+/** Either non-locomotion word sense: interrogative question or pure facing. */
+export function isNonLocomotionSense(text: string): boolean {
+  return isInterrogativeQuestion(text) || isFacingOnlyTurn(text);
+}
+
+/**
  * Movement gate on judged semantics: semantics.moves === false never
  * requires x/y; semantics.moves === true requires a changed, reachable
  * position, and — when the judge resolved a destinationActorId — one
@@ -29,7 +84,13 @@ export function validateMovementIntent(
   const errors: ValidationError[] = [];
   const actor = world.actors.find((a) => a.id === action.actorId);
   if (!actor) return errors;
-  if (!semantics.moves) {
+  // Exp-2 item 8 (S4/S5): word-sense override. An interrogative question
+  // or a pure facing turn is not locomotion even when the judged semantics
+  // say moves=true (LLM word-sense miss — tick 9 "where I should sit?",
+  // tick 12 "turn to Dan"). The body stays in place: no position change
+  // is demanded, and any position change is the unexpected teleport below.
+  const moves = semantics.moves && !isNonLocomotionSense(action.text);
+  if (!moves) {
     if (semantics.contactActorId === undefined) {
       const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
       if (
@@ -165,8 +226,10 @@ export function validateDestinationObject(
   const actor = world.actors.find((a) => a.id === action.actorId);
   if (!actor) return errors;
   // Object destinations only constrain turns with locomotion; a pure
-  // "look at my desk" must not demand movement.
-  if (!semantics.moves) return errors;
+  // "look at my desk" must not demand movement. Exp-2 item 8 (S4/S5):
+  // same word-sense override as validateMovementIntent — a
+  // facing/question turn has no locomotion to ground against a landmark.
+  if (!semantics.moves || isNonLocomotionSense(action.text)) return errors;
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
   if (!patch || patch.x === undefined || patch.y === undefined) return errors; // movement gate reports this
   if (patch.x === actor.x && patch.y === actor.y) return errors;
