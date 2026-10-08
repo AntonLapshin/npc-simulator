@@ -32,7 +32,11 @@ function personaBlock(actor: Actor, budget: number): string {
     `Goal: ${actor.goal}`,
     `Feeling: ${actor.emotion || "neutral"}; doing: ${actor.state || "idle"}`,
   ];
-  if (actor.thoughts.trim()) bits.push(`Thinking: ${actor.thoughts}`);
+  // thoughts is optional at runtime (untyped callers such as
+  // scripts/diagnose-ai.ts build worlds without it, and the field is
+  // one-time/consumable) — a missing field must never crash the state
+  // build that feeds the Laya selection engine.
+  if (actor.thoughts?.trim()) bits.push(`Thinking: ${actor.thoughts}`);
   return truncateToChars(bits.join(" "), budget);
 }
 

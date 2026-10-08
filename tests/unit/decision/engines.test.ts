@@ -165,6 +165,26 @@ describe("LayaSelectionEngine", () => {
     expect(stubFallback.select).toHaveBeenCalledOnce();
     expect(result.action).toBe("Wave.");
   });
+
+  it("survives an actor without thoughts when Laya is down (diagnose-ai stub path, S9)", async () => {
+    // scripts/diagnose-ai.ts builds its stub world without `thoughts`
+    // (scripts/ are not typechecked); with LAYA_MODE/LAYA_SELECTION on,
+    // select() routes through buildIntentState BEFORE the fail-open
+    // try/catch, so a missing field used to crash the whole check with
+    // "Cannot read properties of undefined (reading 'trim')".
+    const client = new LayaClient({
+      baseUrl: "http://stub",
+      fetchImpl: (async () => {
+        throw new Error("down");
+      }) as typeof fetch,
+    });
+    const world = makeWorld();
+    delete (world.actors[0] as unknown as Record<string, unknown>)["thoughts"];
+    const engine = new LayaSelectionEngine({ client }, stubFallback);
+    const result = await engine.select(world, "a1", ["Stay where you are."]);
+    expect(stubFallback.select).toHaveBeenCalledOnce();
+    expect(result.action).toBe("Stay where you are.");
+  });
 });
 
 describe("LayaSemanticJudge", () => {

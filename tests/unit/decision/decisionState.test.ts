@@ -87,6 +87,21 @@ describe("buildIntentState", () => {
     expect(() => buildIntentState(makeWorld(), "nope")).toThrow();
   });
 
+  it("tolerates a missing thoughts field (untyped worlds, e.g. diagnose-ai stub)", () => {
+    // scripts/diagnose-ai.ts is not typechecked (scripts/ excluded from
+    // tsconfig) and builds its stub world without `thoughts`; the state
+    // build must not crash on it (S9: "Cannot read properties of undefined
+    // (reading 'trim')").
+    const world = makeWorld();
+    delete (world.actors[0] as unknown as Record<string, unknown>)["thoughts"];
+    let state = "";
+    expect(() => {
+      state = buildIntentState(world, "a1");
+    }).not.toThrow();
+    expect(state).toContain("Anton");
+    expect(state).not.toContain("Thinking:");
+  });
+
   it("holds the budget even with huge inputs", () => {
     const world = makeWorld();
     world.actors[0]!.persona = "x".repeat(10000);
