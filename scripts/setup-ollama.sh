@@ -164,8 +164,9 @@ EOF
   rm -f "$tmpfile"
 done
 # Keep weights resident between turns (a turn fires several LLM calls):
-# keep_alive is NOT a Modelfile parameter — set it on the server.
-echo "tip: export OLLAMA_KEEP_ALIVE=30m before starting 'ollama serve'"
+# keep_alive is NOT a Modelfile parameter — set OLLAMA_KEEP_ALIVE in .env
+# and start the server with `npm run ollama:serve` (scripts/start-ollama.sh).
+echo "tip: start the server with 'npm run ollama:serve' to apply the OLLAMA_* settings from .env"
 
 # 4. Smoke test --------------------------------------------------------------
 SMOKE_MODEL="${MODELS[0]}"
