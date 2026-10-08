@@ -489,19 +489,20 @@
         "id": "anton",
         "name": "Anton",
         "persona": "Anton is a 28-year-old backend developer joining the company today as a new coworker. He previously worked with Tanya at Sixt on booking APIs and joined this team on her referral. He is polite and a bit nervous on his first day: he wants to make a good first impression, learn everyone's names, find his desk, set up his laptop, and understand his first tasks. He drinks too much coffee when nervous and breaks the ice with awkward small jokes.",
-        "x": 7,
-        "y": 7,
-        "state": "at Tanya's chair",
-        "emotion": "nervous",
+        "x": 4,
+        "y": 12,
+        "state": "near the lounge sofa",
+        "emotion": "pleased",
         "goal": "Introduce himself to Tanya and Dana, find his desk, and settle in for his first day.",
-        "thoughts": "Hope Dana fits in well here.",
+        "thoughts": "This is it, my first day.",
         "memories": [
           "Anton just entered the office through the north door on his first day.",
           "Anton was referred by Tanya, who he worked with at Sixt.",
-          "Anton: Anton walks near the whiteboard, glancing at a diagram. Anton says \"Hi everyone, I am Anton, the new backend developer! Tanya, thanks again for referrin…",
-          "Anton: Anton walks over to Dana's desk, greeting Tanya along the way. Anton says \"Yes please! What are you working on right now, and what should I tackle first…",
-          "Anton: Anton opens the laptop. Anton says \"Hi Dana! I am Anton, the new backend hire. What are you hiring for right now?\"",
-          "Anton: Anton reaches for the coffee mug on his desk, taking a sip. Anton says \"Thanks everyone, excited to be here! I will set up my laptop now.\""
+          "Anton: Anton says hello to Tanya at her desk.",
+          "Anton: Anton asks if Tanya has her first task.",
+          "Anton: Anton shakes Tanya's hand firmly. Anton says \"Hi Dana, I'm Anton, the new backend dev. What roles are you hiring for right now?\"",
+          "Anton: Anton greets Tanya and asks about her first task. Anton says \"Could you show me that test plan when you have a moment? I'd love to understand the workfl…",
+          "Anton: Anton enters the office."
         ],
         "beliefs": [
           "This is the office where Anton will work as a backend developer.",
@@ -514,7 +515,7 @@
         ],
         "color": "#4f7cff",
         "pose": "stand",
-        "prop": "cup",
+        "prop": null,
         "look": {
           "skin": "#f2cba6",
           "skin2": "#e0b189",
@@ -535,16 +536,12 @@
         "state": "sitting at her desk and working on a laptop",
         "emotion": "focused",
         "goal": "Finish a small testing task before lunch and help Anton settle in.",
-        "thoughts": "He seems in his own world, sipping coffee like he owns the place.",
+        "thoughts": "Holding position and watching the room.",
         "memories": [
           "Tanya arrived at the office this morning.",
           "Tanya started working on her current test plan.",
           "Tanya referred Anton for the backend developer role.",
-          "Tanya: Tanya reviews her task list. Tanya says \"Need any help finding your way around or setting up your new workspace?\"",
-          "Tanya: Tanya glances at her laptop and Anton.",
-          "Tanya: Tanya glances at her task list, considering whether to adjust her priorities with the new developer's presence.",
-          "Tanya: Tanya holds position, taking in the room.",
-          "Tanya: Tanya asks Anton for help with setting up her computer."
+          "Tanya: Tanya holds position, taking in the room."
         ],
         "beliefs": [
           "Dana is a recruiter working on an urgent hire.",
@@ -573,21 +570,18 @@
         "id": "dana",
         "name": "Dana",
         "persona": "Dana is a tech recruiter in his late 20s. He is outgoing when hiring goes well but gets stressed and irritable when interrupted during urgent work. He did not know Anton before today — Anton was hired through Tanya's referral while Dana was busy closing another req. His current focus is screening candidates for an urgent backend role before the Friday deadline. He sits at his desk staring at his monitor, half-listening to the office while pushing through his pipeline.",
-        "x": 14,
-        "y": 11,
-        "state": "at Dana's chair",
-        "emotion": "stressed",
+        "x": 9,
+        "y": 7,
+        "state": "at Tanya's chair",
+        "emotion": "focused",
         "goal": "Finish screening candidates for the urgent backend req before the deadline.",
-        "thoughts": "Why so secretive about that project? Maybe I can peek when no one's looking...",
+        "thoughts": "Nice to put faces to names. Hope he's as awesome as his dev blog posts.",
         "memories": [
           "Dana has been screening candidates all morning for an urgent req.",
-          "Dana: Dana notices the new employee.",
-          "Dana: Dana: I glance up from my screen to look directly at Anton, acknowledging his greeting with a brief nod.",
-          "Dana: Dana looks at Anton's laptop.",
-          "Dana: Dana asks Tanya about her morning so far.",
-          "Dana: Dana asks Tanya about her first task.",
-          "Dana: Dana sits down and opens her laptop on the desk.",
-          "Dana: Dana pours coffee from the coffee maker into a dana_mug."
+          "Dana: Dana approaches Tanya.",
+          "Dana: Dana approaches the desk where Tanya sits, setting her laptop open to the project timeline. She asks, 'Can you let me know when you're done reviewing thi…",
+          "Dana: Dana sits at her desk with a laptop.",
+          "Dana: Tanya and Dana turn to look at Anton as he enters the office."
         ],
         "beliefs": [
           "The hiring deadline is close — screening must finish this week.",
@@ -600,7 +594,7 @@
         ],
         "color": "#9b6cf5",
         "pose": "sit",
-        "prop": "cup",
+        "prop": null,
         "look": {
           "skin": "#e2a97c",
           "skin2": "#c98f63",
@@ -617,7 +611,7 @@
     "turnIndex": 0,
     "history": [
       {
-        "text": "Anton: Anton walks near the whiteboard, glancing at a diagram. Anton says \"Hi everyone, I am Anton, the new backend developer! Tanya, thanks again for referring me!\" (partial) [partial: [salvage.quote_reinserted] narrative dropped the action's quoted speech; the exact quotes were reinserted deterministically from the action text]",
+        "text": "Anton: Anton says hello to Tanya at her desk.",
         "perceivers": [
           "anton",
           "tanya",
@@ -625,7 +619,7 @@
         ]
       },
       {
-        "text": "Tanya: Tanya reviews her task list. Tanya says \"Need any help finding your way around or setting up your new workspace?\" (partial) [partial: [salvage.quote_reinserted] narrative dropped the action's quoted speech; the exact quotes were reinserted deterministically from the action text]",
+        "text": "Tanya tried: I glance at my half-finished test plan to note where I left off before putting it aside to focus on greeting Anton more fully. (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -633,7 +627,7 @@
         ]
       },
       {
-        "text": "Dana: Dana notices the new employee.",
+        "text": "Dana: Dana approaches Tanya.",
         "perceivers": [
           "dana",
           "anton",
@@ -641,7 +635,7 @@
         ]
       },
       {
-        "text": "Anton: Anton walks over to Dana's desk, greeting Tanya along the way. Anton says \"Yes please! What are you working on right now, and what should I tackle first today?\"",
+        "text": "Anton: Anton asks if Tanya has her first task.",
         "perceivers": [
           "anton",
           "tanya",
@@ -649,7 +643,7 @@
         ]
       },
       {
-        "text": "Tanya: Tanya glances at her laptop and Anton.",
+        "text": "Tanya tried: I stand up from my chair, walking over to Anton's desk to introduce myself properly and ask if he needs any help getting settled. (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -657,7 +651,7 @@
         ]
       },
       {
-        "text": "Dana tried: I point to one of the open laptop tabs, gesturing for Anton to take a look at the pipeline and understand which parts are urgent. (not done)􏿿",
+        "text": "Dana tried: I stand up from my chair and walk over to Anton (not done)􏿿",
         "perceivers": [
           "dana",
           "anton",
@@ -665,7 +659,7 @@
         ]
       },
       {
-        "text": "Anton tried: Stay where I am next to Tanya and say \"Tanya, how is your morning going? Still working on that test plan?\" (not done)􏿿",
+        "text": "Anton tried: I stay where I am next to Tanya and say, 'How has your morning been? Still working on that test plan?' (not done)􏿿",
         "perceivers": [
           "anton",
           "tanya",
@@ -673,7 +667,7 @@
         ]
       },
       {
-        "text": "Tanya: Tanya glances at her task list, considering whether to adjust her priorities with the new developer's presence. (partial) [format-collapse salvage]",
+        "text": "Tanya tried: Tanya picks up her mug of tea and offers it to Anton, saying 'Would you like a sip of tea, it's a relaxing blend.' (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -681,7 +675,7 @@
         ]
       },
       {
-        "text": "Dana tried: I gesture to the open laptop on my desk, drawing Anton's attention to it. (not done)􏿿",
+        "text": "Dana: Dana approaches the desk where Tanya sits, setting her laptop open to the project timeline. She asks, 'Can you let me know when you're done reviewing this so we can discuss?'",
         "perceivers": [
           "dana",
           "anton",
@@ -689,79 +683,7 @@
         ]
       },
       {
-        "text": "Anton: Anton opens the laptop. Anton says \"Hi Dana! I am Anton, the new backend hire. What are you hiring for right now?\"",
-        "perceivers": [
-          "anton",
-          "tanya",
-          "dana"
-        ]
-      },
-      {
-        "text": "Tanya tried: I put down the laptop and walk over to Anton to introduce myself properly, offer to shake hands if he's comfortable with that. (not done)􏿿",
-        "perceivers": [
-          "tanya",
-          "anton",
-          "dana"
-        ]
-      },
-      {
-        "text": "Dana: Dana: I glance up from my screen to look directly at Anton, acknowledging his greeting with a brief nod.",
-        "perceivers": [
-          "dana",
-          "anton",
-          "tanya"
-        ]
-      },
-      {
-        "text": "Anton tried: Walk to the coffee machine in the north-west corner and pour myself a coffee to calm my nerves. (not done)􏿿",
-        "perceivers": [
-          "anton",
-          "tanya",
-          "dana"
-        ]
-      },
-      {
-        "text": "Tanya tried: I walk over to the open laptop on my desk, turning it to face Anton and showing him the test plan's current status. (not done)􏿿",
-        "perceivers": [
-          "tanya",
-          "anton",
-          "dana"
-        ]
-      },
-      {
-        "text": "Dana: Dana looks at Anton's laptop.",
-        "perceivers": [
-          "dana",
-          "anton",
-          "tanya"
-        ]
-      },
-      {
-        "text": "Anton tried: Walk to my new desk with the ANTON sign, sit down on my chair and open my laptop. (not done)􏿿",
-        "perceivers": [
-          "anton",
-          "tanya",
-          "dana"
-        ]
-      },
-      {
-        "text": "Tanya tried: walk over to the open laptop on her desk, turning it to face Anton and showing him the test plan's current status (not done)􏿿",
-        "perceivers": [
-          "tanya",
-          "anton",
-          "dana"
-        ]
-      },
-      {
-        "text": "Dana: Dana asks Tanya about her morning so far.",
-        "perceivers": [
-          "dana",
-          "anton",
-          "tanya"
-        ]
-      },
-      {
-        "text": "Anton tried: Say to Tanya \"I would love to take a look at your test plan if you have a minute to show me.\" (not done)􏿿",
+        "text": "Anton: Anton shakes Tanya's hand firmly. Anton says \"Hi Dana, I'm Anton, the new backend dev. What roles are you hiring for right now?\"",
         "perceivers": [
           "anton",
           "tanya",
@@ -777,7 +699,7 @@
         ]
       },
       {
-        "text": "Dana tried: glance at Tanya's laptop to assess her current workload and adjust my screening schedule accordingly (not done)􏿿",
+        "text": "Dana tried: I turn my laptop to face Anton, gesturing at the open project timeline for Tanya to review. (not done)􏿿",
         "perceivers": [
           "dana",
           "anton",
@@ -785,7 +707,7 @@
         ]
       },
       {
-        "text": "Anton tried: Take a step back from Tanya desk to give her space and say \"No rush at all, finish your test plan first.\" (not done)􏿿",
+        "text": "Anton tried: I walk over to the coffee machine in the north-west corner and pour myself a coffee. (not done)􏿿",
         "perceivers": [
           "anton",
           "tanya",
@@ -793,7 +715,7 @@
         ]
       },
       {
-        "text": "Tanya tried: walk over to the open laptop on her desk, turning it to face Anton and showing him the test plan's current status (not done)􏿿",
+        "text": "Tanya tried: I offer to help Anton set up his laptop and get settled at his new desk. (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -801,7 +723,7 @@
         ]
       },
       {
-        "text": "Dana: Dana asks Tanya about her first task.",
+        "text": "Dana: Dana sits at her desk with a laptop.",
         "perceivers": [
           "dana",
           "anton",
@@ -809,7 +731,7 @@
         ]
       },
       {
-        "text": "Anton tried: Walk over to the lounge sofa area to look around while Tanya finishes her work. (not done)􏿿",
+        "text": "Anton tried: I walk to my new desk with the ANTON sign, sit down on the chair, and open my laptop. (not done)􏿿",
         "perceivers": [
           "anton",
           "tanya",
@@ -817,7 +739,7 @@
         ]
       },
       {
-        "text": "Tanya: Tanya asks Anton for help with setting up her computer.",
+        "text": "Tanya tried: I stand up and walk to Anton's desk, extending my hand for a handshake in greeting. (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -825,7 +747,7 @@
         ]
       },
       {
-        "text": "Dana: Dana sits down and opens her laptop on the desk.",
+        "text": "Dana tried: I open my laptop and skim through the candidate profiles again, trying to prioritize the most promising applicants for the urgent backend role. (not done)􏿿",
         "perceivers": [
           "dana",
           "anton",
@@ -833,7 +755,7 @@
         ]
       },
       {
-        "text": "Anton: Anton reaches for the coffee mug on his desk, taking a sip. Anton says \"Thanks everyone, excited to be here! I will set up my laptop now.\"",
+        "text": "Anton: Anton greets Tanya and asks about her first task. Anton says \"Could you show me that test plan when you have a moment? I'd love to understand the workflow.\"",
         "perceivers": [
           "anton",
           "tanya",
@@ -841,7 +763,7 @@
         ]
       },
       {
-        "text": "Tanya tried: I walk over to Anton's desk, pick up his ANTON sign, and set it aside to avoid any confusion after he sets up his laptop. (not done)􏿿",
+        "text": "Tanya tried: I offer to help Anton set up his laptop and get settled at his new desk. (not done)􏿿",
         "perceivers": [
           "tanya",
           "anton",
@@ -849,7 +771,79 @@
         ]
       },
       {
-        "text": "Dana: Dana pours coffee from the coffee maker into a dana_mug.",
+        "text": "Dana tried: I open my laptop and skim through the candidate profiles again, trying to prioritize the most promising applicants for the urgent backend role. (not done)􏿿",
+        "perceivers": [
+          "dana",
+          "anton",
+          "tanya"
+        ]
+      },
+      {
+        "text": "Anton tried: I take half a step back to give Tanya some space and say, 'No rush at all, finish what you're doing first.' (not done)􏿿",
+        "perceivers": [
+          "anton",
+          "tanya",
+          "dana"
+        ]
+      },
+      {
+        "text": "Tanya: Tanya holds position, taking in the room. (partial) [liveness floor]",
+        "perceivers": [
+          "tanya",
+          "anton",
+          "dana"
+        ]
+      },
+      {
+        "text": "Dana: Tanya and Dana turn to look at Anton as he enters the office.",
+        "perceivers": [
+          "dana",
+          "anton",
+          "tanya"
+        ]
+      },
+      {
+        "text": "Anton: Anton enters the office.",
+        "perceivers": [
+          "anton",
+          "tanya",
+          "dana"
+        ]
+      },
+      {
+        "text": "Tanya tried: I slide my chair back slightly and extend a hand in greeting, saying 'Good morning Anton, great to see you!' as you approach. (not done)􏿿",
+        "perceivers": [
+          "tanya",
+          "anton",
+          "dana"
+        ]
+      },
+      {
+        "text": "Dana tried: glance at Anton's open laptop, then back to his face, genuinely curious and asking, 'So what do you think of your new setup so far, Anton?' (not done)􏿿",
+        "perceivers": [
+          "dana",
+          "anton",
+          "tanya"
+        ]
+      },
+      {
+        "text": "Anton tried: I smile and say, 'Thanks both for making me feel welcome. I'm going to get my laptop set up now.' (not done)􏿿",
+        "perceivers": [
+          "anton",
+          "tanya",
+          "dana"
+        ]
+      },
+      {
+        "text": "Tanya tried: I stand up from my chair, walk over to Anton with a smile, and ask, 'How's the setup of your new space going so far? Need any help?' (not done)􏿿",
+        "perceivers": [
+          "tanya",
+          "anton",
+          "dana"
+        ]
+      },
+      {
+        "text": "Dana tried: I glance at Anton's laptop screen to see what's open and think about how to best assist him (not done)􏿿",
         "perceivers": [
           "dana",
           "anton",
