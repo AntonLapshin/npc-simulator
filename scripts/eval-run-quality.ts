@@ -267,6 +267,33 @@ console.log(
   `  ${objPatchTurns}/${scoredTurns} non-fallback ticks carried objectPatches ` +
     `(${totalObjPatches} total; approx: last consequence per tick)`,
 );
+// Exp-5 item 12 (S6): TRUE applied measure — JSON diff of scene.objects
+// between the first and last turn_completed snapshots. The count above
+// is what the model PROPOSED; this is what actually changed in the world
+// (exp-5: 0 proposed-applied gap — 18 nonempty objectPatches proposed,
+// 0 applied, fifth run in a row).
+if (snapshots.length >= 2) {
+  const first = snapshots[0]!.world.scene.objects;
+  const last = snapshots[snapshots.length - 1]!.world.scene.objects;
+  const keyOf = (o: SceneObject) => o.id;
+  const firstById = new Map(first.map((o) => [keyOf(o), o]));
+  const lastById = new Map(last.map((o) => [keyOf(o), o]));
+  let changed = 0;
+  const changedIds: string[] = [];
+  for (const [id, o] of lastById) {
+    const before = firstById.get(id);
+    if (!before || JSON.stringify(before) !== JSON.stringify(o)) {
+      changed++;
+      if (changedIds.length < 5) changedIds.push(id);
+    }
+  }
+  console.log(
+    `  applied object changes: ${changed} object(s) differ between first and last applied snapshots` +
+      (changedIds.length > 0 ? ` (${changedIds.join(", ")}${changed > changedIds.length ? ", …" : ""})` : ""),
+  );
+} else {
+  console.log("  applied object changes: n/a (fewer than 2 turn_completed snapshots)");
+}
 // Prop states from the final save.
 for (const a of world.actors) {
   console.log(`  ${a.id}: prop=${a.prop ?? "null"} pose=${a.pose} emotion=${a.emotion} state=${JSON.stringify(a.state)}`);
@@ -280,9 +307,13 @@ console.log("\n== machinery events ==");
 const interesting = [
   "movement_repair_resteered",
   "movement_repair_vetoed",
+  "movement_downgraded_stationary",
+  "stationary_downgrade_rejected",
+  "repair_target_disagreement",
   "movement_repaired",
   "object_prop_stub_applied",
   "intent_banned",
+  "intent_cluster_banned",
   "liveness_applied",
   "retry_aborted",
   "salvage_best_attempt",

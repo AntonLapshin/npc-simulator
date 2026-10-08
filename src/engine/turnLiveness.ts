@@ -13,7 +13,7 @@ import type {
 import { NOT_DONE_SENTINEL } from "../types.js";
 import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { setHonestHistoryNote } from "./turnSalvage.js";
-import { suggestionCore } from "./contextBuilder.js";
+import { suggestionClusterNouns, suggestionCore } from "./contextBuilder.js";
 
 /**
  * Exp-5 item 6: consecutive own-turn fallback streak for an actor. Counts
@@ -88,6 +88,53 @@ export function consecutiveIntentFailures(
     const notDone = " (not done)";
     if (actionText.endsWith(notDone)) actionText = actionText.slice(0, -notDone.length);
     if (suggestionCore(world, actionText, actorId) === intentKey) streak++;
+  }
+  return streak;
+}
+
+/**
+ * Exp-5 item 9 (S8, ticks 13/19/22 repro): consecutive own-turn fallback
+ * streak for an intent CLUSTER (shared concrete object-kind nouns from
+ * suggestionClusterNouns). Same walk as consecutiveIntentFailures, but a
+ * history entry counts when its noun set INTERSECTS the candidate's — so
+ * "offer to help Anton set up his laptop" ({laptop}) and "glance at the
+ * test plan on my laptop" ({laptop}) ban together after the threshold,
+ * instead of the substitute dodging on a different verb|noun key.
+ * Non-intersecting fallbacks are skipped (not breaking), the first
+ * applied own entry breaks the streak, and liveness-floor entries are
+ * skipped without breaking (same rationale as the exact-key streak).
+ * Empty noun sets never ban. Pure; history-derived like the exact-key
+ * version, so it survives save/load.
+ */
+export function consecutiveClusterFailures(
+  world: World,
+  actorId: string,
+  clusterNouns: readonly string[],
+): number {
+  if (clusterNouns.length === 0) return 0;
+  const actor = world.actors.find((a) => a.id === actorId);
+  const prefixes =
+    actor !== undefined
+      ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+      : [`${actorId}:`, `${actorId} tried:`];
+  let streak = 0;
+  for (let i = world.history.length - 1; i >= 0; i--) {
+    const entry = world.history[i]!;
+    const text = entry.text;
+    if (!prefixes.some((p) => text.startsWith(p))) continue;
+    // Liveness-floor entries bypass validation — they neither count as
+    // failures nor break the streak (matches consecutiveIntentFailures).
+    if (text.includes(LIVENESS_HISTORY_MARKER)) continue;
+    if (!text.includes(NOT_DONE_SENTINEL)) break;
+    // Fallback format: "<name> tried: <action text> (not done)<sentinel>".
+    const beforeSentinel = text.split(NOT_DONE_SENTINEL)[0] ?? "";
+    const triedIdx = beforeSentinel.indexOf(" tried: ");
+    if (triedIdx < 0) continue;
+    let actionText = beforeSentinel.slice(triedIdx + " tried: ".length);
+    const notDone = " (not done)";
+    if (actionText.endsWith(notDone)) actionText = actionText.slice(0, -notDone.length);
+    const nouns = suggestionClusterNouns(actionText);
+    if (nouns.some((n) => clusterNouns.includes(n))) streak++;
   }
   return streak;
 }

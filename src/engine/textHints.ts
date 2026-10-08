@@ -43,6 +43,62 @@ export function vetoAwayFromNarrativeTarget(
 }
 
 /**
+ * Exp-5 item 6 (S2): veto a repair step that moves AWAY from a given
+ * target point. Returns the suggestion unchanged when it does not step
+ * away, null when vetoed. Pure. (The narrative-target wrapper above is
+ * kept for the exp-4 tests; the repair paths now vet against the
+ * effective target from effectiveRepairTarget below.)
+ */
+export function vetoAwayFromTarget(
+  world: World,
+  actingActorId: string,
+  suggestion: { x: number; y: number },
+  target: { x: number; y: number },
+): { x: number; y: number } | null {
+  const actor = world.actors.find((a) => a.id === actingActorId);
+  if (!actor) return suggestion;
+  const oldD = Math.hypot(actor.x - target.x, actor.y - target.y);
+  const newD = Math.hypot(suggestion.x - target.x, suggestion.y - target.y);
+  if (newD > oldD + 1e-9) return null;
+  return suggestion;
+}
+
+/**
+ * Exp-5 item 6 (S2, tick-15 repro): the effective movement target for the
+ * repair veto and re-steer. The judge's resolved destination wins over
+ * the narrative's named target — the movement gates enforce the judge's
+ * semantics, and the narrative is untrusted model output (tick 15: the
+ * judge correctly resolved anton_desk while the corrupt narrative said
+ * "Tanya's desk", so the narrative-target veto killed a good repair).
+ * When the judge is silent or agrees with the narrative, this is exactly
+ * the narrative target, preserving the tick-28 case the veto was built
+ * for. Pure.
+ */
+export function effectiveRepairTarget(
+  world: World,
+  actingActorId: string,
+  narrative: string,
+  semantics: { destinationActorId?: string; destinationObjectId?: string } | undefined,
+): { x: number; y: number; kind: "actor" | "object"; id: string } | null {
+  if (semantics?.destinationActorId !== undefined) {
+    const t = world.actors.find((a) => a.id === semantics.destinationActorId);
+    if (t !== undefined && t.id !== actingActorId) {
+      return { x: t.x, y: t.y, kind: "actor", id: t.id };
+    }
+  }
+  if (semantics?.destinationObjectId !== undefined) {
+    const o = world.scene.objects.find((o) => o.id === semantics.destinationObjectId);
+    if (o !== undefined) {
+      return { x: o.x + o.w / 2, y: o.y + o.h / 2, kind: "object", id: o.id };
+    }
+  }
+  const nt = narrativeApproachTarget(world, actingActorId, narrative);
+  if (nt === null) return null;
+  const tp = narrativeTargetPosition(world, actingActorId, narrative);
+  if (tp === null) return null;
+  return { x: tp.x, y: tp.y, kind: nt.kind, id: nt.id };
+}
+/**
  * Exp-4 item 5 (S2): the narrative's named approach target as a scene
  * position, or null when the narrative names none / it can't be resolved.
  * Shared by the veto above and the constructive re-steer (a vetoed repair
