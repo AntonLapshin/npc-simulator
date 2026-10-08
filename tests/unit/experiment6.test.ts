@@ -504,11 +504,28 @@ describe("exp6-6 throughput engineering", () => {
       "consequence",
     );
     expect(readMaxTokens(consequence)).toBe(2200);
+    // Exp-6 item 5: the global budget is doubled for thinking-class models
+    // (default qwen3:14b) unless thinking is disabled — explicit per-task
+    // caps always win over the multiplier.
     const semantic = createProviderForTask(
       { LLM_BACKEND: "ollama", LLM_MAX_TOKENS: "1500" } as NodeJS.ProcessEnv,
       "semantic",
     );
-    expect(readMaxTokens(semantic)).toBe(1500);
+    expect(readMaxTokens(semantic)).toBe(3000);
+    const semanticNoThink = createProviderForTask(
+      { LLM_BACKEND: "ollama", LLM_MAX_TOKENS: "1500", LLM_THINK: "0" } as NodeJS.ProcessEnv,
+      "semantic",
+    );
+    expect(readMaxTokens(semanticNoThink)).toBe(1500);
+    const semanticExplicit = createProviderForTask(
+      {
+        LLM_BACKEND: "ollama",
+        LLM_MAX_TOKENS: "1500",
+        LLM_MAX_TOKENS_SEMANTIC: "400",
+      } as NodeJS.ProcessEnv,
+      "semantic",
+    );
+    expect(readMaxTokens(semanticExplicit)).toBe(400);
   });
 });
 

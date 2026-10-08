@@ -271,6 +271,20 @@ function nearBrewMachine(world: World, x: number, y: number): boolean {
 }
 
 /**
+ * Exp-6 item 12 (S6): true when a laptop-like object is within interact
+ * radius of (x, y). The typing→laptop prop stub must not invent a laptop
+ * out of thin air — without a nearby machine the turn is genuinely
+ * unrenderable and the stub stays out.
+ */
+function nearLaptop(world: World, x: number, y: number): boolean {
+  return world.scene.objects.some(
+    (o) =>
+      /\blaptop\b/i.test(`${o.id} ${o.name}`) &&
+      Math.hypot(x - (o.x + o.w / 2), y - (o.y + o.h / 2)) <= OBJECT_INTERACT_RADIUS,
+  );
+}
+
+/**
  * Exp-4 item 10 (S6): deterministic prop-stub repair. Small models narrate
  * object verbs (sip, type, open the laptop, pick up the mug) without the
  * prop patch the grounding gate demands — and retry feedback alone rarely
@@ -319,7 +333,10 @@ export function propStubForGroundingErrors(
     if (laptopSignal && !cupSignal) return null;
     return nearBrewMachine(world, actor.x, actor.y) ? "cup" : null;
   }
-  if (laptopSignal && !cupSignal) return "laptop";
+  // Exp-6 item 12 (S6): typing→laptop only when a laptop object is
+  // actually nearby — never invent one out of thin air.
+  if (laptopSignal && !cupSignal)
+    return nearLaptop(world, actor.x, actor.y) ? "laptop" : null;
   if (cupSignal && !laptopSignal) return "cup";
   return null;
 }

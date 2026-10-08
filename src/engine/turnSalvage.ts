@@ -64,6 +64,7 @@ export {
   isTier2Salvageable,
   pickBestAttempt,
   recheckAcceptedProse,
+  shouldAbortRetries,
   stripAttributionPrefix,
 } from "./turnSalvageGates.js";
 export type { AttemptRecord } from "./turnSalvageGates.js";
