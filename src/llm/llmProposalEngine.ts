@@ -18,6 +18,8 @@ import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, PROPOSAL_OUTPUT_SCHEMA, proposalSuffix } from "./prompts.js";
 import { completeJson } from "./complete.js";
+import { CONTACT_RADIUS, distanceToRect } from "../engine/validate/movement.js";
+import { OBJECT_INTERACT_RADIUS } from "../engine/validate/objects.js";
 
 export const FALLBACK_PROPOSAL: ProposalResult = {
   suggestions: ["Stay where you are.", "Look around.", "Do nothing."],
@@ -111,6 +113,116 @@ function normalizeSuggestions(suggestions: unknown): string[] {
     out.push(cleaned);
   }
   return out;
+}
+
+/**
+ * Exp-6 item 4 (M5/S6): renderability-matched proposals. The proposal
+ * prompt already says "only suggest renderable actions", but the
+ * consequence tier still receives contact/use verbs it cannot ground
+ * (handshake ×5, papers-shuffle ×3, chair-push all died in validation).
+ * This deterministic post-filter drops suggestions that are
+ * unrenderable BY CONSTRUCTION, before selection can pick them:
+ * - contact verbs (shake/hug/high-five/hand-over/give/pass) naming a
+ *   roster actor farther than CONTACT_RADIUS (2.5) cells away — the
+ *   validator's validateContactAdjacency would fail them;
+ * - pour/brew/fill verbs with no brew-machine noun in the text AND no
+ *   machine within OBJECT_INTERACT_RADIUS (4) cells — telekinetic pours;
+ * - sit verbs with no chair/sofa within seating range (1.5 edge cells).
+ * Conservative by design: anything ambiguous is kept (fail-open). When
+ * filtering would leave fewer than 2 suggestions, the unfiltered list is
+ * returned — a turn with options beats a perfectly-filtered empty set.
+ * Pure.
+ */
+export function filterUnrenderableSuggestions(
+  world: World,
+  actorId: string,
+  suggestions: string[],
+): { kept: string[]; dropped: Array<{ suggestion: string; reason: string }> } {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const dropped: Array<{ suggestion: string; reason: string }> = [];
+  const kept: string[] = [];
+  // Bare "coffee" is the beverage, not a machine. A pour is machine-grounded
+  // only when the text names a machine ("coffee machine", "espresso", ...)
+  // — exp-6 tick-28: "I pour coffee from the cup into my mouth" hallucinated
+  // a pour with no machine in the text and none nearby.
+  const machineRe =
+    /\b(coffee\s+machine|machine|coffeemaker|espresso|kettle|brewer|dispenser|cooler)\b/i;
+  const seatingRe = /chair|sofa/i;
+  const contactRe =
+    /\b(handshake|shakes?(\s+hands?)?|shook|shaking|shaken|hugs?|hugged|high[\s-]?five|fist[\s-]?bump|hands?\s+(it\s+)?over|gives?|passes?|handing)\b/i;
+  const pourRe = /\b(brews?|brewing|pours?|pouring|fills?(?:ing)?|makes?\s+coffee)\b/i;
+  const sitRe = /\b(sits?|sitting|sat|takes?\s+a\s+seat)\b/i;
+
+  const mentionsActor = (text: string): { id: string; x: number; y: number } | undefined => {
+    const lower = text.toLowerCase();
+    for (const a of world.actors) {
+      if (a.id === actorId) continue;
+      const first = a.name.split(/[^a-z0-9]+/i)[0]?.toLowerCase() ?? "";
+      if (
+        (a.id.length >= 2 && lower.includes(a.id.toLowerCase())) ||
+        (a.name.length >= 2 && lower.includes(a.name.toLowerCase())) ||
+        (first.length >= 3 && new RegExp(`\\b${first}\\b`).test(lower))
+      ) {
+        return { id: a.id, x: a.x, y: a.y };
+      }
+    }
+    return undefined;
+  };
+
+  for (const s of suggestions) {
+    if (actor === undefined) {
+      kept.push(s);
+      continue;
+    }
+    const other = mentionsActor(s);
+    if (contactRe.test(s) && other !== undefined) {
+      const d = Math.hypot(actor.x - other.x, actor.y - other.y);
+      if (d > CONTACT_RADIUS) {
+        dropped.push({
+          suggestion: s,
+          reason: `contact verb with ${other.id} ${d.toFixed(1)} cells away (contact needs ≤ ${CONTACT_RADIUS}) — unrenderable`,
+        });
+        continue;
+      }
+    }
+    if (pourRe.test(s)) {
+      const namesMachine = machineRe.test(s);
+      const nearMachine = world.scene.objects.some(
+        (o) =>
+          /coffee|machine|kettle|brewer|espresso|cooler|dispenser/i.test(`${o.id} ${o.name}`) &&
+          Math.hypot(actor.x - (o.x + o.w / 2), actor.y - (o.y + o.h / 2)) <=
+            OBJECT_INTERACT_RADIUS,
+      );
+      if (!namesMachine && !nearMachine) {
+        dropped.push({
+          suggestion: s,
+          reason:
+            "pour/brew verb with no brew machine named and none within 4 cells — unrenderable",
+        });
+        continue;
+      }
+    }
+    if (sitRe.test(s)) {
+      const nearSeating = world.scene.objects.some(
+        (o) =>
+          seatingRe.test(`${o.id} ${o.name}`) &&
+          distanceToRect(actor.x, actor.y, o) <= 1.5,
+      );
+      if (!nearSeating) {
+        dropped.push({
+          suggestion: s,
+          reason: "sit verb with no chair/sofa within 1.5 cells — unrenderable",
+        });
+        continue;
+      }
+    }
+    kept.push(s);
+  }
+  // Fail-open: never return fewer than 2 options from filtering alone.
+  if (kept.length < 2 && suggestions.length >= 2) {
+    return { kept: suggestions, dropped: [] };
+  }
+  return { kept, dropped };
 }
 
 export class LLMProposalEngine implements ProposalEngine {
@@ -241,6 +353,23 @@ export class LLMProposalEngine implements ProposalEngine {
     // truncate to the requested max so callers always get a clean set.
     const max = this.options.maxSuggestions ?? 10;
     const cleaned = normalizeSuggestions(result.value.suggestions).slice(0, Math.max(1, max));
-    return { ...result.value, suggestions: cleaned };
+    // Exp-6 item 4: drop unrenderable-by-construction suggestions before
+    // selection can pick them (fail-open: never fewer than 2 options).
+    const filtered = filterUnrenderableSuggestions(world, actorId, cleaned);
+    if (filtered.dropped.length > 0) {
+      this.logger.log({
+        module: "proposal",
+        event: "proposal_filtered",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId,
+        input: { suggestions: cleaned },
+        output: {
+          kept: filtered.kept,
+          dropped: filtered.dropped,
+        },
+      });
+    }
+    return { ...result.value, suggestions: filtered.kept };
   }
 }

@@ -91,6 +91,44 @@ Pulled models:
 
 Subset install: `npm run setup:ollama -- --only qwen3` or `-- --only stheno` or `-- --only llama3.2`.
 
+Disk cost: the full pull is ~16 GB in `~/.ollama/models` (9.3 + 4.9 + 2.2).
+`setup:ollama` also builds tuned variants (`npc-qwen3-14b`, `npc-stheno-8b`)
+via Modelfile — full GPU offload (`num_gpu 999`), right-sized context
+(`num_ctx 4096`), larger prefill batches. Keep weights resident between
+turns with `OLLAMA_KEEP_ALIVE=30m` on the server (`keep_alive` is not a
+Modelfile parameter). The
+variants share the base weights, so they cost no extra disk.
+
+### Local-model throughput (RTX 5070 Ti / 16 GB VRAM)
+
+Exp-6 ran ~6 min/turn on `qwen3:14b` (26× slower than the 8B runs). The
+levers, in order of impact:
+
+1. **`LLM_THINK=0`** — disables chain-of-thought on thinking models
+   (Ollama honors `think: false`). Exp-6 burned a median 772 completion
+   tokens per call for ~100-token JSON payloads; reasoning is pure
+   overhead for schema-emitting calls. Biggest single win (~3–5×).
+2. **Full GPU offload** — `OLLAMA_MODEL=npc-qwen3-14b` (the tuned
+   variant), or verify the stock model with `ollama ps` (PROCESSOR must
+   read `100% GPU`). Exp-6 sat at ~50% offload with llama-server at
+   ~355% CPU. Unload competing models first (`ollama stop <model>`),
+   keep `OLLAMA_NUM_PARALLEL=1`, and consider `OLLAMA_FLASH_ATTENTION=1`
+   before `ollama serve`.
+3. **Right-sized context** — engine prompts measure ~2k real tokens
+   (Ollama tokenizer), so `num_ctx 4096` (the default) is already
+   correct; larger only burns VRAM on KV cache.
+4. **Model-aware timeouts** — `npm run diagnose:ai:live` times the
+   configured model, records the median to
+   `~/.cache/npc-simulator/llm-latency.json`, and the engine derives the
+   default `LLM_TIMEOUT_MS` from it (4× median, 60 s…600 s). An explicit
+   `LLM_TIMEOUT_MS` always wins. Calls slower than half the timeout are
+   logged as `<module>_slow_call` warnings.
+
+Note on GPU utilization: 20–30% SM occupancy during generation is normal
+for batch=1 decoding (memory-bandwidth-bound, not compute-bound) — the
+metric that matters is tokens/sec and 100% GPU offload, not the
+utilization percentage.
+
 Optional legacy local model:
 
 ```bash

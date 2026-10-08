@@ -216,6 +216,22 @@ function cleanMemory(m: string): { text: string; truncated: boolean } {
   }
   return { text, truncated };
 }
+/**
+ * Exp-6 item 13 (S10): corrupt-canonical memory defects. The salience
+ * gate decides WHAT gets banked; these patterns show what it let through
+ * (exp-6: 5x "greets the office" stubs, the "stranger" line, and the
+ * phantom coffee stain all became permanent memories). A memory
+ * containing them is precise-looking but fiction.
+ */
+function corruptCanonicalDefects(m: string): string[] {
+  const out: string[] = [];
+  if (/\bgreets the office\b/i.test(m)) out.push("stub-phrase");
+  if (/\b(a|the|some)\s+stranger\b|\bunknown\s+(person|man|woman|coworker|colleague)\b/i.test(m))
+    out.push("alienation-label");
+  if (/\b(coffee stain|spill|broke|tore).{0,40}\b(anton|tanya|dana)\b/i.test(m) && /\b(cup|mug)\b/i.test(m))
+    out.push("phantom-contact");
+  return out;
+}
 for (const a of world.actors) {
   const mems = a.memories ?? [];
   if (mems.length === 0) {
@@ -227,10 +243,11 @@ for (const a of world.actors) {
   for (const m of mems) {
     const { text, truncated } = cleanMemory(m);
     const v = detectVoiceViolation(text, a.name);
-    if (v.length > 0 || truncated) {
+    const corrupt = corruptCanonicalDefects(m);
+    if (v.length > 0 || truncated || corrupt.length > 0) {
       defects++;
       if (examples.length < 2) {
-        const kinds = [...v.map((x) => x.code), ...(truncated ? ["truncated"] : [])];
+        const kinds = [...v.map((x) => x.code), ...(truncated ? ["truncated"] : []), ...corrupt];
         examples.push(`      - [${kinds.join(",")}] ${m.slice(0, 90)}`);
       }
     }
@@ -240,6 +257,17 @@ for (const a of world.actors) {
     `  ${a.id}: ${(100 * precision).toFixed(0)}% clean (${mems.length - defects}/${mems.length})`,
   );
   for (const ex of examples) console.log(ex);
+}
+// Exp-6 item 13 (S10): bind the salience gate to the measurement —
+// corrupt memories banked WHILE the gate was active are gate misses.
+{
+  const salience = byEvent("salience_scored").length;
+  const triage = byEvent("triage_applied").length;
+  const banked = byEvent("memory_banked").length;
+  console.log(
+    `  salience: ${salience} scored / ${triage} triaged` +
+      (banked > 0 ? ` / ${banked} banked` : " (no memory_banked events in log)"),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +350,12 @@ const interesting = [
   "narrative_prefix_collapsed",
   "user_capable_tier_noop",
   "selection_rejected",
+  // Exp-6 machinery.
+  "proposal_filtered",
+  "consequence_budget_raised",
+  "proposal_budget_raised",
+  "consequence_slow_call",
+  "proposal_slow_call",
 ];
 for (const name of interesting) {
   const n = byEvent(name).length;
@@ -337,6 +371,8 @@ for (const e of events) {
     if (
       code === "narrative.first_person" ||
       code === "narrative.doubled_prefix" ||
+      code === "narrative.stranger_label" ||
+      code === "object.invented_contact" ||
       code === "object_grounding.pour_too_far"
     ) {
       codeCounts.set(code, (codeCounts.get(code) ?? 0) + 1);

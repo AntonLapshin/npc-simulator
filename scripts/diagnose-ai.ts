@@ -15,10 +15,15 @@ import type { World } from "../src/types.js";
 import {
   createLlmEngines,
   createProviderFromEnv,
+  defaultTimeoutMsFor,
   extractJsonPayload,
+  isThinkingModel,
   ollamaApiRoot,
   OllamaProvider,
+  readModelLatencyMs,
+  recordModelLatencyMs,
   resolveLlmEnv,
+  resolveTaskModel,
   type LLMProvider,
 } from "../src/llm/index.js";
 import { createTestLogger } from "../src/logging/logger.js";
@@ -247,6 +252,60 @@ async function main(): Promise<void> {
     ollamaSeverity("ollama models", "unknown — server unreachable, run: npm run setup:ollama");
   }
 
+  // 6c. Thinking-model overhead (offline) --------------------------------------
+  // Exp-6 item 3: thinking-class models burn completion tokens on
+  // chain-of-thought (exp-6: median 772 completion tokens for ~100-token
+  // JSON). Flag it loudly when thinking is left on.
+  {
+    const hardBackend = cfg.taskBackends.proposal ?? cfg.backend;
+    const hardModel = resolveTaskModel("proposal", cfg);
+    const thinkEnv = process.env["LLM_THINK"];
+    const thinkOff = thinkEnv === "0" || thinkEnv?.toLowerCase() === "false";
+    if (isThinkingModel(hardModel) && !thinkOff) {
+      warn(
+        "thinking overhead",
+        `"${hardModel}" is a thinking model and LLM_THINK is not 0 — every call pays ` +
+          `hundreds of <think> tokens against max_tokens (exp-6: a flat 1500 budget truncated JSON). ` +
+          `Set LLM_THINK=0 to disable chain-of-thought (Ollama honors think:false), or raise ` +
+          `LLM_MAX_TOKENS_CONSEQUENCE / LLM_MAX_TOKENS_PROPOSAL`,
+      );
+    } else if (isThinkingModel(hardModel) && thinkOff) {
+      pass("thinking overhead", `LLM_THINK=0 — chain-of-thought disabled for "${hardModel}"`);
+    }
+  }
+
+  // 6d. GPU offload state (offline, needs the ollama binary) --------------------
+  // Exp-6 S1: qwen3:14b sat half in VRAM (7.8/16 GB) with llama-server at
+  // ~355% CPU — `ollama ps` is the ground truth for what actually
+  // offloaded. Anything under 100% GPU on a 16 GB card for a 9.3 GB model
+  // is a configuration problem, not a hardware one.
+  if (ollamaBin.ok) {
+    const ps = run("ollama", ["ps"]);
+    if (ps.ok && ps.out.length > 0) {
+      const lines = ps.out.split("\n").slice(1).filter((l) => l.trim().length > 0);
+      const configured = cfg.ollama.model.toLowerCase();
+      const hit = lines.find((l) => l.toLowerCase().includes(configured.split(":")[0] ?? ""));
+      if (hit) {
+        const gpuMatch = /(\d+)%\s*GPU/i.exec(hit);
+        const pct = gpuMatch ? Number(gpuMatch[1]) : NaN;
+        if (Number.isFinite(pct) && pct < 100) {
+          warn(
+            "gpu offload",
+            `"${cfg.ollama.model}" is at ${pct}% GPU — for full VRAM offload unload other ` +
+              `models (ollama stop <model>), set OLLAMA_NUM_PARALLEL=1, and use the tuned ` +
+              `variant (PARAMETER num_gpu 999 — see scripts/setup-ollama.sh)`,
+          );
+        } else if (Number.isFinite(pct)) {
+          pass("gpu offload", `"${cfg.ollama.model}" at 100% GPU`);
+        } else {
+          warn("gpu offload", `could not parse \`ollama ps\` output: ${hit.slice(0, 100)}`);
+        }
+      } else {
+        pass("gpu offload", `no model currently loaded (idle) — check again mid-run with: ollama ps`);
+      }
+    }
+  }
+
   // 7. Engine wiring (offline, stub provider) ----------------------------------
   try {
     const stub: LLMProvider = {
@@ -350,6 +409,57 @@ async function main(): Promise<void> {
       else warn("ollama live", `Ollama endpoint answered HTTP ${ollamaStatus}`);
     } else if (ollamaActive) fail("ollama live", "server unreachable and LLM_BACKEND=ollama — run: npm run setup:ollama");
     else warn("ollama live", "server unreachable (ok while another backend is active)");
+  }
+
+    // Exp-6 item 6: per-model latency probe. Times 3 tiny completions
+    // against the hard-tier LOCAL model, records the median to the
+    // latency cache, and prints the derived default timeout. Hosted
+    // backends are skipped (don't burn hosted tokens on telemetry).
+    {
+      const hardBackend = cfg.taskBackends.proposal ?? cfg.backend;
+      const hardModel = resolveTaskModel("proposal", cfg);
+      if (hardBackend === "ollama" || hardBackend === "laya-local") {
+        try {
+          const provider = createProviderFromEnv(process.env, hardBackend);
+          const samples: number[] = [];
+          for (let i = 0; i < 3; i++) {
+            const t0 = Date.now();
+            await provider.complete(
+              "Reply with exactly: ok",
+              "Reply with exactly: ok",
+            );
+            samples.push(Date.now() - t0);
+          }
+          samples.sort((a, b) => a - b);
+          const median = samples[1] ?? samples[0] ?? 0;
+          if (median > 0) {
+            recordModelLatencyMs(hardBackend, hardModel, median);
+            const suggested = defaultTimeoutMsFor(hardBackend, hardModel, undefined);
+            const prev = readModelLatencyMs(hardBackend, hardModel);
+            pass(
+              "model latency",
+              `"${hardModel}" median ${median}ms over 3 tiny probes (recorded, n=${prev !== undefined ? "updated" : "new"}) — ` +
+                `derived default LLM_TIMEOUT_MS=${suggested}ms` +
+                (cfg.timeoutMsExplicit ? ` (explicit LLM_TIMEOUT_MS=${cfg.timeoutMs} wins)` : ""),
+            );
+            if (!cfg.timeoutMsExplicit && suggested > 60_000) {
+              warn(
+                "timeout derivation",
+                `LLM_TIMEOUT_MS is unset — the engine will now default to ${suggested}ms for ` +
+                  `"${hardModel}" (4× measured median, from the latency cache). ` +
+                  `Set LLM_TIMEOUT_MS explicitly to override`,
+              );
+            }
+          } else {
+            warn("model latency", "probe returned no timing samples");
+          }
+        } catch (err) {
+          warn("model latency", `probe failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        warn("model latency", `skipped — hard tier is hosted ("${hardBackend}"); no local telemetry burned`);
+      }
+    }
   }
 
   // Report ----------------------------------------------------------------------

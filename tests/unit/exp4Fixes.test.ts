@@ -288,6 +288,12 @@ describe("exp4 item 10 (S6): deterministic prop stubs + pour distance", () => {
 
   it("typing with nothing held stubs prop:laptop", () => {
     const world = officeWorld();
+    // Exp-6 item 12: the stub needs a real laptop nearby — place one on
+    // the desk next to Anton before typing.
+    world.scene.objects.push({
+      id: "anton_laptop", name: "Anton's laptop", description: "A laptop.",
+      x: 16, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    } as never);
     const action: Action = { actorId: "anton", text: "Type up the onboarding notes." };
     expect(
       propStubForGroundingErrors(
@@ -299,8 +305,25 @@ describe("exp4 item 10 (S6): deterministic prop stubs + pour distance", () => {
     ).toBe("laptop");
   });
 
+  it("typing with no laptop nearby stubs nothing (exp-6 item 12)", () => {
+    const world = officeWorld(); // no laptop object anywhere near Anton
+    const action: Action = { actorId: "anton", text: "Type up the onboarding notes." };
+    expect(
+      propStubForGroundingErrors(
+        world,
+        action,
+        "Anton types on his laptop.",
+        stubErrors(["object_grounding.sip_no_prop"]),
+      ),
+    ).toBeNull();
+  });
+
   it("opening the laptop stubs prop:laptop", () => {
     const world = officeWorld();
+    world.scene.objects.push({
+      id: "anton_laptop", name: "Anton's laptop", description: "A laptop.",
+      x: 16, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    } as never);
     const action: Action = { actorId: "anton", text: "Open the laptop." };
     expect(
       propStubForGroundingErrors(

@@ -97,6 +97,32 @@ export function minimalRepairPrompt(schemaText?: string): string {
   return lines.join("\n");
 }
 
+/** Exp-6 item 5: absolute ceiling for the truncation budget raise. */
+export const MAX_RAISED_BUDGET = 8000;
+
+/**
+ * Exp-6 item 5: true when the failure is a truncation AT the configured
+ * budget — not a content error worth repair-prompting. Two signals:
+ * the provider's finish_reason=length, or usage.completionTokens hitting
+ * the effective max_tokens exactly (exp-6 tick-4: 1500 == LLM_MAX_TOKENS).
+ * Pure.
+ */
+export function isTruncationAtBudget(
+  message: string,
+  usage: LlmUsage | undefined,
+  budget: number | undefined,
+): boolean {
+  if (/finish_reason=length/.test(message)) return true;
+  if (
+    budget !== undefined &&
+    usage?.completionTokens !== undefined &&
+    usage.completionTokens >= budget
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function fullPrompt(systemPrompt: string, userPrompt: string): string {
   return `${systemPrompt}\n\n${userPrompt}`;
 }
@@ -237,10 +263,43 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
   /** F31: usage from the most recent attempt that received a response. */
   let lastUsage: LlmUsage | undefined;
 
+  // Exp-6 item 6: model-aware slowness signal — warn when ONE call takes
+  // longer than half its timeout (previously a sick model was discovered
+  // only by burning a full timeout).
+  const tuning = provider.describeTuning?.();
+  const slowCallMs = Math.max(30_000, (tuning?.timeoutMs ?? 60_000) / 2);
+  // Exp-6 item 5: truncation budget-raise state — "raise, don't retry".
+  let effectiveBudget = tuning?.maxTokens;
+  let budgetRaised = false;
+
+  const logSlowCall = (durationMs: number, outcome: string): void => {
+    if (durationMs <= slowCallMs) return;
+    logger.log({
+      module,
+      event: `${module}_slow_call`,
+      tick: opts.tick,
+      turnIndex: opts.turnIndex,
+      actorId: opts.actorId,
+      input: opts.input,
+      durationMs,
+      error:
+        `single ${module} call took ${(durationMs / 1000).toFixed(1)}s (${outcome}) — ` +
+        `over half the ${((tuning?.timeoutMs ?? 60_000) / 1000).toFixed(0)}s timeout ` +
+        `(LLM_TIMEOUT_MS). For a local model, check GPU offload (\`ollama ps\` ` +
+        `should show 100% GPU) and consider LLM_THINK=0.`,
+    });
+  };
+
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let raw: string;
+    const attemptStart = Date.now();
     try {
-      raw = await provider.complete(capped.systemPrompt, userPrompt, { signal: opts.signal });
+      raw = await provider.complete(capped.systemPrompt, userPrompt, {
+        signal: opts.signal,
+        // Exp-6 item 5: after a truncation-at-budget, the raised budget
+        // rides along as a per-call override.
+        maxTokens: budgetRaised ? effectiveBudget : undefined,
+      });
     } catch (err) {
       // Transport failure: network, timeout, rate limit, empty provider
       // response (§16.4). Nothing to repair — back off, then retry with
@@ -304,12 +363,43 @@ export async function completeJson<T>(opts: CompleteJsonOptions<T>): Promise<Com
             `${repairNotes.join("; ")} | payload fingerprint: ${payloadFingerprint(raw)}`,
         });
       }
+      logSlowCall(Date.now() - attemptStart, "completed");
       return { ok: true, raw, value: validation.data, attempts: attempt, usage };
     } catch (err) {
       // Malformed JSON, truncated response, or schema mismatch (§16.3):
       // retry with a formatting-correction prompt appended.
       const message = errorMessage(err);
       rawAttempts.push(raw);
+      logSlowCall(Date.now() - attemptStart, `parse failed: ${message.slice(0, 80)}`);
+      // Exp-6 item 5: truncation AT the budget is not a content error —
+      // repair-prompting the same doomed budget is futile. Raise the
+      // budget once (×2, capped) and retry with a minimal prompt so the
+      // extra headroom goes to the payload, not to echoed bad output.
+      if (
+        !budgetRaised &&
+        attempt < attempts &&
+        effectiveBudget !== undefined &&
+        effectiveBudget < MAX_RAISED_BUDGET &&
+        isTruncationAtBudget(message, usage, effectiveBudget)
+      ) {
+        const raised = Math.min(effectiveBudget * 2, MAX_RAISED_BUDGET);
+        logger.log({
+          module,
+          event: `${module}_budget_raised`,
+          tick: opts.tick,
+          turnIndex: opts.turnIndex,
+          actorId: opts.actorId,
+          input: opts.input,
+          output: { from: effectiveBudget, to: raised },
+          error:
+            `output truncated at the ${effectiveBudget}-token budget ` +
+            `(${message.slice(0, 120)}): raising to ${raised} for the retry instead of repair-prompting`,
+        });
+        effectiveBudget = raised;
+        budgetRaised = true;
+        userPrompt = minimalRepairPrompt(opts.schemaText);
+        continue;
+      }
       const signature = parseErrorSignature(message);
       identicalStreak = signature === lastErrorSignature ? identicalStreak + 1 : 1;
       lastErrorSignature = signature;

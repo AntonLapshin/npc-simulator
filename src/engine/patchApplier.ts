@@ -2,7 +2,9 @@ import type { Action, ConsequenceResult, EngineConfig, HistoryEntry, World } fro
 import { NOT_DONE_SENTINEL, normalizeHistoryEntry } from "../types.js";
 import { defaultConfig } from "../config.js";
 import { cloneWorld } from "./worldStore.js";
-import { perceiverIds } from "./validate/narrative.js";
+import { pointInRect } from "./geometry.js";
+import { distanceToRect } from "./validate/movement.js";
+import { detectVoiceViolation, perceiverIds, thirdPersonFallbackText } from "./validate/narrative.js";
 import { resolveDestinationObjectId } from "./deterministicSemantics.js";
 
 /**
@@ -107,19 +109,40 @@ export function describePosition(
     /desk|chair|machine|table|sofa/i.test(hay(o));
   const centerDist = (o: { x: number; y: number; w: number; h: number }): number =>
     Math.hypot(x - (o.x + o.w / 2), y - (o.y + o.h / 2));
+  // Exp-6 item 10 (S5): "at <chair>" is a cell claim, not a proximity
+  // claim. A seated actor is AT the chair only when actually on it
+  // (standable chair cell) or tucked against it (non-passable lounge
+  // seating, edge-adjacent ≤1.5 — the isSeatingCell radius). Anything
+  // else is "near", even with pose "sit" (exp-6: "at Tanya's chair" for
+  // (8,6) while the chair sat at (8,7)). Unknown pose (undefined) keeps
+  // the old behavior — fail open (exp-4 item 8).
+  const seatingAt = (o: { x: number; y: number; w: number; h: number; passable: boolean }): boolean =>
+    pose === undefined ||
+    (pose === "sit" &&
+      (pointInRect({ x, y }, o) || (!o.passable && distanceToRect(x, y, o) <= 1.5)));
   /** A standing actor next to a chair is "near" it, never "at" it. */
-  const atDistance = (o: { id: string; name: string }, d: number): number =>
-    isSeating(o) && pose !== undefined && pose !== "sit" && d <= 2 ? 2.01 : d;
+  const atDistance = (
+    seating: boolean,
+    o: { x: number; y: number; w: number; h: number; passable: boolean },
+    d: number,
+  ): number => (seating ? (seatingAt(o) ? d : Math.max(d, 2.01)) : d);
 
   if (preferredObjectId !== undefined) {
     const preferred = world.scene.objects.find((o) => o.id === preferredObjectId);
     if (preferred !== undefined && !isWall(preferred)) {
       const d = centerDist(preferred);
-      if (d <= 6) return formatLandmark(preferred.name, atDistance(preferred, d));
+      if (d <= 6)
+        return formatLandmark(preferred.name, atDistance(isSeating(preferred), preferred, d));
     }
   }
-  let bestFurniture: { name: string; d: number; seating: boolean } | undefined;
-  let bestOther: { name: string; d: number; seating: boolean } | undefined;
+  type Best = {
+    name: string;
+    d: number;
+    seating: boolean;
+    o: { x: number; y: number; w: number; h: number; passable: boolean };
+  };
+  let bestFurniture: Best | undefined;
+  let bestOther: Best | undefined;
   for (const o of world.scene.objects) {
     if (isWall(o) || isSign(o)) continue;
     const d = centerDist(o);
@@ -127,19 +150,14 @@ export function describePosition(
     const slot = isFurniture(o) ? "furniture" : "other";
     if (slot === "furniture") {
       if (bestFurniture === undefined || d < bestFurniture.d)
-        bestFurniture = { name: o.name, d, seating: isSeating(o) };
+        bestFurniture = { name: o.name, d, seating: isSeating(o), o };
     } else if (bestOther === undefined || d < bestOther.d) {
-      bestOther = { name: o.name, d, seating: isSeating(o) };
+      bestOther = { name: o.name, d, seating: isSeating(o), o };
     }
   }
   const best = bestFurniture ?? bestOther;
   if (best !== undefined) {
-    // A standing actor next to seating is "near" it, never "at" it.
-    const d =
-      best.seating && pose !== undefined && pose !== "sit" && best.d <= 2
-        ? 2.01
-        : best.d;
-    return formatLandmark(best.name, d);
+    return formatLandmark(best.name, atDistance(best.seating, best.o, best.d));
   }
   return `at (${x}, ${y})`;
 }
@@ -287,8 +305,17 @@ export function applyConsequence(
   // Exp-5 item 2: salvaged/liveness turns record the narrative + note so
   // later turns don't assume a dropped question was asked.
   if (opts.fallback) {
+    // Exp-6 item 8 (M8): first-person echoes in user-turn fallbacks
+    // ("Anton tried: I turn toward Dana and say: …") must never become
+    // canonical — rewrite unquoted self-reference to third person before
+    // recording. Quoted speech is the character speaking and is kept.
+    const fallbackText = detectVoiceViolation(action.text).some(
+      (v) => v.code === "first_person",
+    )
+      ? thirdPersonFallbackText(action.text)
+      : action.text;
     pushEntry(
-      `${actorName} tried: ${action.text} ${FALLBACK_HISTORY_MARKER}${NOT_DONE_SENTINEL}`,
+      `${actorName} tried: ${fallbackText} ${FALLBACK_HISTORY_MARKER}${NOT_DONE_SENTINEL}`,
     );
   } else if (opts.honestHistoryNote !== undefined) {
     pushEntry(`${actorName}: ${result.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);

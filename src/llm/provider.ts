@@ -36,6 +36,8 @@
 // Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}.
 // Simple-tier model override: LLM_SIMPLE_MODEL.
 
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { errorMessage } from "../util/errors.js";
 import type { LlmUsage } from "../logging/logTypes.js";
 
@@ -47,6 +49,12 @@ export type LlmCallOptions = {
    * surfaces as an "aborted by caller" error, distinct from a timeout.
    */
   signal?: AbortSignal;
+  /**
+   * Exp-6 item 5: per-call token-budget override. completeJson raises the
+   * budget (instead of re-sending the same doomed prompt) when a call
+   * truncates exactly at the configured max_tokens.
+   */
+  maxTokens?: number;
 };
 
 export interface LLMProvider {
@@ -54,6 +62,13 @@ export interface LLMProvider {
   complete(systemPrompt: string, userPrompt: string, opts?: LlmCallOptions): Promise<string>;
   /** Human-readable backend id for logs (never includes secrets). */
   readonly name: string;
+  /**
+   * Exp-6 item 6: the tuning this provider was built with, for
+   * model-aware slowness signals (completeJson warns when a single call
+   * exceeds half the timeout) and budget-raise decisions. Optional —
+   * foreign providers omit it.
+   */
+  describeTuning?(): { timeoutMs: number; maxTokens: number };
   /**
    * F31: per-call usage from the most recent request (the OpenAI `usage`
    * block), when the backend reports it. Drained on read — call once per
@@ -79,11 +94,29 @@ export type OpenAICompatibleOptions = {
    * disables it.
    */
   jsonMode?: boolean;
+  /**
+   * Exp-6 item 3: disable chain-of-thought for thinking models
+   * (qwen3*, deepseek-r1*, qwq*). Sent as `think: false` on backends that
+   * support it (Ollama's OpenAI-compatible endpoint honors it); backends
+   * that don't support the flag never receive it. Undefined = leave the
+   * model default (don't send the flag).
+   */
+  think?: boolean;
   /** Extra fetch init (custom headers, dispatcher, ...). */
   fetchImpl?: typeof fetch;
 };
 
 export const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Exp-6 item 3: thinking-model name detection. These models emit
+ * chain-of-thought tokens that count against max_tokens on Ollama, so a
+ * flat JSON budget truncates the payload (exp-6: completionTokens ==
+ * LLM_MAX_TOKENS exactly). Pure.
+ */
+export function isThinkingModel(model: string): boolean {
+  return /qwen3|qwq|deepseek-r1|deepseek-reasoner|marco-o1|openthinker/i.test(model);
+}
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
@@ -122,10 +155,18 @@ function parseLlmUsage(raw: unknown): LlmUsage | undefined {
  */
 export class OpenAICompatibleProvider implements LLMProvider {
   readonly name: string;
-  protected readonly options: Required<Omit<OpenAICompatibleOptions, "apiKey" | "fetchImpl">> &
-    Pick<OpenAICompatibleOptions, "apiKey" | "fetchImpl">;
+  protected readonly options: Required<
+    Omit<OpenAICompatibleOptions, "apiKey" | "fetchImpl" | "think">
+  > &
+    Pick<OpenAICompatibleOptions, "apiKey" | "fetchImpl" | "think">;
   /** F31: usage reported by the most recent request (drained by takeLastUsage). */
   private lastUsage: LlmUsage | undefined;
+  /**
+   * Exp-6 item 3: whether this backend accepts the `think` request flag.
+   * Only Ollama's OpenAI-compatible endpoint honors it; hosted gateways
+   * may reject unknown fields, so the base class never sends it.
+   */
+  protected readonly supportsThink: boolean = false;
 
   constructor(name: string, options: OpenAICompatibleOptions) {
     this.name = name;
@@ -138,9 +179,15 @@ export class OpenAICompatibleProvider implements LLMProvider {
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       // F13: JSON mode is ON by default (LLM_JSON_MODE=0 disables it).
       jsonMode: options.jsonMode ?? true,
+      think: options.think,
       apiKey: options.apiKey,
       fetchImpl: options.fetchImpl,
     };
+  }
+
+  /** Exp-6 item 6: tuning snapshot for slowness signals and budget raises. */
+  describeTuning(): { timeoutMs: number; maxTokens: number } {
+    return { timeoutMs: this.options.timeoutMs, maxTokens: this.options.maxTokens };
   }
 
   get model(): string {
@@ -195,9 +242,16 @@ export class OpenAICompatibleProvider implements LLMProvider {
           ],
           temperature: this.options.temperature,
           repeat_penalty: this.options.repeatPenalty,
-          max_tokens: this.options.maxTokens,
+          // Exp-6 item 5: per-call budget override (budget raise on
+          // truncation-at-cap) wins over the configured default.
+          max_tokens: opts?.maxTokens ?? this.options.maxTokens,
           // Exp-6 item 7: ask the gateway for a JSON object directly.
           ...(this.options.jsonMode ? { response_format: { type: "json_object" } } : {}),
+          // Exp-6 item 3: disable chain-of-thought on supporting backends
+          // only (Ollama honors `think`; hosted gateways never see it).
+          ...(this.supportsThink && this.options.think !== undefined
+            ? { think: this.options.think }
+            : {}),
         }),
       });
       if (res.status === 429) {
@@ -316,6 +370,8 @@ export class OllamaProvider extends OpenAICompatibleProvider {
   ] as const;
   /** Default model: Qwen3 14B (Exp-6 default). */
   static readonly DEFAULT_MODEL = "qwen3:14b";
+  /** Exp-6 item 3: Ollama's OpenAI-compatible endpoint honors `think`. */
+  protected readonly supportsThink = true;
 
   constructor(options: {
     baseUrl?: string;
@@ -326,6 +382,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
     maxTokens?: number;
     timeoutMs?: number;
     jsonMode?: boolean;
+    think?: boolean;
     fetchImpl?: typeof fetch;
   } = {}) {
     super("ollama", {
@@ -337,6 +394,7 @@ export class OllamaProvider extends OpenAICompatibleProvider {
       maxTokens: options.maxTokens,
       timeoutMs: options.timeoutMs,
       jsonMode: options.jsonMode,
+      think: options.think,
       fetchImpl: options.fetchImpl,
     });
   }
@@ -405,6 +463,26 @@ export type LlmEnvConfig = {
    * consequence prompt is the long pole, the semantic judge the short one.
    */
   maxTokensByTask: Partial<Record<LlmTask, number>>;
+  /**
+   * Exp-6 item 3: chain-of-thought control (LLM_THINK). true = force
+   * thinking on, false = force off, undefined = unset (model default —
+   * the `think` flag is not sent). Thinking tokens count against
+   * max_tokens on Ollama, so disabling it is the single biggest latency
+   * win for JSON-emitting workloads.
+   */
+  think?: boolean;
+  /**
+   * Exp-6 item 5: budget multiplier for thinking-class models when
+   * thinking is not disabled (LLM_THINKING_TOKEN_MULTIPLIER, default 2).
+   * Applies only when no explicit per-task LLM_MAX_TOKENS_* override is
+   * set — an explicit budget always wins.
+   */
+  thinkingTokenMultiplier: number;
+  /**
+   * Exp-6 item 6: whether LLM_TIMEOUT_MS was set explicitly (explicit
+   * always wins over the latency-derived default).
+   */
+  timeoutMsExplicit: boolean;
 };
 
 const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
@@ -412,6 +490,88 @@ const KNOWN_BACKENDS: LlmBackend[] = ["joingonka", "laya-local", "ollama"];
 /** F12: parse a backend name for LLM_FAILOVER_BACKEND (exported for createLlmEngines). */
 export function parseBackend(raw: string | undefined): LlmBackend | undefined {
   return raw === "laya-local" || raw === "ollama" || raw === "joingonka" ? raw : undefined;
+}
+
+/**
+ * Exp-6 item 6: per-model latency observations, recorded by
+ * `npm run diagnose:ai:live` (a tiny timed completion per configured
+ * model) at ~/.cache/npc-simulator/llm-latency.json. Shape:
+ * { "<backend>:<model>": { medianMs: number, samples: number } }.
+ * Lets the default timeout derive from measured reality instead of
+ * tribal knowledge (exp-6: the 60 s default timed out a 10-minute first
+ * attempt on qwen3:14b). Pure except for the file read; missing file =
+ * undefined. Never throws.
+ */
+export function latencyCachePath(homeDir?: string): string {
+  const home = homeDir ?? (typeof process !== "undefined" ? process.env["HOME"] : undefined) ?? "";
+  return `${home}/.cache/npc-simulator/llm-latency.json`;
+}
+
+export function readModelLatencyMs(
+  backend: LlmBackend,
+  model: string,
+  cachePath?: string,
+): number | undefined {
+  try {
+    const raw = readFileSync(cachePath ?? latencyCachePath(), "utf-8");
+    const data = JSON.parse(raw) as Record<string, { medianMs?: unknown; samples?: unknown }>;
+    const entry = data[`${backend}:${model}`];
+    const ms = entry !== undefined ? Number(entry.medianMs) : NaN;
+    return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Exp-6 item 6: record a latency observation for (backend, model).
+ * diagnose:ai:live calls this after its timed probe; resolveLlmEnv
+ * reads it back to derive model-aware default timeouts. Never throws.
+ */
+export function recordModelLatencyMs(
+  backend: LlmBackend,
+  model: string,
+  medianMs: number,
+  cachePath?: string,
+): void {
+  try {
+    const path = cachePath ?? latencyCachePath();
+    let data: Record<string, { medianMs: number; samples: number; at: string }> = {};
+    try {
+      data = JSON.parse(readFileSync(path, "utf-8")) as typeof data;
+    } catch {
+      // Missing/corrupt cache — start fresh.
+    }
+    const prev = data[`${backend}:${model}`];
+    const samples = (prev?.samples ?? 0) + 1;
+    // Exponential moving average across diagnose runs (keeps one number,
+    // adapts to hardware changes without unbounded history).
+    const median =
+      prev !== undefined ? Math.round(prev.medianMs * 0.7 + medianMs * 0.3) : Math.round(medianMs);
+    data[`${backend}:${model}`] = { medianMs: median, samples, at: new Date().toISOString() };
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(data, null, 2));
+  } catch {
+    // Latency telemetry must never break diagnostics.
+  }
+}
+
+/**
+ * Exp-6 item 6: model-aware default timeout. An explicit LLM_TIMEOUT_MS
+ * always wins; otherwise, when diagnose:ai:live has recorded a median
+ * latency for the active (backend, model), the default derives from it
+ * (4× median, clamped to 60 s…600 s) so a 14B local model doesn't inherit
+ * a 60 s default built for a hosted flash tier.
+ */
+export function defaultTimeoutMsFor(
+  backend: LlmBackend,
+  model: string,
+  explicitMs: number | undefined,
+): number {
+  if (explicitMs !== undefined) return explicitMs;
+  const median = readModelLatencyMs(backend, model);
+  if (median === undefined) return DEFAULT_TIMEOUT_MS;
+  return Math.min(600_000, Math.max(DEFAULT_TIMEOUT_MS, Math.ceil(median * 4)));
 }
 
 /** Read backend configuration from environment (no secrets are ever logged). */
@@ -474,7 +634,18 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
       model: env["OLLAMA_MODEL"] ?? OllamaProvider.DEFAULT_MODEL,
       apiKey: env["OLLAMA_API_KEY"],
     },
-    timeoutMs: Number(env["LLM_TIMEOUT_MS"] ?? DEFAULT_TIMEOUT_MS),
+    timeoutMs: defaultTimeoutMsFor(
+      taskBackends.proposal ?? backend,
+      (taskBackends.proposal ?? backend) === "laya-local"
+        ? (env["LAYA_MODEL"] ?? LocalLayaProvider.DEFAULT_MODEL)
+        : (taskBackends.proposal ?? backend) === "ollama"
+          ? (env["OLLAMA_MODEL"] ?? OllamaProvider.DEFAULT_MODEL)
+          : (env["JOINGONKA_MODEL"] ?? JoinGonkaProvider.DEFAULT_MODEL),
+      env["LLM_TIMEOUT_MS"] !== undefined && env["LLM_TIMEOUT_MS"] !== ""
+        ? Number(env["LLM_TIMEOUT_MS"])
+        : undefined,
+    ),
+    timeoutMsExplicit: env["LLM_TIMEOUT_MS"] !== undefined && env["LLM_TIMEOUT_MS"] !== "",
     temperature: Number(env["LLM_TEMPERATURE"] ?? 0.9),
     repeatPenalty: Number(env["LLM_REPEAT_PENALTY"] ?? 1.1),
     maxTokens: Number(env["LLM_MAX_TOKENS"] ?? 1500),
@@ -482,6 +653,17 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
     jsonMode: env["LLM_JSON_MODE"] !== "0" && env["LLM_JSON_MODE"]?.toLowerCase() !== "false",
     maxTokensByTask,
     temperatureByTask,
+    // Exp-6 item 3: LLM_THINK=0/false disables chain-of-thought (Ollama
+    // only); =1/true forces it on; unset leaves the model default.
+    think:
+      env["LLM_THINK"] === undefined || env["LLM_THINK"] === ""
+        ? undefined
+        : env["LLM_THINK"] !== "0" && env["LLM_THINK"].toLowerCase() !== "false",
+    thinkingTokenMultiplier: (() => {
+      const raw = env["LLM_THINKING_TOKEN_MULTIPLIER"];
+      const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
+      return Number.isFinite(n) && n >= 1 ? n : 2;
+    })(),
   };
 }
 
@@ -555,7 +737,21 @@ function buildProviderForBackend(
 ): LLMProvider {
   // Exp-6 item 6: token budgets proportional to payload — the per-task
   // LLM_MAX_TOKENS_* override wins over the global LLM_MAX_TOKENS.
-  const maxTokens = (task !== undefined ? cfg.maxTokensByTask[task] : undefined) ?? cfg.maxTokens;
+  const explicitTaskBudget = task !== undefined ? cfg.maxTokensByTask[task] : undefined;
+  const modelName =
+    modelOverride ??
+    (which === "laya-local" ? cfg.laya.model : which === "ollama" ? cfg.ollama.model : cfg.joingonka.model);
+  // Exp-6 item 5: thinking-aware caps. A thinking-class model with
+  // thinking enabled burns most of a flat budget on <think> tokens
+  // (exp-6: completionTokens == LLM_MAX_TOKENS exactly, JSON truncated).
+  // Scale the budget up unless the operator set an explicit per-task cap
+  // (explicit always wins) or disabled thinking (LLM_THINK=0).
+  const thinkingActive = isThinkingModel(modelName) && cfg.think !== false;
+  const maxTokens =
+    explicitTaskBudget ??
+    (thinkingActive
+      ? Math.ceil(cfg.maxTokens * cfg.thinkingTokenMultiplier)
+      : cfg.maxTokens);
   // F14: per-task temperature — the per-task LLM_TEMPERATURE_* override
   // wins over the global LLM_TEMPERATURE (which itself falls back to the
   // built-in per-task defaults in resolveTaskTemperature).
@@ -582,6 +778,10 @@ function buildProviderForBackend(
       maxTokens,
       timeoutMs: cfg.timeoutMs,
       jsonMode: cfg.jsonMode,
+      // Exp-6 item 3: LLM_THINK=0 sends think:false to Ollama (verified:
+      // fewer completion tokens, ~30% faster on toy prompts); unset =
+      // model default (flag not sent).
+      think: cfg.think,
     });
   }
   if (!cfg.joingonka.apiKey) {
@@ -683,6 +883,14 @@ export class FailoverProvider implements LLMProvider {
   /** F31: usage from whichever backend served the last call. Drained on read. */
   takeLastUsage(): LlmUsage | undefined {
     return this.lastServed?.takeLastUsage?.();
+  }
+
+  /** Exp-6 item 6: tuning of the currently active backend. */
+  describeTuning(): { timeoutMs: number; maxTokens: number } {
+    const active = this.useFallback ? this.fallback : this.primary;
+    return (
+      active.describeTuning?.() ?? { timeoutMs: DEFAULT_TIMEOUT_MS, maxTokens: 1500 }
+    );
   }
 
   private endpointBaseUrl(p: LLMProvider): string | undefined {

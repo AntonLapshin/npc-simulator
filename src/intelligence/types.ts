@@ -21,12 +21,17 @@ export interface ConsequenceEngine {
    * forward it to the provider call so a hung LLM request is actually
    * cancelled on timeout instead of burning tokens in the background.
    * Optional — engines that ignore it still satisfy the interface.
+   *
+   * Exp-6 item 2: `opts.isUserTurn` marks the action text as typed by the
+   * human player (ground truth, not a suggestion). Engines that honor it
+   * lead with a directive to preserve the user's words verbatim; engines
+   * that ignore it still satisfy the interface.
    */
   resolve(
     world: World,
     action: Action,
     feedback?: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; isUserTurn?: boolean },
   ): Promise<ConsequenceResult>;
 }
 
