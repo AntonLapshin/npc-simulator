@@ -306,6 +306,38 @@ async function main(): Promise<void> {
     }
   }
 
+  // 6e. VRAM contention (Exp-7 item A1 / P1) -----------------------------------
+  // exp-7: laya-serve (python) held 5.8 GB VRAM while qwen3:14b (9.3 GB)
+  // needed the same 16 GB card -> Ollama reported 18% GPU / 82% CPU
+  // offload and every call took 60-75 s. nvidia-smi lists resident
+  // processes: any non-ollama resident is a suspect.
+  {
+    const smi = run("nvidia-smi", [
+      "--query-compute-apps=pid,process_name,used_memory",
+      "--format=csv,noheader,nounits",
+    ]);
+    if (smi.ok && smi.out.length > 0) {
+      const residents = smi.out.split("\n").filter((l) => l.trim().length > 0);
+      const describe = (l: string): string => {
+        const parts = l.split(",").map((p) => p.trim());
+        const mib = Number(parts[2]);
+        return `${parts[1] ?? "?"} (pid ${parts[0] ?? "?"}, ${Number.isFinite(mib) ? (mib / 1024).toFixed(1) : "?"} GB)`;
+      };
+      const nonOllama = residents.filter((l) => !/ollama/i.test(l));
+      if (nonOllama.length > 0) {
+        warn(
+          "vram contention",
+          `${nonOllama.length} non-ollama process(es) resident in VRAM: ${nonOllama.map(describe).join("; ")} — ` +
+            `a laya-serve on GPU while Ollama runs starves the model (exp-7 P1: 18% GPU offload, 60-75 s/call). ` +
+            `Stop the squatter (or restart laya-serve with LAYA_DEVICE=cpu and verify it stays off VRAM), then re-run this check.`,
+        );
+      } else {
+        pass("vram contention", `only ollama resident in VRAM (${residents.length} process${residents.length === 1 ? "" : "es"})`);
+      }
+    }
+    // No nvidia-smi (no NVIDIA GPU / not installed): nothing to check.
+  }
+
   // 7. Engine wiring (offline, stub provider) ----------------------------------
   try {
     const stub: LLMProvider = {
@@ -409,7 +441,6 @@ async function main(): Promise<void> {
       else warn("ollama live", `Ollama endpoint answered HTTP ${ollamaStatus}`);
     } else if (ollamaActive) fail("ollama live", "server unreachable and LLM_BACKEND=ollama — run: npm run setup:ollama");
     else warn("ollama live", "server unreachable (ok while another backend is active)");
-  }
 
     // Exp-6 item 6: per-model latency probe. Times 3 tiny completions
     // against the hard-tier LOCAL model, records the median to the

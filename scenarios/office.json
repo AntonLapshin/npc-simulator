@@ -159,6 +159,7 @@
     {
       "id": "jeff",
       "name": "Jeff",
+      "pronouns": "he/him",
       "persona": "Jeff is a new coworker. He wants to make a good first impression and find his place in the office.",
       "x": 1,
       "y": 10,
@@ -173,6 +174,7 @@
     {
       "id": "ana",
       "name": "Ana",
+      "pronouns": "she/her",
       "persona": "Ana is an engineer. She is practical, friendly, and usually helpful toward new people.",
       "x": 8,
       "y": 8,
@@ -193,6 +195,7 @@
     {
       "id": "dan",
       "name": "Dan",
+      "pronouns": "he/him",
       "persona": "Dan is a designer. He becomes irritable when interrupted during urgent work.",
       "x": 15,
       "y": 8,

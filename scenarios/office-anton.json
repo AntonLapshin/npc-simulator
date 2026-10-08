@@ -483,6 +483,7 @@
     {
       "id": "anton",
       "name": "Anton",
+      "pronouns": "he/him",
       "persona": "Anton is a 28-year-old backend developer joining the company today as a new coworker. He previously worked with Tanya at Sixt on booking APIs and joined this team on her referral. He is polite and a bit nervous on his first day: he wants to make a good first impression, learn everyone's names, find his desk, set up his laptop, and understand his first tasks. He drinks too much coffee when nervous and breaks the ice with awkward small jokes.",
       "x": 16,
       "y": 2,
@@ -510,6 +511,7 @@
     {
       "id": "tanya",
       "name": "Tanya",
+      "pronouns": "she/her",
       "persona": "Tanya is a QA engineer in her early 30s. She is practical, friendly, and usually helpful toward new people. She is married, has a dry sense of humor, laughs easily, and enjoys everyday office small talk and harmless jokes. She worked with Anton at Sixt and referred him for this backend developer role, so she feels a bit responsible for helping him settle in. Right now she is focused on finishing a small test plan before lunch but is happy to pause briefly to greet Anton and introduce him around.",
       "x": 8,
       "y": 7,
@@ -545,6 +547,7 @@
     {
       "id": "dana",
       "name": "Dana",
+      "pronouns": "he/him",
       "persona": "Dana is a tech recruiter in his late 20s. He is outgoing when hiring goes well but gets stressed and irritable when interrupted during urgent work. He did not know Anton before today — Anton was hired through Tanya's referral while Dana was busy closing another req. His current focus is screening candidates for an urgent backend role before the Friday deadline. He sits at his desk staring at his monitor, half-listening to the office while pushing through his pipeline.",
       "x": 15,
       "y": 11,

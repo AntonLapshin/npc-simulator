@@ -37,5 +37,20 @@ fi
 export LAYA_DEVICE="${LAYA_DEVICE:-cpu}"
 export LAYA_PRELOAD="${LAYA_PRELOAD:-1}"
 
+# Exp-7 item A1: some laya-serve builds ignore the LAYA_DEVICE env var
+# (exp-7 P1: the server held 5.8 GB VRAM despite LAYA_DEVICE=cpu, starving
+# qwen3:14b down to 18% GPU offload). When the binary advertises a
+# --device flag, pass it explicitly; otherwise rely on the env var and tell
+# the operator how to verify (nvidia-smi must NOT list the server's python
+# process when LAYA_DEVICE=cpu).
+SERVE_ARGS=()
+if "$SERVE_BIN" --help 2>/dev/null | grep -q -- "--device"; then
+  SERVE_ARGS+=(--device "$LAYA_DEVICE")
+else
+  echo "warning: laya-serve shows no --device flag - relying on LAYA_DEVICE=$LAYA_DEVICE env var." >&2
+  echo "         verify after start: nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv" >&2
+  echo "         must NOT list the laya-serve python process when LAYA_DEVICE=cpu." >&2
+fi
+
 echo "starting laya-serve (device=$LAYA_DEVICE preload=$LAYA_PRELOAD) on 0.0.0.0:8000 ..."
-exec "$SERVE_BIN"
+exec "$SERVE_BIN" "${SERVE_ARGS[@]}"
