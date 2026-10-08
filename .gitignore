@@ -1,8 +1,8 @@
 node_modules/
 dist/
-logs/*.jsonl
+#logs/*.jsonl
 !logs/.gitkeep
-saves/*.json
+#saves/*.json
 !saves/.gitkeep
 coverage/
 *.log
