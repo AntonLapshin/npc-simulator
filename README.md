@@ -27,7 +27,7 @@ engine-backed graphic console in the foreground:
 4. runs the engine console on `http://localhost:8123/` with these defaults:
 
 ```text
-scenarios/office-anton.json --provider ollama --model fluffy/l3-8b-stheno-v3.2 --debug
+scenarios/office-anton.json --provider ollama --model qwen3:14b --debug
 ```
 
 Everything is overridable without editing files — flags are forwarded to
@@ -85,10 +85,11 @@ Pulled models:
 
 | Ollama id | Description | Size |
 |---|---|---|
-| `fluffy/l3-8b-stheno-v3.2` | L3 8B Stheno (primary, 8K ctx) | ~4.9 GB |
+| `qwen3:14b` | Qwen3 14B (default, primary — used for Exp-6) | ~9.3 GB |
+| `fluffy/l3-8b-stheno-v3.2` | L3 8B Stheno (legacy primary, 8K ctx) | ~4.9 GB |
 | `huihui_ai/llama3.2-abliterate:3b` | Llama 3.2 3B abliterated (fast, 128K ctx) | ~2.2 GB |
 
-Subset install: `npm run setup:ollama -- --only stheno` or `-- --only llama3.2`.
+Subset install: `npm run setup:ollama -- --only qwen3` or `-- --only stheno` or `-- --only llama3.2`.
 
 Optional legacy local model:
 
@@ -121,14 +122,14 @@ Provider examples:
 # Hosted gateway (needs JOINGONKA_API_KEY in .env)
 npm run start:text -- --provider joingonka
 
-# Local Ollama, default Stheno 8B model (needs `npm run setup:ollama` first)
+# Local Ollama, default Qwen3 14B model (needs `npm run setup:ollama` first)
 npm run start:text -- --provider ollama
 
 # Local Ollama, fast 3B abliterated model
 npm run start:text -- --provider ollama --model huihui_ai/llama3.2-abliterate:3b
 
 # Same via environment (no flags)
-LLM_BACKEND=ollama OLLAMA_MODEL=fluffy/l3-8b-stheno-v3.2 npm run start:text
+LLM_BACKEND=ollama OLLAMA_MODEL=qwen3:14b npm run start:text
 ```
 
 Example session (mock engines):

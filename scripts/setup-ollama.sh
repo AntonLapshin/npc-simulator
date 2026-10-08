@@ -2,9 +2,10 @@
 #
 # Install local Ollama + pull the recommended NPC Simulator models.
 #
-# Models (uncensored, good fit for free-form roleplay):
-#   1. fluffy/l3-8b-stheno-v3.2      — L3 8B Stheno (primary, ~4.9 GB, 8K ctx)
-#   2. huihui_ai/llama3.2-abliterate:3b — Llama 3.2 3B abliterated (fast, ~2.2 GB, 128K ctx)
+# Models:
+#   1. qwen3:14b                        — Qwen3 14B (default primary, ~9.3 GB)
+#   2. fluffy/l3-8b-stheno-v3.2         — L3 8B Stheno (legacy primary, ~4.9 GB, 8K ctx)
+#   3. huihui_ai/llama3.2-abliterate:3b — Llama 3.2 3B abliterated (fast, ~2.2 GB, 128K ctx)
 #
 # What this does:
 #   1. Installs the `ollama` binary if missing (https://ollama.com/install.sh).
@@ -13,7 +14,8 @@
 #   4. Runs a smoke chat against the first available model via /api/chat.
 #
 # Usage:
-#   npm run setup:ollama                       # install + pull both models (default)
+#   npm run setup:ollama                       # install + pull all recommended models (default)
+#   npm run setup:ollama -- --only qwen3       # only Qwen3 14B (default primary)
 #   npm run setup:ollama -- --only stheno      # only L3-8B-Stheno
 #   npm run setup:ollama -- --only llama3.2    # only Llama 3.2 3B abliterated
 #   bash scripts/setup-ollama.sh --help
@@ -23,12 +25,13 @@
 #   OLLAMA_MODELS="model-a model-b"      (override the model list)
 #
 # Next steps after this script succeeds:
-#   LLM_BACKEND=ollama npm run start:text                      # default model (Stheno)
+#   LLM_BACKEND=ollama npm run start:text                      # default model (qwen3:14b)
 #   LLM_BACKEND=ollama OLLAMA_MODEL=huihui_ai/llama3.2-abliterate:3b npm run start:text
 #   npm run diagnose:ai                                        # verify the whole AI setup
 #
 set -euo pipefail
 
+QWEN_MODEL="qwen3:14b"
 STHENO_MODEL="fluffy/l3-8b-stheno-v3.2"
 LLAMA_MODEL="huihui_ai/llama3.2-abliterate:3b"
 ONLY=""
@@ -51,15 +54,17 @@ MODELS=()
 if [[ -n "${OLLAMA_MODELS:-}" ]]; then
   # shellcheck disable=SC2206
   MODELS=(${OLLAMA_MODELS})
+elif [[ "$ONLY" == "qwen3" || "$ONLY" == "qwen" ]]; then
+  MODELS=("$QWEN_MODEL")
 elif [[ "$ONLY" == "stheno" ]]; then
   MODELS=("$STHENO_MODEL")
 elif [[ "$ONLY" == "llama3.2" || "$ONLY" == "llama" || "$ONLY" == "llama3" ]]; then
   MODELS=("$LLAMA_MODEL")
 elif [[ -n "$ONLY" ]]; then
-  echo "error: --only must be 'stheno' or 'llama3.2' (got '$ONLY')" >&2
+  echo "error: --only must be 'qwen3', 'stheno' or 'llama3.2' (got '$ONLY')" >&2
   exit 2
 else
-  MODELS=("$STHENO_MODEL" "$LLAMA_MODEL")
+  MODELS=("$QWEN_MODEL" "$STHENO_MODEL" "$LLAMA_MODEL")
 fi
 
 HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"

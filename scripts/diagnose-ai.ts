@@ -233,7 +233,7 @@ async function main(): Promise<void> {
     const missing = OllamaProvider.RECOMMENDED_MODELS.filter((m) => !matches(m));
     const configuredOk = matches(cfg.ollama.model);
     if (missing.length === 0) {
-      pass("ollama models", `both recommended models present (${tagModels.join(", ")})`);
+      pass("ollama models", `all recommended models present (${tagModels.join(", ")})`);
     } else if (!configuredOk) {
       ollamaSeverity(
         "ollama models",

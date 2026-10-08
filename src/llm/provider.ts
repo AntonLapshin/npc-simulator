@@ -308,13 +308,14 @@ export class OllamaProvider extends OpenAICompatibleProvider {
   static readonly DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
   /** Native Ollama API root derived from the OpenAI-compatible base URL. */
   static readonly DEFAULT_API_URL = "http://127.0.0.1:11434";
-  /** Recommended uncensored models (see scripts/setup-ollama.sh). */
+  /** Recommended models (see scripts/setup-ollama.sh). */
   static readonly RECOMMENDED_MODELS = [
+    "qwen3:14b",
     "fluffy/l3-8b-stheno-v3.2",
     "huihui_ai/llama3.2-abliterate:3b",
   ] as const;
-  /** Default model: the more capable 8B roleplay model. */
-  static readonly DEFAULT_MODEL = "fluffy/l3-8b-stheno-v3.2";
+  /** Default model: Qwen3 14B (Exp-6 default). */
+  static readonly DEFAULT_MODEL = "qwen3:14b";
 
   constructor(options: {
     baseUrl?: string;
