@@ -728,6 +728,29 @@ const PROXIMITY_RE =
   /\b(closer|close to|nearer|toward|towards|up to|next to|beside|behind|over to)\b/i;
 
 /**
+ * Exp-7 item A7: stationary-work verbs — fine-motor / observational
+ * activity that never implies whole-body displacement (exp-7 B7: "typing
+ * furiously" / "stare blankly" arrived with moves=true from the model's
+ * self-declared effects and died on movement.no_position_change). A
+ * displacement token in the same text still wins (a walk-then-type turn
+ * moves); without one, the model's moved=true is ungrounded and the
+ * grounding layer downgrades it instead of demanding x/y for typing.
+ */
+const STATIONARY_WORK_VERBS =
+  "type|types|typing|typed|stare|stares|staring|stared|sip|sips|sipping|sipped|" +
+  "read|reads|reading|work|works|working|worked|listen|listens|listening|" +
+  "watch|watches|watching|scroll|scrolls|scrolling|click|clicks|clicking";
+
+export function hasStationaryWorkToken(text: string): boolean {
+  // NB: tested against the RAW text, not the maskNonLocomotion output —
+  // the mask's perception/cognition clause removal exists to avoid
+  // locomotion false positives (the opposite concern), and it strips
+  // exactly these verbs. A spurious hit here is harmless: the grounding
+  // downgrade only fires when something already claimed moves=true.
+  return new RegExp(`\\b(?:${STATIONARY_WORK_VERBS})\\b`, "i").test(text);
+}
+
+/**
  * Phase 2 (exp-3 item 3): does the action text carry a
  * destination-or-displacement token? `moves` requires one: an explicit
  * displacement verb (masked for perception/cognition/resumed-activity

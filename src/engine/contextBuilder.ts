@@ -1,6 +1,7 @@
 import type { Action, Actor, EngineConfig, HistoryEntry, SceneObject, World } from "../types.js";
 import { NOT_DONE_SENTINEL, normalizeHistoryEntry } from "../types.js";
 import { defaultConfig } from "../config.js";
+import { sanitizeDisplayText } from "../util/sanitize.js";
 import { distance } from "./geometry.js";
 import {
   findManipulatedObjects,
@@ -138,7 +139,9 @@ export function formatHistoryForPrompt(
 ): string {
   const budget = budgetChars ?? cfg.promptHistoryBudgetChars;
   const allIds: string[] = [];
-  const texts = history.map((e) => normalizeHistoryEntry(e, allIds).text);
+  // Exp-7 item A10: strip the NOT_DONE_SENTINEL and control codes before
+  // history reaches a prompt — machine markers must never be model input.
+  const texts = history.map((e) => sanitizeDisplayText(normalizeHistoryEntry(e, allIds).text));
   const tail = texts.slice(-Math.max(1, maxEntries));
   if (tail.length === 0) return "(no history yet)";
   const kept: string[] = [];
@@ -626,10 +629,16 @@ export function buildIdentityAnchor(world: World, actorId: string): string {
     .filter((a) => a.id !== actorId)
     .map((a) => `${a.name} (${a.id})`);
   const notLine = others.length > 0 ? ` You are NOT ${others.join(", ")} — never act as them, never use their role, goal, or skills.` : "";
-  return `IDENTITY: You are ${actor.name} (${actor.id}). Role: ${actor.persona} Current goal: ${actor.goal}.${notLine} Your next action must fit YOUR role and goal above.`;
+  // Exp-7 item A6: name the acting actor's pronouns up front so the writer
+  // never has to infer them (exp-7 B5: Dana rendered as "she/her").
+  return `IDENTITY: You are ${actor.name} (${actor.id}, ${actorPronouns(actor)}). Role: ${actor.persona} Current goal: ${actor.goal}.${notLine} Your next action must fit YOUR role and goal above.`;
 }
 
 /** Pronouns for the roster anchor: explicit tag when present, else inferred. */
+export function actorPronouns(a: { pronouns?: string; persona: string }): string {
+  return a.pronouns ?? extractPronouns(a.persona);
+}
+
 export function extractPronouns(persona: string): string {
   const lower = persona.toLowerCase();
   if (/she\/her/.test(lower)) return "she/her";
@@ -656,7 +665,7 @@ export function buildRosterAnchor(world: World): string {
   // each actor's own context (subjective contexts must never leak another
   // actor's hidden state).
   const parts = world.actors.map(
-    (a) => `${a.name} (${a.id}, ${extractPronouns(a.persona)}) at (${a.x}, ${a.y})`,
+    (a) => `${a.name} (${a.id}, ${actorPronouns(a)}) at (${a.x}, ${a.y})`,
   );
   return [
     `ROSTER (the ONLY people who exist here): ${parts.join("; ") || "(none)"}.`,
@@ -1149,7 +1158,11 @@ export function buildSlimObjectiveSnapshot(
     `Named-target objects (always included): ${targetObjects.map((o) => formatSnapshotObject(o)).join(" | ") || "(none)"}`,
     // F6: the consequence snapshot is built for the acting actor — history
     // is filtered to what they perceived or authored.
-    `Recent history: ${formatHistoryForPrompt(historyVisibleTo(world, action.actorId), 8, undefined, cfg).replace(/\n/g, " ")}`,
+    // Exp-7 item A5: the immediately-preceding turn's narrative is the echo
+    // attractor (exp-7 B2: tick-0's greeting echoed verbatim at ticks 1-2
+    // despite retry feedback) — drop it from the consequence history
+    // window and keep the older context.
+    `Recent history: ${formatHistoryForPrompt(historyVisibleTo(world, action.actorId).slice(0, -1), 8, undefined, cfg).replace(/\n/g, " ")}`,
     `Memory stats: ${world.actors.length} actors, ${stats.historyEntries} history entries, ${stats.memoryBytes} bytes compounding (prompt stays flat via summaries).`,
   );
   return lines.join("\n");
