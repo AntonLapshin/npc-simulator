@@ -30,10 +30,12 @@ import {
   validateAddresseePatch,
   validateEnterFreshness,
   validateIdentityConsistency,
+  validateInventedContact,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
   validateNarrativeVoice,
   validateObserverSubject,
+  validateRelationshipLabel,
   validateStateCoherence,
   validateStateLabel,
   validateThoughtGrounding,
@@ -319,6 +321,12 @@ export function validateConsequence(
     // too, not only on the accept path — tick 20's "I'm Dana, the new
     // hire" passed every other prose gate.
     errors.push(...validateIdentityConsistency(world, normalized.narrative, action));
+    // Exp-6 item 7 (S4): alienation labels for known coworkers
+    // ("approach the stranger", tick-10 repro) and invented cross-actor
+    // physical causation on description patches (the coffee-stain,
+    // tick-13 repro) must fail in the retry loop too.
+    errors.push(...validateRelationshipLabel(world, normalized.narrative, action));
+    errors.push(...validateInventedContact(world, normalized, action));
     // Exp-3 item 10 (S8): thoughts are content-gated, not just
     // presence-gated — no invented people, no ungrounded request/grant
     // claims.
@@ -385,9 +393,11 @@ export {
   validateAddresseePatch,
   validateEnterFreshness,
   validateIdentityConsistency,
+  validateInventedContact,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
   validateObserverSubject,
+  validateRelationshipLabel,
   validateStateCoherence,
   validateStateLabel,
   validateThoughtGrounding,

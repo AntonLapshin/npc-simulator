@@ -26,12 +26,31 @@ import type {
 } from "../types.js";
 import {
   validateIdentityConsistency,
+  validateInventedContact,
   validateNarrativeActors,
   validateObserverSubject,
   validateEnterFreshness,
+  validateRelationshipLabel,
   matchObserverCoordination,
   observerNameTokens,
 } from "./validate/narrative.js";
+
+/**
+ * Exp-6 item 11 (S8): RULE-C early-abort decision, extracted pure for
+ * testing. Abort the retry loop when the last two attempts both failed
+ * to strictly improve on the best-so-far hard-error count — attempt 1 is
+ * the pickBestAttempt winner in ~72% of turns (exp-3), so a
+ * non-improving tail is divergence, not progress. This subsumes the
+ * "growing two attempts in a row" rule (growth implies no improvement).
+ * At ~6 min/turn on a 14B local model (exp-6) each aborted retry saves
+ * minutes, not seconds. Pure.
+ */
+export function shouldAbortRetries(hardErrors: number[], maxRetries: number): boolean {
+  const n = hardErrors.length;
+  if (n < 3 || n > maxRetries) return false;
+  const bestSoFar = Math.min(...hardErrors.slice(0, n - 2));
+  return hardErrors[n - 1]! >= bestSoFar && hardErrors[n - 2]! >= bestSoFar;
+}
 
 /** One failed retry-loop attempt, kept for best-attempt salvage. */
 export type AttemptRecord = {
@@ -173,7 +192,11 @@ export function isExplicitStayAction(text: string): boolean {
  *   attribution-stripped narrative + the verb-agnostic supplement —
  *   the tick-10 "Ana: Jeff introduces Ana to Dan." hole),
  * - explicit-stay movement (the tick-11 "Stay where you are" + teleport
- *   hole; text-based, immune to the effects.moved OR-trust).
+ *   hole; text-based, immune to the effects.moved OR-trust),
+ * - relationship labels (validateRelationshipLabel — the exp-6 tick-10
+ *   "approach the stranger" hole),
+ * - invented cross-actor contact on description patches
+ *   (validateInventedContact — the exp-6 tick-13 coffee-stain hole).
  * Patch-side turn-discipline gates (observer_moved/state/goal) and
  * action-verb-coverage are deterministic re-runs of what
  * validateConsequence already enforced on this exact payload, so they add
@@ -207,6 +230,13 @@ export function isExplicitStayAction(text: string): boolean {
   // Exp-5 item 7 (S3, ticks 23/24 repro): stale "enters the office"
   // narratives must not become canonical on the accept path either.
   errors.push(...validateEnterFreshness(world, result.narrative, action));
+  // Exp-6 item 7 (S4): the two new corrupt-canonical receipts must not
+  // pass on the accept path either — alienation labels for known
+  // coworkers ("approach the stranger", tick-10 repro) and invented
+  // cross-actor physical causation on description patches (the
+  // coffee-stain, tick-13 repro).
+  errors.push(...validateRelationshipLabel(world, result.narrative, action));
+  errors.push(...validateInventedContact(world, result, action));
 
   if (isExplicitStayAction(action.text) && actor) {
     const patch = result.actorPatches.find((p) => p.actorId === action.actorId);
