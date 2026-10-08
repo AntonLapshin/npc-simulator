@@ -22,7 +22,7 @@ export const FALLBACK_CONSEQUENCE: ConsequenceResult = {
   narrative: "Nothing changes.",
   actorPatches: [],
   objectPatches: [],
-  reasoning: "Fallback due to Consequence Engine failure.",
+  reasoning: "Fallback due to engine failure.",
 };
 
 export type LlmConsequenceEngineOptions = {
