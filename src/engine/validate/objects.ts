@@ -1,7 +1,7 @@
 // Object-interaction validation checks (extracted from physicalValidator.ts).
 
 import type { Action, ValidationError, World } from "../../types.js";
-import { contentWords, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
+import { contentWords, hasOwnUtterance, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
 import { CONTACT_RADIUS } from "./movement.js";
 
 /**
@@ -338,10 +338,10 @@ export function validateActionVerbCoverage(
   // survived every gate.
   const EXPLANATORY_VERBS =
     "explain|explains|explained|explaining|describ(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|brief(?:s|ed|ing)?|present(?:s|ed|ing)?|outlin(?:e|es|ed|ing)";
-  if (
-    new RegExp(`\\b(say|says|said|tell|tells|told|thank|thanks|thanked|answer|answers|answered|repl(?:y|ies|ied)|mention|mentions|mentioned|${EXPLANATORY_VERBS}|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|call|calls|called)\\b`, "i").test(text) ||
-    /\bcall\s+out\b/i.test(text)
-  ) {
+  // Item C9 (S5): fire only for the actor's OWN utterance — reported-speech
+  // mentions ("keep an ear open for what Jeff says next") describe someone
+  // else's speech and must not demand rendered dialogue.
+  if (hasOwnUtterance(text)) {
     if (!/\bask\w*\b|\?/.test(text)) {
       const rendersSpeech =
         narrative.includes("?") ||

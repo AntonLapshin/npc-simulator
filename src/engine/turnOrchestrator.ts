@@ -3,9 +3,19 @@ import type {
   ActionSemantics,
   ConsequenceResult,
   EngineConfig,
+  ProposalResult,
   World,
 } from "../types.js";
-import { defaultConfig } from "../config.js";
+import type { Intent } from "../decision/decisionTypes.js";
+import type { ChatComplete } from "../decision/questionPlanner.js";
+import { defaultConfig, isLayaIntentFirst } from "../config.js";
+import {
+  applyLayaPostHooks,
+  layaWiringFromEnv,
+  plausibilityAdvisoryForRetry,
+  runIntentCascade,
+  type LayaTurnWiring,
+} from "./layaTurn.js";
 import type {
   ConsequenceEngine,
   ProposalEngine,
@@ -25,10 +35,12 @@ import {
 import { validateSelectionForActor } from "./contextBuilder.js";
 import { buildObjectAffordanceNudge } from "./contextBuilder.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
+import { buildRosterRetryLine, type TurnEngines } from "../llm/index.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
 import { getCurrentActor } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import {
+  countHardErrors,
   getHonestHistoryNote,
   isFallbackConsequence,
   isSpeechOnlyFailure,
@@ -80,6 +92,32 @@ export type EngineDependencies = {
   onAutosave?: (world: World) => Promise<void> | void;
   /** Optional progress hook for UIs to show a loading indicator during slow LLM calls. */
   onProgress?: (event: TurnProgressEvent) => void;
+  /**
+   * Item C2: per-turn engine routing from createLlmEngines — user turns
+   * get the capable tier (hard-tier proposal+consequence). Carried
+   * through the `{...engines}` spread in the UIs; mock/test deps omit it.
+   */
+  getEnginesForTurn?: (isUserTurn: boolean) => TurnEngines;
+  /**
+   * Phase 3–4 (LAYA_PLAN.md): Laya decision-layer wiring for this turn.
+   * runTurn resolves it from env when absent (off by default); tests inject
+   * a stub client here. Carries the LayaClient plus the flag snapshot.
+   */
+  laya?: LayaTurnWiring;
+  /**
+   * Phase 4: chat completion hook for the dynamic question planner, wired
+   * by createLlmEngines when the Laya layer is on (undefined otherwise).
+   */
+  plannerChatComplete?: ChatComplete;
+};
+
+/**
+ * Phase 3 (intent-first): proposal engines that accept a decided intent.
+ * LLMProposalEngine.propose takes an optional third parameter; the base
+ * ProposalEngine interface declares two, so narrow at the call site.
+ */
+type ProposalEngineWithIntent = ProposalEngine & {
+  propose(world: World, actorId: string, intent?: Intent): Promise<ProposalResult>;
 };
 
 function report(deps: EngineDependencies, event: TurnProgressEvent): void {
@@ -242,6 +280,14 @@ export async function resolveWithValidation(
   let feedback: string | undefined;
   let lastResult: ConsequenceResult | undefined;
   let lastSemantics: ActionSemantics | undefined;
+  // Item C10 (S7): every attempt's {result, semantics, hardErrorCount} —
+  // salvage runs from the attempt with the FEWEST hard errors, not the
+  // last, and the loop aborts early when hard errors grow twice in a row.
+  const attempts: Array<{
+    result: ConsequenceResult;
+    semantics: ActionSemantics | undefined;
+    hardErrors: number;
+  }> = [];
 
   // Exp-6 item 3: total turn wall-time budget for the consequence phase. A
   // turn burned 47 minutes in Exp-6 with no circuit breaker — when the
@@ -410,6 +456,13 @@ export async function resolveWithValidation(
       validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
     });
 
+    // Item C10 (S7): record the failed attempt for best-attempt salvage.
+    attempts.push({
+      result,
+      semantics: resolved.semantics,
+      hardErrors: countHardErrors(validation.errors),
+    });
+
     // Deterministic movement repair: small LLMs often narrate movement
     // correctly but omit the required x/y patch on every retry. When the
     // failure is movement-only and we can compute a valid closer position,
@@ -418,11 +471,14 @@ export async function resolveWithValidation(
     // filling in coordinates preserves intent.
     let movementHint: string | undefined;
     if (resolved.semantics?.moves) {
+      // Item C7 (S1): the action text steers the suggestion — "walk east"
+      // must not repair westward when no destination was declared.
       const suggestion = suggestMoveTarget(
         world,
         action.actorId,
         resolved.semantics.destinationActorId,
         resolved.semantics.destinationObjectId,
+        action.text,
       );
       if (suggestion) {
         const dest = resolved.semantics.destinationActorId
@@ -580,8 +636,45 @@ export async function resolveWithValidation(
         ? affordanceNudge
         : undefined;
 
-    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- [${e.code}] ${e.message}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}\nReturn corrected JSON only.`;
+    // Item C1: repeat the actual roster ids in the retry feedback when the
+    // failure names unknown actors — retrieval beats recall for small models.
+    const rosterRepeat = validation.errors.some(
+      (e) => e.code === "narrative.unknown_actor" || e.code === "actor.unknown_id",
+    )
+      ? `\n${buildRosterRetryLine(world.actors.map((a) => a.id))}`
+      : "";
+    // Phase 4: advisory patch-plausibility — each object/position patch gets
+    // a Laya 1–5 score in one batched call; scores ≤2 append a NON-BLOCKING
+    // advisory note to the retry feedback. Never invalidates on its own.
+    let plausibilityNote: string | undefined;
+    if (deps.laya?.plausibility === true) {
+      plausibilityNote = await plausibilityAdvisoryForRetry(deps.laya.client, action, result);
+    }
+    feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- [${e.code}] ${e.message}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
+    // Item C10 (S7): abort the retry loop early when the hard-error count
+    // grows two attempts in a row — retries amplify (attempt 4 is
+    // systematically worse than attempt 1), so stop burning the budget and
+    // salvage the best attempt instead.
+    const nA = attempts.length;
+    if (
+      nA >= 3 &&
+      attempts[nA - 1]!.hardErrors > attempts[nA - 2]!.hardErrors &&
+      attempts[nA - 2]!.hardErrors > attempts[nA - 3]!.hardErrors
+    ) {
+      logger.log({
+        module: "turn",
+        event: "retry_aborted",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, attempt },
+        output: { hardErrors: attempts.map((a) => a.hardErrors) },
+        error:
+          "hard-error count grew two attempts in a row — stopping retries, salvaging the best attempt",
+      });
+      break;
+    }
     report(deps, {
       stage: "consequence_retry",
       actorId: action.actorId,
@@ -635,11 +728,25 @@ export async function resolveWithValidation(
   }
 
   // Exp-3 item 6: before giving up to "Nothing changes.", try to salvage
-  // the last attempt — keep valid movement/patches, warn on speech nits.
+  // an attempt — keep valid movement/patches, warn on speech nits.
   // Exp-4 item 8: the evaluation (eligible/ineligible + reason) is logged
   // inside trySalvageConsequence as `salvage_evaluated`.
-  if (lastResult && lastSemantics) {
-    const salvage = trySalvageConsequence(world, action, lastResult, lastSemantics, logger, config);
+  // Item C10 (S7): salvage from the attempt with the FEWEST hard
+  // (non-speech-nit) errors, not the last — attempt 1 is systematically
+  // the best.
+  const bestAttempt =
+    attempts.length > 0
+      ? attempts.reduce((a, b) => (b.hardErrors < a.hardErrors ? b : a))
+      : undefined;
+  if (bestAttempt?.result && bestAttempt.semantics) {
+    const salvage = trySalvageConsequence(
+      world,
+      action,
+      bestAttempt.result,
+      bestAttempt.semantics,
+      logger,
+      config,
+    );
     if (salvage) {
       logger.log({
         module: "turn",
@@ -647,7 +754,7 @@ export async function resolveWithValidation(
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result: lastResult },
+        input: { action, result: bestAttempt.result },
         output: { salvaged: salvage.salvaged, warnings: salvage.warnings },
         ...(salvage.warnings.length > 0
           ? { error: `speech warnings (applied anyway): ${salvage.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ")}` }
@@ -730,6 +837,33 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   const logger = deps.logger;
   const actor = getCurrentActor(world);
 
+  // Item C2: per-turn engine routing — user turns run proposal+consequence
+  // on the capable (hard) tier when the engines provide it; NPC turns keep
+  // the standard engines. Falls back to `deps` when no routing is wired
+  // (mock/test deps).
+  // Phase 3–4: the Laya turn wiring resolves here — injected by tests via
+  // deps.laya, otherwise from env (off by default, so plain chat runs are
+  // untouched). plannerChatComplete comes from createLlmEngines when the
+  // Laya layer is on.
+  const turnEngines = deps.getEnginesForTurn?.(actor.id === world.userActorId);
+  const plannerChatComplete = turnEngines?.plannerChatComplete ?? deps.plannerChatComplete;
+  const layaWiring = layaWiringFromEnv({ injected: deps.laya, plannerChatComplete });
+  const engineOverrides =
+    turnEngines !== undefined
+      ? {
+          proposalEngine: turnEngines.proposal,
+          selectionEngine: turnEngines.selection,
+          consequenceEngine: turnEngines.consequence,
+          semanticJudge: turnEngines.judge,
+        }
+      : {};
+  const turnDeps: EngineDependencies = {
+    ...deps,
+    ...engineOverrides,
+    plannerChatComplete,
+    laya: layaWiring,
+  };
+
   // F18: exactly one deep clone per turn, taken here at turn start. The
   // snapshot doubles as the turn_started log input AND as the mutation
   // base passed to applyConsequence below (which no longer clones when it
@@ -748,8 +882,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     input: { world: turnSnapshot },
   });
 
-  report(deps, { stage: "turn_started", actorId: actor.id, message: `turn started — ${actor.id} (tick ${world.tick})` });
-  report(deps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
+  report(turnDeps, { stage: "turn_started", actorId: actor.id, message: `turn started — ${actor.id} (tick ${world.tick})` });
+  report(turnDeps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
 
   let action: Action;
   if (actor.id === world.userActorId) {
@@ -764,12 +898,12 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       actorId: actor.id,
       input: { actorId: actor.id, reason: "user turn: user acts freely, no suggestions generated" },
     });
-    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal skipped (user turn)` });
-    report(deps, { stage: "waiting_user_input", actorId: actor.id, message: "waiting for your action…" });
-    if (!deps.getUserAction) {
+    report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal skipped (user turn)` });
+    report(turnDeps, { stage: "waiting_user_input", actorId: actor.id, message: "waiting for your action…" });
+    if (!turnDeps.getUserAction) {
       throw new Error("getUserAction is required for user-controlled turns");
     }
-    const userText = await deps.getUserAction(actor.id, []);
+    const userText = await turnDeps.getUserAction(actor.id, []);
     if (!userText || userText.trim().length === 0) {
       logger.log({
         module: "turn",
@@ -793,11 +927,24 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       output: action,
     });
   } else {
-    const proposal = await deps.proposalEngine.propose(world, actor.id);
-    report(deps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
-    report(deps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
-    const selection = await deps.selectionEngine.select(world, actor.id, proposal.suggestions);
-    report(deps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
+    // Phase 3 (intent-first, behind flags, default OFF): when the Laya
+    // layer is on with selection routing, run the intent cascade first and
+    // narrow the proposal prompt to the decided intent. Any cascade failure
+    // yields undefined and the proposal runs un-narrowed (fail open).
+    let intent: Intent | undefined;
+    if (turnDeps.laya !== undefined && isLayaIntentFirst(turnDeps.laya.config)) {
+      intent = await runIntentCascade(turnDeps.laya.client, world, actor.id, {
+        mode: turnDeps.laya.config.mode,
+        plannerEnabled: turnDeps.laya.config.toggles.planner,
+        goal: `decide ${actor.name}'s next intent`,
+        chatComplete: turnDeps.laya.plannerChatComplete,
+      }, logger);
+    }
+    const proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
+    report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
+    report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
+    const selection = await turnDeps.selectionEngine.select(world, actor.id, proposal.suggestions);
+    report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
     let actionText = stripSelectionPrefix(selection.action);
     // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
     // on it. A POV-swapped pick ("Anton walks…" on Dana's turn) or a
@@ -843,13 +990,21 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     output: action,
   });
 
-  report(deps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
-  const consequence = await resolveWithValidation(world, action, deps, {
+  report(turnDeps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
+  let consequence = await resolveWithValidation(world, action, turnDeps, {
     // Exp-5 item 6: the liveness floor rewrites failed turns — never the
     // user's own action text.
     allowLiveness: action.actorId !== world.userActorId,
   });
-  report(deps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
+  report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
+
+  // Phase 3 post-hooks (behind flags, default OFF): observer triage drops
+  // thought/emotion patches for triaged-out observers, and the salience
+  // gate drops low-salience model memory/belief appends. Skipped for
+  // fallback consequences ("Nothing changes." carries nothing to gate).
+  if (turnDeps.laya !== undefined && !isFallbackConsequence(consequence)) {
+    consequence = await applyLayaPostHooks(turnDeps.laya, world, action, consequence, config, logger);
+  }
 
   // Exp-4 item 6: mark fallback history as un-applied so proposals ground
   // on the world, not the wish. Exp-5 item 2: salvaged/liveness turns
@@ -862,7 +1017,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     fallback: isFallbackConsequence(consequence),
     honestHistoryNote: getHonestHistoryNote(consequence),
   }, turnSnapshot);
-  report(deps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
+  report(turnDeps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({
     module: "turn",
     event: "patch_applied",
@@ -907,8 +1062,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     ...(turnUsage.totalTokens > 0 ? { turnUsage } : {}),
   });
 
-  await autosave(nextWorld, deps);
-  report(deps, { stage: "turn_completed", actorId: action.actorId, message: "turn completed" });
+  await autosave(nextWorld, turnDeps);
+  report(turnDeps, { stage: "turn_completed", actorId: action.actorId, message: "turn completed" });
   return nextWorld;
 }
 

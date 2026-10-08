@@ -1,4 +1,12 @@
 import type { EngineConfig } from "./types.js";
+import {
+  readLayaConfig,
+  type LayaConfig,
+  type LayaMode,
+  type LayaToggles,
+} from "./decision/wiring.js";
+
+export type { LayaConfig, LayaMode, LayaToggles };
 
 export const defaultConfig: EngineConfig = {
   maxMemoriesPerActor: 50,
@@ -42,4 +50,74 @@ export const defaultConfig: EngineConfig = {
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {
   return { ...defaultConfig, ...partial };
+}
+
+// ---------------------------------------------------------------------------
+// Laya decision-layer configuration (LAYA_PLAN.md phases 3–5).
+//
+// decision/wiring's readLayaConfig is the single parser; the engine-facing
+// entry point below wraps it with OFF-by-default values so the chat path
+// stays the default until Phase 5 validates Laya end to end. Direction is
+// one-way: config -> decision/wiring, never the reverse.
+// ---------------------------------------------------------------------------
+
+/**
+ * Laya config as the engine consumes it: LAYA_MODE defaults to "off" and
+ * every per-phase toggle defaults to 0 (disabled). Explicit env values win.
+ * Pure — pass a fake env in tests.
+ */
+export function readLayaRuntimeConfig(
+  env: Record<string, string | undefined> = process.env,
+): LayaConfig {
+  return readLayaConfig({
+    ...env,
+    LAYA_MODE: env["LAYA_MODE"] ?? "off",
+    LAYA_SELECTION: env["LAYA_SELECTION"] ?? "0",
+    LAYA_JUDGE: env["LAYA_JUDGE"] ?? "0",
+    LAYA_TRIAGE: env["LAYA_TRIAGE"] ?? "0",
+    LAYA_SALIENCE: env["LAYA_SALIENCE"] ?? "0",
+    LAYA_PLANNER: env["LAYA_PLANNER"] ?? "0",
+  });
+}
+
+/** True when the intent-first ordering applies: Laya on + selection routing on. */
+export function isLayaIntentFirst(config: LayaConfig): boolean {
+  return config.mode !== "off" && config.toggles.selection;
+}
+
+function parsePositiveNumber(raw: string | undefined, defaultValue: number): number {
+  if (raw === undefined || raw === "") return defaultValue;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : defaultValue;
+}
+
+function parseEnvToggle(raw: string | undefined, defaultValue: boolean): boolean {
+  if (raw === undefined || raw === "") return defaultValue;
+  const v = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return defaultValue;
+}
+
+/**
+ * Salience gate (Phase 3): model-emitted memoriesAppend/beliefsAppend apply
+ * only when the turn's salience score (1–5) reaches this threshold.
+ * Default 3, clamped to 1–5. Pure.
+ */
+export function readLayaSalienceThreshold(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return Math.min(5, Math.max(1, Math.round(parsePositiveNumber(env["LAYA_SALIENCE_THRESHOLD"], 3))));
+}
+
+/**
+ * Patch-plausibility advisory (Phase 4): when 1, each object/position patch
+ * gets a 1–5 Laya plausibility score and scores ≤2 append an advisory note
+ * to retry feedback. Advisory only — never blocks or invalidates. Default 0.
+ * Pure.
+ */
+export function readLayaPlausibility(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return parseEnvToggle(env["LAYA_PLAUSIBILITY"], false);
 }

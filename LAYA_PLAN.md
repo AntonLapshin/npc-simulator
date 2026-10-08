@@ -1,6 +1,35 @@
 # LAYA Decision Plan — radical utilization of the Laya decision model
 
 Status: PLAN (not implemented). Companion to ARCHITECTURE.md.
+
+## Implementation status (2026-10-07 — updated as phases land; design sections below unchanged)
+
+- **Phase 0 — quality gate:** dataset + probe script shipped
+  (`scripts/eval-datasets/laya-eval.json`, `scripts/eval-laya.ts`,
+  `scripts/eval-laya.RUNBOOK.md`). **Live gate pending owner run** — needs
+  laya-serve with the typed-decisions checkpoint on the owner's machine.
+- **Phase 1 — foundation:** shipped. `src/decision/` core module
+  (`layaClient`, types, slim states, static selection diagram,
+  `LayaSelectionEngine`) behind `LAYA_SELECTION=1`; real decision probe in
+  `scripts/diagnose-ai.ts`.
+- **Phase 2 — judge:** shipped. `LayaSemanticJudge` (one batched judge-set
+  decide per action; quote extraction stays deterministic) behind
+  `LAYA_JUDGE=1`.
+- **Phase 3 — intent-first + triage:** wiring shipped behind flags
+  (default OFF). `runTurn` runs the intent cascade and narrows the proposal
+  prompt (`buildNarrowedProposalPrompt`); observer triage and the salience
+  gate run as post-hooks before patch application.
+- **Phase 4 — dynamic planner + plausibility:** wiring shipped behind flags
+  (default OFF). `planDiagram` (cached) replaces `SELECTION_CASCADE` in
+  dynamic mode with static fallback on ANY planner failure; plausibility is
+  advisory-only (`LAYA_PLAUSIBILITY=1`).
+- **Phase 5 — evaluation:** eval script + runbook shipped
+  (`scripts/eval-turns.ts`, RUNBOOK below). **Rerun pending owner** — needs
+  Ollama (+models) and laya-serve; not runnable in automation.
+
+Until Phase 5 validates end to end, every Laya behavior defaults OFF
+(`readLayaRuntimeConfig` in `src/config.ts`): `LAYA_MODE=off` and all
+`LAYA_*` toggles at 0, so the chat path is byte-for-byte today's behavior.
 Goal: invert the current ratio — today ~4–10 chat-LLM calls per NPC turn and
 zero Laya decisions; target 2–3 chat-LLM calls (pure generation) + 5–15 Laya
 micro-decisions at ~33ms each. Small local models get dramatically more
@@ -183,3 +212,83 @@ low temperature sensitivity), Laya — calibrated, instant, unhallucinatable —
 does every choice. If the thesis holds, the local 3B/8B tier stops being the
 hallucination source and becomes a viable default, with the hosted model
 reserved for the two truly creative calls.
+
+## RUNBOOK — Phase 5 eval (`scripts/eval-turns.ts`)
+
+Runs N scripted turns in `--mode=chat` vs `--mode=laya` and reports the
+Phase-5 comparison metrics. **Runs on the owner's machine only — never in
+CI, and do not attempt a live run in automation.**
+
+### Prerequisites
+
+1. Ollama serving the configured models (`npm run setup:ollama`), same
+   `.env` for both runs — only the `LAYA_*` flags may differ.
+2. For `--mode=laya`: laya-serve answering at `LAYA_URL`
+   (`npm run serve:laya`; typed-decisions checkpoint recommended).
+3. A scenario file (default `scenarios/office-anton.json`).
+
+### How to run
+
+```bash
+# 1. Chat-only baseline (Laya fully off — today's behavior)
+tsx scripts/eval-turns.ts --mode=chat --turns=30 --out=logs/eval-chat.json
+
+# 2. Laya-assisted (static cascade + judge + triage + salience;
+#    planner and plausibility stay off — see below)
+tsx scripts/eval-turns.ts --mode=laya --turns=30 --out=logs/eval-laya.json
+```
+
+The script prints a metric table per run and writes the JSON for
+side-by-side comparison. The user actor is scripted ("continues working
+quietly.") so long runs never block on stdin; autosave is off.
+
+The `--mode=laya` profile (set only when the env var is unset, so explicit
+exports win):
+`LAYA_MODE=static LAYA_SELECTION=1 LAYA_JUDGE=1 LAYA_TRIAGE=1 LAYA_SALIENCE=1`.
+
+### Metrics and what to look for
+
+| Metric | Definition | Target (laya vs chat) |
+|---|---|---|
+| applied-turn rate | turns whose consequence was not the "Nothing changes." fallback (`1 - fallback_used/turns`) | parity or better |
+| selection format failures | `selection_failed` + `selection_rejected` log records | 0 (down from baseline) |
+| judge LLM calls | `semantic_completed` records | 0 — the Laya judge has no chat calls |
+| turns/hour | wall-clock throughput | higher (Laya ~33ms vs chat-LLM seconds) |
+| LLM calls/turn | engine `*_completed` + `*_failed` records per turn (proposal/selection/consequence/semantic); Laya decisions are not LLM calls | fewer |
+| observer thought-churn | observer (non-acting) `actorPatches` carrying `thoughts`, per turn | lower (triage gates noise) |
+
+Also reported: `layaEvents` — the `module=laya` event histogram
+(`intent_decided`, `triage_applied`, `salience_scored`, …). In chat mode it
+is empty; in laya mode a missing `intent_decided` means the cascade failed
+open on every turn (check laya-serve).
+
+### Interpreting results
+
+- **GO for wider rollout** if applied-turn rate is at parity or better AND
+  selection format failures drop toward 0 AND judge LLM calls are ~0, with
+  no regression in turns/hour. Then consider enabling the flags by default.
+- **Triage too aggressive?** If observer thought-churn collapses to ~0 and
+  scenes feel dead, the triage noul threshold (pTrue ≥ 0.5) is too strict —
+  tune per-question, not by disabling the gate outright.
+- **Salience too aggressive?** If actors stop forming memories about
+  obviously memorable events, lower `LAYA_SALIENCE_THRESHOLD` (default 3).
+- **Planner (Phase 4)** gets its own eval before `LAYA_PLANNER=1` is ever
+  defaulted: compare `--mode=laya` with `LAYA_PLANNER=1 LAYA_MODE=dynamic`
+  against static, watching applied-turn rate and the planner-fallback rate
+  (fallback = static diagram used; logged nowhere yet — add a counter if
+  this eval happens).
+- **Plausibility** is advisory-only by design and has no GO/NO-GO bar; check
+  the retry-feedback notes read sensibly (`plausibility 2/5: …`) before
+  relying on them.
+
+### Troubleshooting
+
+- `JOINGONKA_API_KEY is not set` (or Ollama connection refused): the LLM
+  tier isn't configured — fix `.env` / start Ollama first. Both modes need
+  the identical LLM tier or the comparison is meaningless.
+- laya mode behaves exactly like chat mode (no `layaEvents`, same
+  metrics): laya-serve is down or `LAYA_URL` is wrong — every Laya call
+  fails open to the chat path by design. Check `npm run serve:laya` and
+  `scripts/diagnose-ai.ts --live`.
+- Runs are slow: each mode burns real LLM calls (no mocks). 30 turns is a
+  smoke comparison; 100+ turns gives a stable applied-turn rate.

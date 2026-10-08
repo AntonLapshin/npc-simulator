@@ -116,6 +116,42 @@
         "passable": false,
         "blocksVision": false,
         "blocksSound": false
+      },
+      {
+        "id": "coffee_mug",
+        "name": "Coffee mug",
+        "description": "A clean coffee mug sitting next to the coffee machine.",
+        "x": 17,
+        "y": 12,
+        "w": 1,
+        "h": 1,
+        "passable": true,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
+        "id": "ana_laptop",
+        "name": "Ana's laptop",
+        "description": "Ana's work laptop, open on her desk.",
+        "x": 8,
+        "y": 5,
+        "w": 1,
+        "h": 1,
+        "passable": true,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
+        "id": "dan_laptop",
+        "name": "Dan's laptop",
+        "description": "Dan's work laptop, open on his desk.",
+        "x": 15,
+        "y": 5,
+        "w": 1,
+        "h": 1,
+        "passable": true,
+        "blocksVision": false,
+        "blocksSound": false
       }
     ]
   },

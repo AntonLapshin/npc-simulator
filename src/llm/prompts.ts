@@ -4,6 +4,7 @@
 // Context Builder (subjective for proposal/selection, objective for
 // consequence) — this file only adds the shared system prompt and the
 // per-module output-schema suffixes.
+import { buildRosterDisciplineLine } from "./rosterDiscipline.js";
 
 /** Common base system prompt (§11.1). Sent on every LLM call. */
 export const LLM_SYSTEM_PROMPT = [
@@ -82,7 +83,12 @@ export function selectionSuffix(): string {
   ].join("\n");
 }
 
-export function consequenceSuffix(mode: "short" | "full" = "full"): string {
+/**
+ * Item C1: roster ids for the roster-discipline line (retrieval beats
+ * recall). Empty = no discipline line (keeps existing callers' text
+ * byte-identical).
+ */
+export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: string[] = []): string {
   // Exp-3 item 12: the full suffix is ~150 lines of rules — failure modes
   // ("Nothing changes", "Consequence:" as actor, echoing the action) smell
   // like instruction overload for small models. First attempts get the
@@ -104,6 +110,11 @@ export function consequenceSuffix(mode: "short" | "full" = "full"): string {
       "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose. Pick up/hold/open/boot sets prop and/or objectPatches. Omitting the verb from the narrative never excuses omitting the patch.",
       "IDENTITY: act out ONLY the acting actor's role — never another character's job, pronouns, or skills.",
       "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
+      ...(rosterIds.length > 0 ? [buildRosterDisciplineLine(rosterIds)] : []),
+      // Item C4: prop auto-hints — small models never invent the prop
+      // convention unaided (S6: zero applied object/prop patches in 21
+      // turns), so the mapping is stated as examples up front.
+      "PROP AUTO-HINTS: typing/working on a computer means the actor holds it — set prop:\"laptop\" (never narrate typing with empty hands); picking up, holding, or drinking from a cup/mug — set prop:\"cup\". The prop lives on the acting actor's patch.",
       "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
       // Exp-6 item 8: never name the pipeline in prose.
@@ -160,6 +171,9 @@ export function consequenceSuffix(mode: "short" | "full" = "full"): string {
     "ROSTER RULE: only the actors in the context ROSTER exist — never invent, address, or describe anyone",
     "else (no extra names, no interviewer, no newcomers). Treat listed colleagues as known hired coworkers,",
     "never as strangers, candidates, or applicants.",
+    ...(rosterIds.length > 0 ? [buildRosterDisciplineLine(rosterIds)] : []),
+    // Item C4: prop auto-hints (see the short mode above for rationale).
+    "PROP AUTO-HINTS: typing/working on a computer → prop:\"laptop\"; picking up/holding/drinking from a cup or mug → prop:\"cup\". Set the prop on the acting actor's patch — narrating the use without the prop patch is incomplete.",
     "OBJECT IDS: use the exact ids from the OBJECT IDS line in the context (mugs are `*_mug`, papers are",
     "`*_papers`, desks are `*_desk`) — never write 'coffee mug', 'paper', or any other invented id.",
     "Using any other id fails validation.",

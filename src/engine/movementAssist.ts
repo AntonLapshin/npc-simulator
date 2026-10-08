@@ -1,6 +1,7 @@
 import type { ValidationError, World } from "../types.js";
 import { isInsideScene, isPointBlocked } from "./geometry.js";
 import { canMoveBetween } from "./pathfinding.js";
+import { extractDirectionHint, resolveNamedDestination, type DirectionHint } from "./textHints.js";
 
 /**
  * Deterministic movement assistance for weak consequence LLMs.
@@ -65,11 +66,27 @@ function occupiedCells(world: World, actorId: string): Set<string> {
   return out;
 }
 
+/** Unit vectors for direction-hint scoring (y grows southward). */
+const HINT_VECTORS: Record<DirectionHint, { x: number; y: number }> = {
+  north: { x: 0, y: -1 },
+  south: { x: 0, y: 1 },
+  east: { x: 1, y: 0 },
+  west: { x: -1, y: 0 },
+};
+
 /**
  * Find a reachable free position for `actorId` that satisfies the movement
  * gate: changed, reachable, and — when `destinationActorId` is given —
  * strictly closer to that actor than the current position (or, when
  * `destinationObjectId` is given, strictly closer to that object).
+ *
+ * Item C7 (S1): `actionText` steers the repair when the model declares no
+ * destination — named actors/landmarks resolve from the text ("walk
+ * toward Ana", "head to the coffee machine"), and a bare direction hint
+ * ("a few steps east") scores candidates toward that direction. A named
+ * destination NEVER accepts a step that increases distance to it, and
+ * direction hints replace the old x-ascending tie-break (the westward
+ * drift: "walk east" repaired to x-1).
  *
  * Strategy: scan integer cells, keep free + reachable candidates, sort by
  * distance to the destination (or to the actor for undirected moves) and
@@ -81,21 +98,39 @@ export function suggestMoveTarget(
   actorId: string,
   destinationActorId?: string,
   destinationObjectId?: string,
+  actionText?: string,
 ): MoveSuggestion | null {
   const actor = world.actors.find((a) => a.id === actorId);
   if (!actor) return null;
   const from = { x: actor.x, y: actor.y };
 
+  // Item C7 (S1): fill undeclared destinations from the action text — the
+  // caller may pass judge-resolved ids, but the text is the ground truth
+  // of where the actor meant to go. Explicit ids always win over text.
+  let destActorId = destinationActorId;
+  let destObjectId = destinationObjectId;
+  let hint: DirectionHint | null = null;
+  if (actionText !== undefined) {
+    if (destActorId === undefined && destObjectId === undefined) {
+      const named = resolveNamedDestination(actionText, world, actorId);
+      if (named !== null) {
+        if (named.kind === "actor") destActorId = named.id;
+        else destObjectId = named.id;
+      }
+    }
+    hint = extractDirectionHint(actionText);
+  }
+
   const target =
-    destinationActorId !== undefined
-      ? world.actors.find((a) => a.id === destinationActorId)
+    destActorId !== undefined
+      ? world.actors.find((a) => a.id === destActorId)
       : undefined;
   // Unknown destination id: fall back to undirected movement.
   const hasTarget = target !== undefined && target.id !== actorId;
 
   const obj =
-    !hasTarget && destinationObjectId !== undefined
-      ? world.scene.objects.find((o) => o.id === destinationObjectId)
+    !hasTarget && destObjectId !== undefined
+      ? world.scene.objects.find((o) => o.id === destObjectId)
       : undefined;
   const objCx = obj !== undefined ? obj.x + obj.w / 2 : 0;
   const objCy = obj !== undefined ? obj.y + obj.h / 2 : 0;
@@ -107,8 +142,16 @@ export function suggestMoveTarget(
     return Math.hypot(x - actor.x, y - actor.y);
   };
   const oldDist = hasTarget || hasObjectTarget ? distToTarget(actor.x, actor.y) : 0;
+  const hintVec = hint !== null ? HINT_VECTORS[hint] : null;
 
-  type Candidate = { x: number; y: number; score: number; distToTarget: number };
+  type Candidate = {
+    x: number;
+    y: number;
+    score: number;
+    distToTarget: number;
+    /** Dot product of the step with the direction hint (0 when no hint). */
+    align: number;
+  };
   const candidates: Candidate[] = [];
   const occupied = occupiedCells(world, actorId);
 
@@ -130,13 +173,19 @@ export function suggestMoveTarget(
       if (Math.hypot(x - actor.x, y - actor.y) > MAX_STEP_DISTANCE + 1e-9) continue;
       if (hasTarget || hasObjectTarget) {
         const d = distToTarget(x, y);
-        // Must be strictly closer (with a small epsilon for int coords).
+        // Must be strictly closer (with a small epsilon for int coords) —
+        // item C7: NEVER suggest a step that increases distance to a named
+        // destination, however the destination was resolved.
         if (!(d < oldDist - 1e-9)) continue;
-        candidates.push({ x, y, score: d, distToTarget: d });
+        candidates.push({ x, y, score: d, distToTarget: d, align: 0 });
       } else {
         const dFrom = Math.hypot(x - actor.x, y - actor.y);
         if (dFrom < 1e-9) continue;
-        candidates.push({ x, y, score: dFrom, distToTarget: dFrom });
+        // Item C7: score undirected steps toward the direction hint —
+        // "walk east" must not repair westward.
+        const align =
+          hintVec !== null ? (x - actor.x) * hintVec.x + (y - actor.y) * hintVec.y : 0;
+        candidates.push({ x, y, score: dFrom, distToTarget: dFrom, align });
       }
     }
   }
@@ -149,7 +198,17 @@ export function suggestMoveTarget(
     const stackA = hasDirectedTarget && a.distToTarget < 0.5 ? 1 : 0;
     const stackB = hasDirectedTarget && b.distToTarget < 0.5 ? 1 : 0;
     if (stackA !== stackB) return stackA - stackB;
-    return a.score - b.score;
+    // Item C7: hint alignment outranks distance for undirected moves.
+    if (!hasDirectedTarget && a.align !== b.align) return b.align - a.align;
+    if (a.score !== b.score) return a.score - b.score;
+    // Item C7: final tie-break toward the hint direction — replaces the
+    // accidental x-ascending scan bias. No hint: keep insertion order.
+    if (!hasDirectedTarget && hintVec !== null) {
+      const ta = a.x * hintVec.x + a.y * hintVec.y;
+      const tb = b.x * hintVec.x + b.y * hintVec.y;
+      if (ta !== tb) return tb - ta;
+    }
+    return 0;
   });
 
   for (const c of candidates) {

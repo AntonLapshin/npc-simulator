@@ -212,23 +212,55 @@ const COMMON_CAPITALIZED = new Set(
     "welcome", "good", "great", "nice", "sorry",
     "okay", "well", "just", "still", "back", "here", "there", "this", "that",
     "what", "who", "how", "when", "where", "nothing", "something", "someone",
+    // Item C6 (S3): pronouns — widening the verb list must not turn
+    // "She walks" into an unknown-actor hit.
+    "he", "she", "they", "it", "him", "her", "them", "his", "hers",
+    "their", "theirs", "we", "us", "you", "i",
   ].map((w) => w.toLowerCase()),
 );
 
 /**
- * Narrative name audit (exp-2 item 3, ticks 2/5/14 repro): the patch-ID
- * checks above cannot see names that appear only in prose ("walks closer to
- * Jeff" with no Jeff patch passes them). Scan the narrative and reasoning
- * for person mentions in person-context positions (spoken address,
- * movement toward, or X-does-Y verbs) and fail names that match neither the
- * roster nor visible object vocabulary. Only person-context matches are
- * considered — not every capitalized word — so scene prose ("Office",
- * "Morning") does not trip the gate.
+ * Copulas/auxiliaries: kept in OBSERVER_SUBJECT_VERBS (observer-as-subject
+ * detection) but excluded from the unknown-actor name-first audit — "The X
+ * is ..." shapes are too noisy there.
  */
-export function validateNarrativeActors(
-  world: World,
-  normalized: { narrative: string; reasoning?: string },
-): ValidationError[] {
+const NAME_AUDIT_SKIP_VERBS = new Set(["is", "was", "are", "were", "has", "had"]);
+
+/**
+ * Item C6 (S3): person-context patterns shared by the unknown-actor audit
+ * and the salvage thought sanitizer (item C5). The name-first verb
+ * alternation is derived from OBSERVER_SUBJECT_VERBS minus copulas — one
+ * audited verb list, no drift between the two prose gates. Covers the
+ * experiment holes: "Liam greets" (greet was missing), "John takes a
+ * drink" (takes was missing), "Anton leans against the desk" (leans was
+ * missing), plus the ask/tell/answer/thank/call/give/hand/show/meet/join/
+ * follow/visit family in both verb-first and name-first positions.
+ */
+function buildPersonContextRes(): RegExp[] {
+  const nameFirstVerbs = [...OBSERVER_SUBJECT_VERBS]
+    .filter((v) => !NAME_AUDIT_SKIP_VERBS.has(v))
+    .join("|");
+  return [
+    /\b(?:hey|hi|hello|dear|toward|towards|to|with|for|at|near|beside|behind|greets?|greeting|gives?|gave|pats?|hugs?|embraces?|handshake with|welcomes?|welcomed?|thanks?|thanked?|asks?|tells?|told?|sees?|saw|approaches?|walks?(?: closer)? to|meets?|met|joins?|joined|follows?|followed|calls?|called|shows?|showed|introduces?|introduced|hands?|handed|visits?|visited)\s+([A-Z][a-z]{2,})\b/g,
+    new RegExp(`\\b([A-Z][a-z]{2,})\\s+(?:${nameFirstVerbs})\\b`, "g"),
+    // Quoted vocatives: "Hey Jeff, welcome!" — the greeting verb sits inside
+    // quotes with punctuation between it and the addressee (tick 5 repro).
+    // Case-sensitive on purpose: with the `i` flag [A-Z] would also match
+    // lowercase words ("Hi all" -> "all").
+    /\b(?:[Hh]ey|[Hh]i|[Hh]ello|[Dd]ear|[Ww]elcome)\s+([A-Z][a-z]{2,})\b/g,
+    // Appositives with no verb for the audit to catch ("Another day, same
+    // Liam." — the tick-10 thought that implanted a false memory).
+    /\b(?:same|damn|poor|old|young)\s+([A-Z][a-z]{2,})\b/g,
+  ];
+}
+
+/**
+ * Item C5: person names in person-context positions that match neither the
+ * roster nor object vocabulary. Shared core of validateNarrativeActors
+ * and the salvage thought sanitizer — exported so turnSalvage can re-run
+ * the prose gates after patch-stripping.
+ */
+export function findUnknownPersonNames(world: World, text: string): string[] {
   const roster = new Map<string, string>();
   for (const a of world.actors) {
     roster.set(a.name.toLowerCase(), a.id);
@@ -245,34 +277,42 @@ export function validateNarrativeActors(
       }
     }
   }
-  const text = `${normalized.narrative} ${normalized.reasoning ?? ""}`;
-  const personContext: RegExp[] = [
-    /\b(?:hey|hi|hello|dear|toward|towards|to|with|for|at|near|beside|behind|greets?|greeting|pats?|hugs?|embraces?|handshake with|welcomes?|thanks?|asks?|tells?|sees?|approaches?|walks?(?: closer)? to)\s+([A-Z][a-z]{2,})\b/g,
-    /\b([A-Z][a-z]{2,})\s+(?:says|sips|walks|turns|nods|smiles|laughs|stands|waves|looks|replies|shouts|whispers|types|sits|stands up|picks)\b/g,
-    // Quoted vocatives: "Hey Jeff, welcome!" — the greeting verb sits inside
-    // quotes with punctuation between it and the addressee (tick 5 repro).
-    // Case-sensitive on purpose: with the `i` flag [A-Z] would also match
-    // lowercase words ("Hi all" -> "all").
-    /\b(?:[Hh]ey|[Hh]i|[Hh]ello|[Dd]ear|[Ww]elcome)\s+([A-Z][a-z]{2,})\b/g,
-  ];
   const suspects = new Set<string>();
-  for (const re of personContext) {
+  for (const re of buildPersonContextRes()) {
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) suspects.add(m[1]!);
   }
+  const unknown: string[] = [];
   for (const s of suspects) {
     const lower = s.toLowerCase();
     if (roster.has(lower)) continue;
     if (objectTokens.has(lower)) continue;
     if (COMMON_CAPITALIZED.has(lower)) continue;
-    return [
-      {
-        code: "narrative.unknown_actor",
-        message: `narrative names unknown actor "${s}" with no roster entry or patch: only the listed actors exist — describe only them, never invent or address anyone else`,
-      },
-    ];
+    unknown.push(s);
   }
-  return [];
+  return unknown;
+}
+
+/**
+ * Narrative name audit (exp-2 item 3, ticks 2/5/14 repro): the patch-ID
+ * checks above cannot see names that appear only in prose ("walks closer to
+ * Jeff" with no Jeff patch passes them). Fails the first person-context
+ * name matching neither the roster nor object vocabulary (see
+ * findUnknownPersonNames for the shared scan).
+ */
+export function validateNarrativeActors(
+  world: World,
+  normalized: { narrative: string; reasoning?: string },
+): ValidationError[] {
+  const text = `${normalized.narrative} ${normalized.reasoning ?? ""}`;
+  const unknown = findUnknownPersonNames(world, text);
+  if (unknown.length === 0) return [];
+  return [
+    {
+      code: "narrative.unknown_actor",
+      message: `narrative names unknown actor "${unknown[0]}" with no roster entry or patch: only the listed actors exist — describe only them, never invent or address anyone else`,
+    },
+  ];
 }
 
 /**
@@ -373,6 +413,9 @@ const OBSERVER_SUBJECT_VERBS = new Set(
     "hands", "handed", "gives", "gave", "takes", "took", "picks", "picked",
     "opens", "opened", "pours", "poured", "types", "typed", "sips", "sipped",
     "gestures", "gestured", "points", "pointed", "shrugs", "shrugged",
+    // Item C6 (S3): audit gaps — "Anton leans against the desk" (tick 15)
+    // and "John exclaims" walked through both prose gates on these.
+    "greet", "lean", "leans", "leaned", "exclaim", "exclaims", "exclaimed",
   ].map((w) => w.toLowerCase()),
 );
 

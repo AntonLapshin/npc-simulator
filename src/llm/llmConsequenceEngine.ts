@@ -65,7 +65,12 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     // roster + movement + speech + turn discipline + minimal field rules);
     // retries get the full rule text plus validation feedback, where the
     // rarely-firing rules (arrival radius, mask lists) actually help.
-    const suffix = consequenceSuffix(feedback ? "full" : "short");
+    // Item C1: pass the real roster ids so the suffix carries the
+    // roster-discipline line (retrieval beats recall for small models).
+    const suffix = consequenceSuffix(
+      feedback ? "full" : "short",
+      world.actors.map((a) => a.id),
+    );
     const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${suffix}`;
 
     const result = await completeJson({

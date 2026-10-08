@@ -45,6 +45,43 @@ export function isFallbackHistoryEntry(entry: HistoryEntry | string): boolean {
   return entryText(entry).includes(NOT_DONE_SENTINEL);
 }
 
+/**
+ * Item C3 (exp local-8b): deterministic one-line memory from the turn's
+ * narrative (~160 chars total). The local-8b tier never emits
+ * memoriesAppend (M8), so P8 ("memory compounds") fails without this.
+ * Pure.
+ */
+export function summarizeNarrativeForMemory(narrative: string, actorName: string): string {
+  const oneLine = narrative.replace(/\s+/g, " ").trim();
+  const prefix = `${actorName}: `;
+  const budget = 160 - prefix.length;
+  const body =
+    oneLine.length > budget && budget > 0 ? `${oneLine.slice(0, budget - 1)}…` : oneLine;
+  return `${prefix}${body}`;
+}
+
+/**
+ * Item C12 (S8): describe a position for the auto-filled `state` string.
+ * Nearest landmark within 6 cells → "near the <landmark>"; otherwise the
+ * raw coordinates. Walls are not landmarks ("near the north wall" is
+ * noise). Pure.
+ */
+export function describePosition(world: World, x: number, y: number): string {
+  let best: { name: string; d: number } | undefined;
+  for (const o of world.scene.objects) {
+    if (/wall/i.test(o.id) || /wall/i.test(o.name)) continue;
+    const cx = o.x + o.w / 2;
+    const cy = o.y + o.h / 2;
+    const d = Math.hypot(x - cx, y - cy);
+    if (d <= 6 && (best === undefined || d < best.d)) best = { name: o.name, d };
+  }
+  if (best !== undefined) {
+    const name = best.name.charAt(0).toLowerCase() + best.name.slice(1);
+    return `near the ${name}`;
+  }
+  return `at (${x}, ${y})`;
+}
+
 export function isPartialHistoryEntry(entry: HistoryEntry | string): boolean {
   const text = entryText(entry);
   return !text.includes(NOT_DONE_SENTINEL) && text.includes(PARTIAL_HISTORY_MARKER);
@@ -73,8 +110,15 @@ export function applyConsequence(
     const actor = actorById.get(patch.actorId);
     if (!actor) continue;
     if (patch.x !== undefined && patch.y !== undefined) {
+      const moved = patch.x !== actor.x || patch.y !== actor.y;
       actor.x = patch.x;
       actor.y = patch.y;
+      // Item C12 (S8): keep `state` coherent with position — auto-fill
+      // when the patch moves the actor without updating `state` (an
+      // explicit patch.state always wins below).
+      if (moved && patch.state === undefined) {
+        actor.state = describePosition(next, patch.x, patch.y);
+      }
     }
     if (patch.state !== undefined) actor.state = patch.state;
     if (patch.emotion !== undefined) actor.emotion = patch.emotion;
@@ -101,6 +145,28 @@ export function applyConsequence(
     }
   }
 
+  const actorName = actorById.get(action.actorId)?.name ?? action.actorId;
+  // Item C3 (exp local-8b M8): deterministic memory append — the acting
+  // actor's own-turn narrative becomes a memory even when the model emits
+  // no memoriesAppend, so P8 ("memory compounds") holds on weak tiers.
+  // Skipped for fallbacks ("Nothing changes." is not a memory) and when
+  // the model already appended memories; never duplicates the tail entry.
+  // Existing caps trim as usual.
+  if (!opts.fallback) {
+    const acting = actorById.get(action.actorId);
+    const actingPatch = result.actorPatches.find((p) => p.actorId === action.actorId);
+    const modelAppended = (actingPatch?.memoriesAppend?.length ?? 0) > 0;
+    if (acting !== undefined && !modelAppended && result.narrative.trim().length > 0) {
+      const line = summarizeNarrativeForMemory(result.narrative, actorName);
+      if (acting.memories[acting.memories.length - 1] !== line) {
+        acting.memories.push(line);
+        if (acting.memories.length > config.maxMemoriesPerActor) {
+          acting.memories.splice(0, acting.memories.length - config.maxMemoriesPerActor);
+        }
+      }
+    }
+  }
+
   for (const patch of result.objectPatches) {
     const obj = objectById.get(patch.objectId);
     if (!obj) continue;
@@ -114,7 +180,6 @@ export function applyConsequence(
     if (patch.blocksSound !== undefined) obj.blocksSound = patch.blocksSound;
   }
 
-  const actorName = actorById.get(action.actorId)?.name ?? action.actorId;
   // F6: every history entry records its perceivers (computed from the
   // PRE-patch world — the event happened at the acting actor's position
   // before the patches moved anything).

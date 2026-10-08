@@ -406,6 +406,18 @@
         "blocksSound": false
       },
       {
+        "id": "coffee_mug",
+        "name": "Coffee mug",
+        "description": "A clean coffee mug sitting next to the coffee machine.",
+        "x": 2,
+        "y": 2,
+        "w": 1,
+        "h": 1,
+        "passable": true,
+        "blocksVision": false,
+        "blocksSound": false
+      },
+      {
         "id": "water_cooler",
         "name": "Water cooler",
         "description": "A bubbling water cooler on the floor right of the storage cabinet.",

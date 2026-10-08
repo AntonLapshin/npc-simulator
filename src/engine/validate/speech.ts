@@ -102,6 +102,68 @@ export function questionPreserved(actionQuote: string, narrative: string): boole
   return words.some((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
 }
 
+/**
+ * Item C9 (S5): unquoted verbs that read as the acting actor speaking.
+ * This is the speech.no_speech_rendered gate's verb list, defined here
+ * so the gate and the utterance detector share one definition and cannot
+ * drift. Greet/welcome stay out (they can be rendered non-verbally);
+ * ask/? stays with the question gate.
+ */
+const EXPLANATORY_UTTERANCE_VERBS =
+  "explain|explains|explained|explaining|describ(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|brief(?:s|ed|ing)?|present(?:s|ed|ing)?|outlin(?:e|es|ed|ing)";
+
+export const OWN_UTTERANCE_VERBS =
+  `say|says|said|tell|tells|told|thank|thanks|thanked|answer|answers|answered|repl(?:y|ies|ied)|` +
+  `mention|mentions|mentioned|${EXPLANATORY_UTTERANCE_VERBS}|` +
+  `announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|talk|talks|talked|` +
+  `speak|speaks|spoke|spoken|call|calls|called|call\\s+out`;
+
+/** Reported-speech verb shapes ("what Jeff says next", "as Ana explains"). */
+const REPORTED_SPEECH_VERBS =
+  "say|says|said|tell|tells|told|ask|asks|asked|answer|answers|answered|explain|explains|explained|" +
+  "mention|mentions|mentioned|announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|" +
+  "talk|talks|talked|speak|speaks|spoke|spoken";
+
+/**
+ * Item C9 (S5): mask reported-speech subordinate clauses — someone ELSE's
+ * speech the actor perceives — so they never read as the acting actor's
+ * own utterance:
+ * - "what <name> says/said/tells/..." ("keep an ear open for what Jeff
+ *   says next" — the S5 repro);
+ * - "while/when/as <name> <speech verb>" ("as Ana explains the layout"
+ *   — the actor listens; first-person "as I/we explain" is NOT masked,
+ *   the actor is the speaker there).
+ * Masked to clause end (commas/semicolons/sentence ends not crossed).
+ * Pure.
+ */
+export function maskReportedSpeech(text: string): string {
+  let out = text.replace(
+    new RegExp(`\\bwhat\\s+(?:[a-z'-]+\\s+)?(?:${REPORTED_SPEECH_VERBS})\\b[^,.;!?]*`, "gi"),
+    " ",
+  );
+  out = out.replace(
+    new RegExp(
+      `\\b(?:while|when|as)\\s+(?!(?:i|we)\\b)[A-Za-z][a-z'-]*\\s+(?:${REPORTED_SPEECH_VERBS})\\b[^,.;!?]*`,
+      "gi",
+    ),
+    " ",
+  );
+  return out;
+}
+
+/**
+ * Item C9 (S5): the acting actor's OWN utterance detector (pure). True
+ * when the action text carries the actor's own words — quoted segments,
+ * or an unquoted speech verb outside reported-speech mentions. The
+ * speech.no_speech_rendered gate fires only on this (an utterance that
+ * was then dropped from the narrative), never on "what Jeff says next"
+ * style mentions of someone else's speech.
+ */
+export function hasOwnUtterance(text: string): boolean {
+  if (quotedSegments(text).length > 0) return true;
+  return new RegExp(`\\b(?:${OWN_UTTERANCE_VERBS})\\b`, "i").test(maskReportedSpeech(text));
+}
+
 /** Action implies speech even without quotes — judged by Decision AI, never regex. */
 export function validateSpeechPreservation(
   semantics: ActionSemantics,

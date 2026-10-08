@@ -549,8 +549,20 @@ export function maskResumedActivity(t: string): string {
     /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
     " ",
   );
+  // Item C8 (S4): "return/returns/returned <focus|attention>" (no "to") is
+  // resumed activity, not locomotion — "return focus to my laptop" must not
+  // read as a displacement token that forces phantom movement.
   out = out.replace(
-    /\breturn\w*\s+to\s+(work|tasks?|focus|focusing|business|dut(y|ies))\b/gi,
+    /\breturn\w*\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?(focus|attention)\b/gi,
+    " ",
+  );
+  // Item C8 (S4): the "return/back to <noun>" family gains the optional
+  // determiner ("return to the task") plus attention/laptop ("return ...
+  // to my laptop") — resuming work at the laptop is not relocating to it.
+  const resumedNouns = "(work|tasks?|focus|focusing|attention|laptop|business|dut(y|ies))";
+  const det = "(?:(?:the|a|an|his|her|their|my|your|its)\\s+)?";
+  out = out.replace(
+    new RegExp(`\\breturn\\w*\\s+to\\s+${det}${resumedNouns}\\b`, "gi"),
     " ",
   );
   out = out.replace(
@@ -562,10 +574,10 @@ export function maskResumedActivity(t: string): string {
     " ",
   );
   out = out.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi,
+    new RegExp(`\\b(?:go\\w*|get\\w*|come\\w*|turn\\w*)\\s+back\\s+to\\s+${det}${resumedNouns}\\b`, "gi"),
     " ",
   );
-  out = out.replace(/\bback\s+to\s+(work|tasks?|focus|business|dut(y|ies))\b/gi, " ");
+  out = out.replace(new RegExp(`\\bback\\s+to\\s+${det}${resumedNouns}\\b`, "gi"), " ");
   return out;
 }
 

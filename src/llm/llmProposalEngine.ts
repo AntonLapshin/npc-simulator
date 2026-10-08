@@ -7,6 +7,7 @@
 
 import type { ProposalEngine } from "../intelligence/types.js";
 import type { ProposalResult, World } from "../types.js";
+import type { Intent } from "../decision/decisionTypes.js";
 import { proposalResultSchema } from "../schemas.js";
 import {
   buildProposalContext,
@@ -37,6 +38,64 @@ export type LlmProposalEngineOptions = {
 /** Minimum suggestions that count as a usable option set (tick 17 returned 1). */
 export const MIN_PROPOSAL_SUGGESTIONS = 2;
 
+/**
+ * Phase 3 (intent-first): one-line directive narrowing the proposal prompt
+ * to the Laya-decided intent, e.g. intent kind=speak + targetKind=actor →
+ * "suggest things the actor could SAY to one specific person present".
+ * Pure.
+ */
+export function intentDirective(intent: Intent): string {
+  const manner =
+    intent.manner !== undefined && intent.manner.trim().length > 0
+      ? ` (${intent.manner})`
+      : "";
+  switch (intent.kind) {
+    case "speak": {
+      const target =
+        intent.targetKind === "actor"
+          ? " to one specific person present"
+          : intent.targetKind === "none"
+            ? " aloud, to no one in particular"
+            : "";
+      return `suggest things the actor could SAY${target}${manner} — speech only, no movement or object manipulation`;
+    }
+    case "move": {
+      const target =
+        intent.targetKind === "landmark"
+          ? " toward a specific place"
+          : intent.targetKind === "actor"
+            ? " toward someone"
+            : intent.targetKind === "none"
+              ? ", wandering aimlessly"
+              : "";
+      return `suggest where or how the actor could MOVE${target}${manner} — movement only, no speech`;
+    }
+    case "interact":
+      return `suggest how the actor could USE a nearby object${manner} — object interaction only, no speech or locomotion`;
+    case "gesture":
+      return `suggest a physical gesture the actor could make${manner} — gesture only, no speech or locomotion`;
+    case "wait":
+      return `suggest quiet waiting or observing${manner} — the actor does nothing conspicuous`;
+  }
+}
+
+/**
+ * Phase 3 (intent-first): narrow a proposal prompt to the decided intent.
+ * The cascade already chose the KIND of thing the actor does next — the
+ * generator's job is only to enumerate fitting candidates. Pure.
+ */
+export function buildNarrowedProposalPrompt(
+  intent: Intent,
+  basePrompt: string,
+): string {
+  return [
+    "DECIDED INTENT — the Laya decision cascade already chose what kind of thing the actor does next. Do not re-decide it; narrow every suggestion to fit:",
+    intentDirective(intent),
+    "",
+    basePrompt,
+  ].join("\n");
+}
+
 function normalizeSuggestions(suggestions: unknown): string[] {
   if (!Array.isArray(suggestions)) return [];
   const seen = new Set<string>();
@@ -61,7 +120,13 @@ export class LLMProposalEngine implements ProposalEngine {
     private readonly options: LlmProposalEngineOptions = {},
   ) {}
 
-  async propose(world: World, actorId: string): Promise<ProposalResult> {
+  /**
+   * Phase 3 (intent-first): when the turn's intent cascade decided an
+   * intent, pass it here to narrow the prompt to that intent ("suggest
+   * things Dana could SAY to Anton…"). Omitted/undefined keeps the
+   * existing wide-open prompt — the signature stays backward compatible.
+   */
+  async propose(world: World, actorId: string, intent?: Intent): Promise<ProposalResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
 
@@ -69,7 +134,8 @@ export class LLMProposalEngine implements ProposalEngine {
     let suffix: string;
     try {
       suffix = proposalSuffix();
-      userPrompt = `${buildProposalContext(world, actorId, { historyLimit: this.options.historyLimit, maxSuggestions: this.options.maxSuggestions })}\n\n${suffix}`;
+      const base = `${buildProposalContext(world, actorId, { historyLimit: this.options.historyLimit, maxSuggestions: this.options.maxSuggestions })}\n\n${suffix}`;
+      userPrompt = intent === undefined ? base : buildNarrowedProposalPrompt(intent, base);
     } catch (err) {
       this.logger.log({
         module: "proposal",

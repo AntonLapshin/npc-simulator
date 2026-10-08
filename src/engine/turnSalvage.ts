@@ -20,6 +20,12 @@ import type { Logger } from "../logging/logger.js";
 import { FALLBACK_CONSEQUENCE } from "../llm/llmConsequenceEngine.js";
 import { validateConsequence } from "./physicalValidator.js";
 import {
+  findUnknownPersonNames,
+  validateNarrativeActors,
+  validateObserverSubject,
+} from "./validate/narrative.js";
+import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
+import {
   clampMoveToCap,
   isClampableMovementFailure,
   suggestMoveTarget,
@@ -61,6 +67,15 @@ const SPEECH_ONLY_CODES = new Set([
 export function isSpeechOnlyFailure(errors: ValidationError[]): boolean {
   if (errors.length === 0) return false;
   return errors.every((e) => SPEECH_ONLY_CODES.has(e.code));
+}
+
+/**
+ * Item C10 (S7): hard (non-speech-nit) error count for best-attempt
+ * salvage. Speech-rendering nits are downgradable noise; everything else
+ * is a hard error. Pure.
+ */
+export function countHardErrors(errors: ValidationError[]): number {
+  return errors.filter((e) => !SPEECH_ONLY_CODES.has(e.code)).length;
 }
 
 /**
@@ -144,6 +159,9 @@ function applySalvageMovementRepair(
   // suggestion; fall back to the destination-directed suggestion when the
   // candidate claims no usable position.
   const claimed = candidate.actorPatches.find((p) => p.actorId === action.actorId);
+  // Item C7 (S1): the action text steers the suggestion — "walk east" and
+  // "walk toward Ana" must not repair westward when no destination was
+  // declared.
   const suggestion =
     claimed?.x !== undefined && claimed?.y !== undefined
       ? (clampMoveToCap(world, action.actorId, claimed.x, claimed.y) ??
@@ -152,12 +170,14 @@ function applySalvageMovementRepair(
           action.actorId,
           semantics.destinationActorId,
           semantics.destinationObjectId,
+          action.text,
         ))
       : suggestMoveTarget(
           world,
           action.actorId,
           semantics.destinationActorId,
           semantics.destinationObjectId,
+          action.text,
         );
   if (!suggestion) return null;
   const repaired: ConsequenceResult = structuredClone(candidate);
@@ -263,6 +283,93 @@ export type SalvageEvaluation = {
   blockers: ValidationError[];
 };
 
+/**
+ * Item C5 (S2): action-derived fallback narrative. When salvage strips
+ * hallucinated prose (unknown actors / observer-as-subject), the visible
+ * narrative is rebuilt from the action text — the ground truth of what
+ * the actor did — instead of keeping the model's invented prose. Quoted
+ * speech is preserved verbatim (it IS the action); otherwise the
+ * name-prefixed action text is used (the prefix keeps the placeholder
+ * gate from reading it as an action echo, and the history entry reads
+ * "Ana: Ana: walks…" — redundant but honest). Never invents names. Pure.
+ */
+export function synthesizeActionNarrative(action: Action, name: string): string {
+  const quotes = parseActionQuotes(action.text);
+  if (quotes.length > 0) {
+    return `${name} says ${quotes.map((q) => `"${q}"`).join(" ")}`;
+  }
+  const t = action.text.trim().replace(/\s+/g, " ");
+  const clipped = t.length > 260 ? `${t.slice(0, 257)}…` : t;
+  return `${name}: ${clipped}`;
+}
+
+/**
+ * Item C5 (S2): drop/replace thoughts that name non-roster actors. The
+ * tick-10 salvage implanted "Another day, same Liam." — a false memory
+ * of a nonexistent person — as a thought. A thought mentioning anyone
+ * outside the roster is replaced with a neutral line; clean thoughts pass
+ * through untouched. Pure.
+ */
+export function sanitizeThoughts(thoughts: string | undefined, world: World): string | undefined {
+  if (thoughts === undefined) return undefined;
+  if (findUnknownPersonNames(world, thoughts).length === 0) return thoughts;
+  return "Staying focused on what's in front of me.";
+}
+
+/** True when an object within interact radius matches the prop noun. */
+function propObjectNearby(world: World, actorId: string, nounRe: RegExp): boolean {
+  const actor = world.actors.find((a) => a.id === actorId);
+  if (!actor) return false;
+  return world.scene.objects.some((o) => {
+    if (!nounRe.test(o.id) && !nounRe.test(o.name)) return false;
+    const cx = o.x + o.w / 2;
+    const cy = o.y + o.h / 2;
+    return Math.hypot(actor.x - cx, actor.y - cy) <= OBJECT_INTERACT_RADIUS + 1e-9;
+  });
+}
+
+/**
+ * Items C4/C11 (S6): deterministic prop stubs for the salvage path. Small
+ * models narrate object use ("types on her laptop", "grabs the mug") but
+ * never emit the prop patch, and the turn then spirals into retries.
+ * When the ACTION text carries typing verbs or grab/take/hold + cup/mug,
+ * stub the matching prop on the acting actor — but only when a matching
+ * object is within OBJECT_INTERACT_RADIUS (4) cells (the arch-fixes
+ * proximity rule): never invent a laptop out of thin air. Never overrides
+ * an existing prop patch or an already-held prop. Returns a repaired
+ * clone, or null when no stub applies.
+ */
+function repairMissingPropStub(
+  world: World,
+  action: Action,
+  candidate: ConsequenceResult,
+): ConsequenceResult | null {
+  const existing = candidate.actorPatches.find((p) => p.actorId === action.actorId);
+  if (existing?.prop !== undefined) return null;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor || (actor.prop ?? null) !== null) return null;
+  const text = action.text;
+  const wantsLaptop = /\btyp(e|es|ing|ed)\b/i.test(text);
+  const cupNoun = /\b(cup|mug)s?\b/i;
+  const grabVerb = /\b(grab|grabs|grabbing|take|takes|taking|took|hold|holds|holding|pick\s+up|picks?\s+up)\b/i;
+  const wantsCup = grabVerb.test(text) && cupNoun.test(text);
+  let stub: "laptop" | "cup" | null = null;
+  if (wantsLaptop && propObjectNearby(world, action.actorId, /laptop/i)) {
+    stub = "laptop";
+  } else if (wantsCup && propObjectNearby(world, action.actorId, /mug|cup/i)) {
+    stub = "cup";
+  }
+  if (stub === null) return null;
+  const repaired: ConsequenceResult = structuredClone(candidate);
+  const target = repaired.actorPatches.find((p) => p.actorId === action.actorId);
+  if (target) {
+    target.prop = stub;
+  } else {
+    repaired.actorPatches.push({ actorId: action.actorId, prop: stub });
+  }
+  return repaired;
+}
+
 export function trySalvageConsequence(
   world: World,
   action: Action,
@@ -302,6 +409,55 @@ export function trySalvageConsequence(
       ...structuredClone(result),
       actorPatches: result.actorPatches.filter((p) => actorIds.has(p.actorId)),
       objectPatches: result.objectPatches.filter((p) => objectIds.has(p.objectId)),
+    };
+  }
+  // Item C5 (S2): re-run the prose gates on the stripped candidate —
+  // patch-stripping must not launder hallucinated prose into canonical
+  // history (tick 10 "Liam greets everyone", tick 12 "John takes a drink
+  // from his glass of whiskey", tick 15 "Anton leans against the desk").
+  // When the prose fails, rebuild it from the action text (ground truth)
+  // and sanitize every thoughts patch — never implant thoughts naming
+  // stripped actors (the tick-10 "Another day, same Liam." false memory).
+  const proseErrors = [
+    ...validateNarrativeActors(world, {
+      narrative: candidate.narrative,
+      reasoning: candidate.reasoning,
+    }),
+    ...validateObserverSubject(world, { narrative: candidate.narrative }, action),
+  ];
+  if (proseErrors.length > 0) {
+    const actor = world.actors.find((a) => a.id === action.actorId);
+    const cleanNarrative = synthesizeActionNarrative(action, actor?.name ?? action.actorId);
+    const recheck = [
+      ...validateNarrativeActors(world, { narrative: cleanNarrative }),
+      ...validateObserverSubject(world, { narrative: cleanNarrative }, action),
+    ];
+    if (recheck.length > 0) {
+      return evaluate(
+        false,
+        `salvaged prose fails the unknown-actor/observer-subject gates and action-derived synthesis still fails them (${recheck.map((e) => e.code).join(", ")}): no honest prose available`,
+        recheck,
+      );
+    }
+    logger?.log({
+      module: "turn",
+      event: "salvage_prose_synthesized",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: {
+        action,
+        proseErrors: proseErrors.map((e) => `[${e.code}] ${e.message}`),
+      },
+      output: { narrative: cleanNarrative },
+    });
+    candidate = {
+      ...structuredClone(candidate),
+      narrative: cleanNarrative,
+      actorPatches: candidate.actorPatches.map((p) => ({
+        ...p,
+        thoughts: sanitizeThoughts(p.thoughts, world),
+      })),
     };
   }
   // Salvage preserves real effects: the acting actor must remain patched —
@@ -366,14 +522,21 @@ export function trySalvageConsequence(
   // and observer discipline stay hard.
   const tierBase = movementBase ?? candidate;
   const withAddressee = repairMissingAddressee(world, action, tierBase, semantics, cfg);
-  const tiered = withAddressee ?? tierBase;
+  const propBase = withAddressee ?? tierBase;
+  // Items C4/C11 (S6): deterministic prop stubs (typing→prop:laptop,
+  // grab+cup/mug→prop:cup) — repair the object-wording miss instead of
+  // merely downgrading it to a warning.
+  const withProp = repairMissingPropStub(world, action, propBase);
+  const tiered = withProp ?? propBase;
   const revalidation = validateConsequence(world, tiered, action, semantics, cfg);
   if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
     evaluate(
       true,
-      withAddressee !== null
-        ? "movement kept + addressee reaction patched (speech nits downgraded to warnings)"
-        : "valid patches kept (speech nits downgraded to warnings)",
+      withProp !== null
+        ? "movement kept + prop stub patched (speech nits downgraded to warnings)"
+        : withAddressee !== null
+          ? "movement kept + addressee reaction patched (speech nits downgraded to warnings)"
+          : "valid patches kept (speech nits downgraded to warnings)",
     );
     return withHonestNote({
       salvaged: tiered,

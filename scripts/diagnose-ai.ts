@@ -23,6 +23,7 @@ import {
 } from "../src/llm/index.js";
 import { createTestLogger } from "../src/logging/logger.js";
 import { loadEnvFile } from "../src/util/loadEnv.js";
+import { LayaClient, LayaUnavailableError } from "../src/decision/layaClient.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LIVE = process.argv.includes("--live");
@@ -300,19 +301,40 @@ async function main(): Promise<void> {
       warn("joingonka live", "skipped — JOINGONKA_API_KEY not set");
     }
 
-    const liveBody = {
-      state: { document: "diagnose ping" },
-      questions: { ping: { type: "noul", instructions: "Is this a diagnostics ping?" } },
-    };
-    const status = await probeHttp(`${serveUrl}/v1/systemone`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(liveBody),
-    }, 60_000);
-    if (status === 200) pass("laya live", "server answered a decisions request");
-    else if (status !== undefined) warn("laya live", `server is up but answered HTTP ${status} for the probe payload`);
-    else if (layaLocal) fail("laya live", "server unreachable and LLM_BACKEND=laya-local");
-    else warn("laya live", "server unreachable (ok while hosted backend is active)");
+    // Real 2-option choice probe through the typed LayaClient: asserts a sane
+    // answer shape (winner is one of the options, probabilities sum ~1).
+    try {
+      const client = new LayaClient({ baseUrl: serveUrl, timeoutMs: 60_000 });
+      const options = ["diagnostics ping", "real user traffic"];
+      const answers = await client.decide("diagnose ping", {
+        ping: {
+          type: "choice",
+          instructions: "What kind of request is this?",
+          options,
+        },
+      });
+      const answer = answers["ping"];
+      if (!answer || answer.type !== "choice") throw new Error("missing choice answer");
+      if (!options.includes(answer.winner)) {
+        throw new Error(`winner "${answer.winner}" not among options`);
+      }
+      const total = options.reduce((s, o) => s + (answer.probabilities[o] ?? 0), 0);
+      if (!(total > 0.9 && total < 1.1)) {
+        throw new Error(`probabilities sum to ${total.toFixed(3)}, expected ~1`);
+      }
+      pass(
+        "laya live",
+        `choice probe ok: winner="${answer.winner}" p=${(answer.probabilities[answer.winner] ?? 0).toFixed(2)}`,
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (err instanceof LayaUnavailableError) {
+        if (layaLocal) fail("laya live", `${detail} and LLM_BACKEND=laya-local`);
+        else warn("laya live", `${detail} (ok while hosted backend is active)`);
+      } else {
+        warn("laya live", `probe shape assertion failed: ${detail}`);
+      }
+    }
 
     const ollamaModelsUrl = `${cfg.ollama.baseUrl.replace(/\/+$/, "")}/models`;
     const ollamaStatus = await probeHttp(ollamaModelsUrl, undefined, 15_000);
