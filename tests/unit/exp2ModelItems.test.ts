@@ -47,27 +47,30 @@ describe("exp-2 item 1: roster discipline in the consequence prompt", () => {
   it("positive examples use the real roster, never Anton/Tanya, for office.json ids", () => {
     for (const mode of ["short", "full"] as const) {
       const s = consequenceSuffix(mode, ["jeff", "ana", "dan"]);
-      expect(s).toContain("Jeff greets the office");
+      // Exp-6 item 1 replaced the copyable "X greets the office." example
+      // with a quoted-speech example — still roster-parameterized.
+      expect(s).toContain('Jeff says, \\"Morning, everyone');
       expect(s).toContain('"actorId": "jeff"');
       expect(s).not.toContain("Anton greets the office");
       expect(s).not.toContain("Anton walks toward Tanya");
+      expect(s).not.toContain("Anton says");
     }
     const full = consequenceSuffix("full", ["jeff", "ana", "dan"]);
     expect(full).toContain("Jeff walks toward Ana");
     expect(full).toContain('"destinationActorId": "ana"');
   });
 
-  it("Anton/Tanya roster keeps the legacy examples byte-identical", () => {
+  it("Anton/Tanya roster keeps the legacy examples (exp-6 speech shape)", () => {
     const short = consequenceSuffix("short", ["anton", "tanya", "dana"]);
-    expect(short).toContain("Anton greets the office");
+    expect(short).toContain('Anton says, \\"Morning, everyone');
     expect(short).toContain('"actorId": "anton"');
     const full = consequenceSuffix("full", ["anton", "tanya", "dana"]);
     expect(full).toContain("Anton walks toward Tanya");
     expect(full).toContain('"destinationActorId": "tanya"');
   });
 
-  it("empty roster keeps the legacy examples byte-identical", () => {
-    expect(consequenceSuffix("short")).toContain("Anton greets the office");
+  it("empty roster keeps the legacy examples (exp-6 speech shape)", () => {
+    expect(consequenceSuffix("short")).toContain('Anton says, \\"Morning, everyone');
     expect(consequenceSuffix("full")).toContain("Anton walks toward Tanya");
   });
 });

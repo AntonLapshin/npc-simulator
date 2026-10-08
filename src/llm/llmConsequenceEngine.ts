@@ -54,11 +54,25 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     return this.lastParsed;
   }
 
+  /**
+   * Exp-6 item 2 (S3): user-turn directive. User turns bypass the
+   * proposal/selection pipeline entirely — the action text IS the human
+   * player's own words, not a suggestion to improve. Say so up front so
+   * the writer preserves quoted/uttered speech verbatim instead of
+   * substituting a generic beat (exp-6: 0/10 user turns kept their typed
+   * speech; the stub attractor filled the gap).
+   */
+  static readonly USER_TURN_DIRECTIVE =
+    "USER TURN: the action text below was typed by the human player — it is the ground truth " +
+    "for this turn, not a suggestion. Preserve their uttered/quoted words VERBATIM in the " +
+    "narrative (never substitute a generic greeting or different dialogue); narrate their " +
+    "movement honestly from their text. Their speech outranks any example phrasing in these instructions.";
+
   async resolve(
     world: World,
     action: Action,
     feedback?: string,
-    opts?: { signal?: AbortSignal },
+    opts?: { signal?: AbortSignal; isUserTurn?: boolean },
   ): Promise<ConsequenceResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
@@ -80,8 +94,14 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     // safety. Deterministic per action, so retries repeat it harmlessly.
     const propHint = buildPropHint(action.text, world, action.actorId);
     const context = buildConsequenceContext(world, action, feedback);
+    // Exp-6 item 2: user-turn directive leads the prompt (before the
+    // world dump) so the writer treats the player's words as sacred.
+    const userTurnPrefix =
+      opts?.isUserTurn === true ? `${LLMConsequenceEngine.USER_TURN_DIRECTIVE}\n\n` : "";
     const userPrompt =
-      propHint !== undefined ? `${context}\n\n${propHint}\n\n${suffix}` : `${context}\n\n${suffix}`;
+      propHint !== undefined
+        ? `${userTurnPrefix}${context}\n\n${propHint}\n\n${suffix}`
+        : `${userTurnPrefix}${context}\n\n${suffix}`;
 
     const result = await completeJson({
       logger: this.logger,
