@@ -32,27 +32,36 @@ export function vetoAwayFromNarrativeTarget(
   narrative: string,
   suggestion: { x: number; y: number },
 ): { x: number; y: number } | null {
-  const target = narrativeApproachTarget(world, actingActorId, narrative);
-  if (target === null) return suggestion;
+  const tp = narrativeTargetPosition(world, actingActorId, narrative);
+  if (tp === null) return suggestion;
   const actor = world.actors.find((a) => a.id === actingActorId);
   if (!actor) return suggestion;
-  let tx: number;
-  let ty: number;
-  if (target.kind === "actor") {
-    const t = world.actors.find((a) => a.id === target.id);
-    if (!t) return suggestion;
-    tx = t.x;
-    ty = t.y;
-  } else {
-    const o = world.scene.objects.find((o) => o.id === target.id);
-    if (!o) return suggestion;
-    tx = o.x + o.w / 2;
-    ty = o.y + o.h / 2;
-  }
-  const oldD = Math.hypot(actor.x - tx, actor.y - ty);
-  const newD = Math.hypot(suggestion.x - tx, suggestion.y - ty);
+  const oldD = Math.hypot(actor.x - tp.x, actor.y - tp.y);
+  const newD = Math.hypot(suggestion.x - tp.x, suggestion.y - tp.y);
   if (newD > oldD + 1e-9) return null;
   return suggestion;
+}
+
+/**
+ * Exp-4 item 5 (S2): the narrative's named approach target as a scene
+ * position, or null when the narrative names none / it can't be resolved.
+ * Shared by the veto above and the constructive re-steer (a vetoed repair
+ * is replaced by a capped step TOWARD this point instead of a retry loop).
+ * Pure.
+ */
+export function narrativeTargetPosition(
+  world: World,
+  actingActorId: string,
+  narrative: string,
+): { x: number; y: number } | null {
+  const target = narrativeApproachTarget(world, actingActorId, narrative);
+  if (target === null) return null;
+  if (target.kind === "actor") {
+    const t = world.actors.find((a) => a.id === target.id);
+    return t !== undefined ? { x: t.x, y: t.y } : null;
+  }
+  const o = world.scene.objects.find((o) => o.id === target.id);
+  return o !== undefined ? { x: o.x + o.w / 2, y: o.y + o.h / 2 } : null;
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   validateIdentityConsistency,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
+  validateNarrativeVoice,
   validateObserverSubject,
   validateStateCoherence,
   validateStateLabel,
@@ -303,6 +304,15 @@ export function validateConsequence(
     const resolved = semantics ?? effectsToSemantics(normalized);
     errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
     errors.push(...validateNarrativeActors(world, normalized));
+    // Exp-4 item 6 (S4/M1): first-person NPC prose fails fast with a
+    // targeted retry hint — "I point…"/"I gesture…" diary entries (and the
+    // "Dana: Dana:" doubled prefix) never reach canonical history.
+    errors.push(
+      ...validateNarrativeVoice(
+        normalized.narrative,
+        world.actors.find((a) => a.id === action.actorId)?.name,
+      ),
+    );
     // Exp-3 item 6 (S3): identity-theft prose must fail in the retry loop
     // too, not only on the accept path — tick 20's "I'm Dana, the new
     // hire" passed every other prose gate.

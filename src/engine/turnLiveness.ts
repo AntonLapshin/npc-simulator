@@ -11,6 +11,7 @@ import type {
   World,
 } from "../types.js";
 import { NOT_DONE_SENTINEL } from "../types.js";
+import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { setHonestHistoryNote } from "./turnSalvage.js";
 import { suggestionCore } from "./contextBuilder.js";
 
@@ -49,11 +50,16 @@ export function consecutiveFallbacks(world: World, actorId: string): number {
  * in-memory Map on EngineDependencies). Walks history from the tail; for
  * entries authored by this actor: sentinel-marked fallbacks extract the
  * action text after "tried: ", key it, and increment on match
- * (non-matching intents are skipped, not breaking — the actor may fail a
- * handshake, succeed at walking, then fail the handshake again); the
- * first applied own entry (no sentinel — including salvaged/partial
+ * (non-matching fallback intents are skipped, not breaking — the actor may
+ * fail a handshake, succeed at walking, then fail the handshake again);
+ * the first applied own entry (no sentinel — including salvaged/partial
  * turns, which prove the consequence tier rendered something) breaks the
- * streak. Interleaved other-actor turns are skipped. Pure.
+ * streak.
+ *
+ * Exp-4 item 7 (S3): liveness-floor entries are skipped, never breaking —
+ * they bypass validation, so they prove nothing about the banned intent
+ * (exp-4: the tick-19 liveness turn reset the "move|anton" streak and the
+ * same intent failed a third time at tick 22).
  */
 export function consecutiveIntentFailures(
   world: World,
@@ -70,6 +76,9 @@ export function consecutiveIntentFailures(
     const entry = world.history[i]!;
     const text = entry.text;
     if (!prefixes.some((p) => text.startsWith(p))) continue;
+    // Exp-4 item 7 (S3): the liveness floor is validation-bypassing
+    // synthetic progress — skip it without breaking the streak.
+    if (text.includes(LIVENESS_HISTORY_MARKER)) continue;
     if (!text.includes(NOT_DONE_SENTINEL)) break;
     // Fallback format: "<name> tried: <action text> (not done)<sentinel>".
     const beforeSentinel = text.split(NOT_DONE_SENTINEL)[0] ?? "";
