@@ -206,6 +206,239 @@ export function validateActingActorPresence(  normalized: { actorPatches: { acto
   return [];
 }
 
+/**
+ * Exp-3 item 6 (S3, tick-20 repro): identity-consistency gate. The
+ * consequence "Dana approaches Tanya's desk and greets her: 'Good morning,
+ * Tanya. I'm Dana, the new hire.'" passed every prose gate — both names
+ * are roster-valid, no observer-as-subject — yet Dana is the recruiter and
+ * Anton is the new hire. The claim entered canonical history and then
+ * Dana's compounding memory. First-person identity claims in the narrative
+ * are checked against the roster:
+ * - "I'm <Name>" / "I am <Name>" / "my name is <Name>" where <Name> is a
+ *   DIFFERENT roster actor's name/id → identity theft.
+ * - "I'm the new <role>" / "I'm a new <role>" where another actor's goal
+ *   marks THEM as the newcomer (first day / new hire / newcomer /
+ *   onboarding) and the claimant's goal does not → role theft.
+ * Skipped when the ACTION text itself contains the claimed phrase — the
+ * action is ground truth and the validator must not punish obedience.
+ * Pure.
+ */
+const SELF_NAME_CLAIM_RES = [
+  /\bi\s+am\s+([A-Z][a-z]{2,})\b/gi,
+  /\bi[''']m\s+([A-Z][a-z]{2,})\b/gi,
+  /\bmy\s+name\s+is\s+([A-Z][a-z]{2,})\b/gi,
+];
+const NEWCOMER_CLAIM_RE =
+  /\bi[''']?\s*(?:a)?m\s+(?:[A-Z][a-z]+,?\s+)?(?:the\s+|a\s+)?new\s+([a-z]{3,})\b/i;
+const NEWCOMER_MARKER_RE = /first day|new hire|newcomer|just joined|onboarding|first-day/i;
+
+function rosterNameHits(world: World, actorId: string, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  for (const a of world.actors) {
+    if (a.id === actorId) continue;
+    const candidates = [
+      a.name.toLowerCase(),
+      a.id.toLowerCase(),
+      ...a.name.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 3),
+    ];
+    if (candidates.includes(lower)) return a.id;
+  }
+  return undefined;
+}
+
+export function validateIdentityConsistency(
+  world: World,
+  narrative: string,
+  action: Action,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const actionLower = action.text.toLowerCase();
+  // 1. "I'm <Name>" claims pointing at another roster actor.
+  for (const re of SELF_NAME_CLAIM_RES) {
+    for (const m of narrative.matchAll(re)) {
+      const claimed = m[1]!;
+      // Obedience: the action scripted this introduction — not theft.
+      if (actionLower.includes(claimed.toLowerCase())) continue;
+      const otherId = rosterNameHits(world, action.actorId, claimed);
+      if (otherId !== undefined) {
+        errors.push({
+          code: "narrative.identity_theft",
+          message: `narrative has ${action.actorId} claiming to be "${claimed}" (roster actor ${otherId}): an actor never claims another roster actor's name — describe only the acting actor's own role`,
+        });
+        return errors;
+      }
+    }
+  }
+  // 2. "I'm the new <role>" claims when someone else is the newcomer.
+  {
+    const re = new RegExp(NEWCOMER_CLAIM_RE.source, "i");
+    const m = re.exec(narrative);
+    if (m) {
+      const role = m[1]!.toLowerCase();
+      if (!actionLower.includes("new hire") && !actionLower.includes(`new ${role}`)) {
+        const claimantIsNewcomer =
+          actor !== undefined && NEWCOMER_MARKER_RE.test(actor.goal ?? "");
+        if (!claimantIsNewcomer) {
+          const newcomer = world.actors.find(
+            (a) => a.id !== action.actorId && NEWCOMER_MARKER_RE.test(a.goal ?? ""),
+          );
+          if (newcomer !== undefined) {
+            errors.push({
+              code: "narrative.identity_theft",
+              message: `narrative has ${action.actorId} claiming to be "the new ${role}" but ${newcomer.id} is the established newcomer (${newcomer.goal?.slice(0, 60) ?? "new-hire role"}): an actor never claims another character's role — stay in the acting actor's own role from the context`,
+            });
+          }
+        }
+      }
+    }
+  }
+  return errors;
+}
+
+/**
+ * Exp-3 item 10 (S8, tick-3 repro): thought-grounding check. Triage gates
+ * WHETHER thoughts are written; nothing gates WHAT they claim — so
+ * "Giving Dana the pen she requested" (Dana never asked for a pen) and
+ * identity-echo thoughts land as canonical inner life. Two deterministic
+ * content rules, applied to every thoughts patch (acting actor and
+ * observers):
+ * - no new proper nouns: findUnknownPersonNames over the thoughts text —
+ *   a thought naming someone outside the roster/object vocabulary is
+ *   rejected ("Another day, same Liam."-class false memories).
+ * - no ungrounded request/grant claims: "the pen she requested", "gave me
+ *   the laptop", "told me I could take it" — the claimed object noun must
+ *   appear somewhere in world history (or the action text); otherwise the
+ *   thought invents a past that never happened.
+ * Hard errors in the retry loop (the model rewrites the thought cheaply);
+ * the codes join TIER2 so salvage may downgrade them to warnings rather
+ * than killing an otherwise good turn.
+ * Pure.
+ */
+const THOUGHT_CLAIM_RES = [
+  // "the pen she requested" / "the laptop Dana promised"
+  /\b(?:the|a|an|my|his|her|their)\s+([a-z]{3,})\s+(?:she|he|they|[A-Z][a-z]+)\s+(requested|asked for|wanted|promised|offered)\b/i,
+  // "gave me the pen" / "handed me the laptop"
+  /\b(?:gave|given|handed|lent|offered)\s+me\s+(?:the|a|an|my|his|her|their)\s+([a-z]{3,})\b/i,
+  // "told me I could take the car" / "said I could use her laptop"
+  /\b(?:told|said)\s+me\s+(?:i\s+could|to\s+take|to\s+use|to\s+have)\b[^.]{0,40}\b(?:the|a|an|my|his|her|their)\s+([a-z]{3,})\b/i,
+];
+
+/** Nouns too generic to demand history support (never ungrounded). */
+const THOUGHT_GENERIC_NOUNS = new Set([
+  "time", "day", "way", "thing", "things", "stuff", "lot", "bit", "chance",
+  "idea", "plan", "work", "job", "help", "hand",
+]);
+
+function thoughtNounGrounded(world: World, action: Action, noun: string): boolean {
+  const lower = noun.toLowerCase();
+  if (THOUGHT_GENERIC_NOUNS.has(lower)) return true;
+  if (action.text.toLowerCase().includes(lower)) return true;
+  return world.history.some((h) => h.text.toLowerCase().includes(lower));
+}
+
+export function validateThoughtGrounding(
+  world: World,
+  action: Action,
+  normalized: {
+    actorPatches: { actorId: string; thoughts?: string }[];
+    narrative: string;
+  },
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  for (const patch of normalized.actorPatches) {
+    const thoughts = patch.thoughts;
+    if (thoughts === undefined || thoughts.trim().length === 0) continue;
+    const unknown = findUnknownPersonNames(world, thoughts);
+    if (unknown.length > 0) {
+      errors.push({
+        code: "thoughts.unknown_proper_noun",
+        message: `thoughts for ${patch.actorId} name unknown person "${unknown[0]}" — only roster actors exist; inner reactions never invent people`,
+      });
+      continue;
+    }
+    for (const re of THOUGHT_CLAIM_RES) {
+      const m = re.exec(thoughts);
+      if (m?.[1] !== undefined && !thoughtNounGrounded(world, action, m[1])) {
+        errors.push({
+          code: "thoughts.ungrounded_claim",
+          message: `thoughts for ${patch.actorId} claim "${m[0].trim().slice(0, 60)}" with no history support — nothing in the story mentions "${m[1].toLowerCase()}"; thoughts describe reactions to what actually happened, never invent past requests or grants`,
+        });
+        break;
+      }
+    }
+  }
+  return errors;
+}
+
+/**
+ * Exp-3 item 8 (S6): state-label quality gate. Model-supplied `state`
+ * strings are the source of "near the tanya's mug" (article stacked on a
+ * possessive) and wrong-desk labels ("near the tanya's desk sign" while
+ * sitting at Dana's own desk). Two deterministic checks on the effective
+ * state (patch.state ?? world state) when the turn moves the actor or
+ * sets state explicitly:
+ * - grammar: /(near|at) the [A-Za-z]+'s/ — a stacked article+possessive
+ *   is never grammatical ("near Tanya's mug", not "near the tanya's mug");
+ * - wrong landmark: the state names another actor's owned furniture
+ *   ("<other>'s desk/chair") while the actor is within 2.5 cells of their
+ *   OWN same-kind object — the label points at the wrong desk.
+ * Reject with a targeted rewrite message (the validator never rewrites
+ * prose). Pure.
+ */
+export function validateStateLabel(
+  world: World,
+  normalized: {
+    actorPatches: { actorId: string; x?: number; y?: number; state?: string }[];
+  },
+  action: Action,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  for (const patch of normalized.actorPatches) {
+    const actor = world.actors.find((a) => a.id === patch.actorId);
+    if (!actor) continue;
+    if (patch.state === undefined) continue;
+    const state = patch.state;
+    if (/\b(near|at) the [A-Za-z]+'s\b/i.test(state)) {
+      errors.push({
+        code: "state.grammar_stacked_article",
+        message: `actor ${patch.actorId}: state "${state.slice(0, 80)}" stacks an article on a possessive ("the tanya's mug") — write "near Tanya's mug" / "at Dana's desk", never "the <name>'s"`,
+      });
+      continue;
+    }
+    // Wrong-desk: "X's <furniture>" for X ≠ actor, while actor is near
+    // their own same-kind furniture.
+    const m = /\b([A-Za-z]+)'s\s+(desk|chair|table|sofa|machine|cubicle)\b/i.exec(state);
+    if (m) {
+      const ownerName = m[1]!.toLowerCase();
+      const kind = m[2]!.toLowerCase();
+      const owner = world.actors.find(
+        (a) =>
+          a.id !== patch.actorId &&
+          (a.name.toLowerCase() === ownerName || a.id.toLowerCase() === ownerName),
+      );
+      if (owner !== undefined) {
+        // The <actorId>_ id-prefix convention encodes ownership: if the
+        // actor's own same-kind furniture is within 2.5 cells, the label
+        // naming someone else's is wrong-desk.
+        const ownNearby = world.scene.objects.some(
+          (o) =>
+            o.id.toLowerCase().startsWith(`${patch.actorId}_`) &&
+            new RegExp(kind, "i").test(`${o.id} ${o.name}`) &&
+            Math.hypot(actor.x - (o.x + o.w / 2), actor.y - (o.y + o.h / 2)) <= 2.5,
+        );
+        if (ownNearby) {
+          errors.push({
+            code: "state.wrong_landmark",
+            message: `actor ${patch.actorId}: state "${state.slice(0, 80)}" names ${owner.id}'s ${kind} while the actor's own ${kind} is nearby — the label points at the wrong desk; name the landmark the actor is actually at`,
+          });
+        }
+      }
+    }
+  }
+  return errors;
+}
+
 /** Capitalized words that are never person names (greetings, time, office vocab). */
 const COMMON_CAPITALIZED = new Set(
   [

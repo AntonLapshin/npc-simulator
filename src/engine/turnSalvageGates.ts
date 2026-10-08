@@ -25,6 +25,7 @@ import type {
   World,
 } from "../types.js";
 import {
+  validateIdentityConsistency,
   validateNarrativeActors,
   validateObserverSubject,
 } from "./validate/narrative.js";
@@ -181,6 +182,11 @@ export function isExplicitStayAction(text: string): boolean {
       reasoning: result.reasoning,
     }),
   );
+  // Exp-3 item 6 (S3, tick-20 repro): the accept path is the last line of
+  // defense — an actor claiming another roster actor's name or the
+  // newcomer's role ("I'm Dana, the new hire" on Dana's turn) must never
+  // become canonical history, no matter which path accepted the turn.
+  errors.push(...validateIdentityConsistency(world, result.narrative, action));
 
   const stripped = stripAttributionPrefix(result.narrative, actorName, action.actorId);
   errors.push(...validateObserverSubject(world, { narrative: stripped }, action));
@@ -259,6 +265,10 @@ export const TIER2_CODES = new Set([
   "action.pickup_no_patch",
   "action.sit_no_pose",
   "action.stand_no_pose",
+  // Exp-3 item 10 (S8): ungrounded thoughts are content misses, not world
+  // corruption — downgradable like other wording misses.
+  "thoughts.unknown_proper_noun",
+  "thoughts.ungrounded_claim",
 ]);
 
 export function isTier2Salvageable(errors: ValidationError[]): boolean {

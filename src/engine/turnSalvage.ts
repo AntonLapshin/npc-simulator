@@ -21,6 +21,7 @@ import { FALLBACK_CONSEQUENCE } from "../llm/llmConsequenceEngine.js";
 import { validateConsequence } from "./physicalValidator.js";
 import {
   findUnknownPersonNames,
+  validateIdentityConsistency,
   validateNarrativeActors,
   validateObserverSubject,
 } from "./validate/narrative.js";
@@ -30,12 +31,14 @@ import {
   isClampableMovementFailure,
   suggestMoveTarget,
 } from "./movementAssist.js";
+import { vetoAwayFromNarrativeTarget } from "./textHints.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 import {
   hasSpeechToken,
   parseActionQuotes,
   resolveDeterministicSemantics,
 } from "./deterministicSemantics.js";
+import { normLower, quotedSegments } from "./validate/speech.js";
 import { tryCloseTruncatedJson } from "../llm/json.js";
 import {
   findSupplementObserverSubject,
@@ -126,7 +129,7 @@ function applySalvageMovementRepair(
   // Item C7 (S1): the action text steers the suggestion — "walk east" and
   // "walk toward Ana" must not repair westward when no destination was
   // declared.
-  const suggestion =
+  let suggestion =
     claimed?.x !== undefined && claimed?.y !== undefined
       ? (clampMoveToCap(world, action.actorId, claimed.x, claimed.y) ??
         suggestMoveTarget(
@@ -143,6 +146,19 @@ function applySalvageMovementRepair(
           semantics.destinationObjectId,
           action.text,
         );
+  // Exp-3 item 7 (S5, A3): veto a repair that steps AWAY from the
+  // narrative's named approach target — a wrong-direction repair is worse
+  // than no repair (the turn falls through to fallback instead).
+  if (suggestion) {
+    const vetted = vetoAwayFromNarrativeTarget(
+      world,
+      action.actorId,
+      candidate.narrative,
+      suggestion,
+    );
+    if (!vetted) return null;
+    suggestion = vetted;
+  }
   if (!suggestion) return null;
   const repaired: ConsequenceResult = structuredClone(candidate);
   const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
@@ -353,6 +369,79 @@ function repairMissingPropStub(
   return repaired;
 }
 
+/**
+ * Exp-3 item 3 (S4/M4): deterministic quote reinsertion. The 8B drops long
+ * quotes on every attempt (tick 19: Tanya's test-plan offer died 3× on
+ * speech.dropped_words — the echo-gate exemption can't help when the model
+ * never renders the quote at all). The engine knows the exact words —
+ * they are in the action text — so when the ONLY failures are
+ * speech-rendering nits and the narrative dropped the action's quotes, the
+ * missing quotes are reinserted deterministically: appended as a
+ * `<Name> says "<quote>"` sentence when the model's frame is otherwise
+ * clean (preserving its movement description), or replacing the narrative
+ * outright when the frame itself contains invented dialogue (the rewrite
+ * then contains only action-grounded quotes). The model's valid patches
+ * are kept. Accepted only when the full gate suite AND the final accept
+ * gate pass on the rewritten payload. No LLM call. Pure except for the
+ * audit log.
+ */
+function repairDroppedQuotes(
+  world: World,
+  action: Action,
+  candidate: ConsequenceResult,
+  semantics: ActionSemantics,
+  cfg: EngineConfig,
+  logger?: Logger,
+): ConsequenceResult | null {
+  const quotes = parseActionQuotes(action.text);
+  if (quotes.length === 0) return null;
+  const frameQuotes = quotedSegments(candidate.narrative);
+  const grounded = (q: string): boolean =>
+    quotes.some((aq) => {
+      const a = normLower(aq);
+      const b = normLower(q);
+      return a === b || a.includes(b) || b.includes(a);
+    });
+  // Nothing to fix when the frame already renders every action quote and
+  // invents none.
+  const missing = quotes.filter((aq) => !frameQuotes.some((fq) => {
+    const a = normLower(aq);
+    const b = normLower(fq);
+    return a === b || a.includes(b) || b.includes(a);
+  }));
+  if (missing.length === 0 && frameQuotes.every(grounded)) return null;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const name = actor?.name ?? action.actorId;
+  const frame = candidate.narrative.trim();
+  const narrative =
+    frameQuotes.every(grounded) && frame.length > 0
+      ? `${frame} ${name} says ${missing.map((q) => `"${q}"`).join(" ")}`
+      : `${name} says ${quotes.map((q) => `"${q}"`).join(" ")}`;
+  const repaired: ConsequenceResult = {
+    ...structuredClone(candidate),
+    narrative,
+  };
+  // effects.quotedSpeech must match the rendered quotes, or the speech
+  // gates fail the repair on revalidation.
+  if (repaired.effects) {
+    repaired.effects.spoke = true;
+    repaired.effects.quotedSpeech = quotes;
+  }
+  const revalidation = validateConsequence(world, repaired, action, semantics, cfg);
+  if (!revalidation.valid) return null;
+  if (recheckAcceptedProse(world, action, repaired).length > 0) return null;
+  logger?.log({
+    module: "turn",
+    event: "salvage_quote_reinserted",
+    tick: world.tick,
+    turnIndex: world.turnIndex,
+    actorId: action.actorId,
+    input: { action, quotes, missing },
+    output: { narrative: repaired.narrative },
+  });
+  return repaired;
+}
+
 export function trySalvageConsequence(
   world: World,
   action: Action,
@@ -434,6 +523,12 @@ export function trySalvageConsequence(
     }),
     ...validateObserverSubject(world, { narrative: proseNarrative }, action),
     ...findSupplementObserverSubject(world, proseNarrative, action),
+    // Exp-3 item 5 (S3): identity-theft prose ("I'm Dana, the new hire"
+    // on Dana's turn) must trigger the same rebuild-from-action-text as
+    // the other prose gates — otherwise the turn dies at the accept()
+    // gate below and falls back to "Nothing changes." instead of
+    // advancing honestly.
+    ...validateIdentityConsistency(world, proseNarrative, action),
   ];
   if (proseErrors.length > 0) {
     const actor = world.actors.find((a) => a.id === action.actorId);
@@ -510,6 +605,26 @@ export function trySalvageConsequence(
         return null;
       }
       if (revalidation.valid) return { salvaged: c, warnings: [] };
+      // Exp-3 item 3 (S4/M4): before downgrading dropped quotes to
+      // warnings, reinsert them deterministically — the exact words are in
+      // the action text, and the 8B demonstrably cannot copy long quotes
+      // (tick 19 died 3× on speech.dropped_words). The repair is marked
+      // with a synthetic warning so history stays honest about the engine
+      // intervention (the turn is valid, not model-clean).
+      const quoteRepaired = repairDroppedQuotes(world, action, c, semantics, cfg, logger);
+      if (quoteRepaired) {
+        evaluate(true, "dropped quotes reinserted deterministically (speech nits repaired, not downgraded)");
+        return {
+          salvaged: quoteRepaired,
+          warnings: [
+            {
+              code: "salvage.quote_reinserted",
+              message:
+                "narrative dropped the action's quoted speech; the exact quotes were reinserted deterministically from the action text",
+            },
+          ],
+        };
+      }
       return { salvaged: c, warnings: revalidation.errors };
     }
     return null;

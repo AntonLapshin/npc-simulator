@@ -3,6 +3,7 @@ import { NOT_DONE_SENTINEL, normalizeHistoryEntry } from "../types.js";
 import { defaultConfig } from "../config.js";
 import { cloneWorld } from "./worldStore.js";
 import { perceiverIds } from "./validate/narrative.js";
+import { resolveDestinationObjectId } from "./deterministicSemantics.js";
 
 /**
  * Apply a validated ConsequenceResult to produce the next World:
@@ -61,25 +62,77 @@ export function summarizeNarrativeForMemory(narrative: string, actorName: string
 }
 
 /**
- * Item C12 (S8): describe a position for the auto-filled `state` string.
- * Nearest landmark within 6 cells → "near the <landmark>"; otherwise the
- * raw coordinates. Walls are not landmarks ("near the north wall" is
- * noise). Pure.
+ * Exp-3 item 8 (S6): describe a position for the auto-filled `state`
+ * string. Nearest landmark within 6 cells, with three fixes over the old
+ * "near the <lowercased name>":
+ * - tiers: furniture (desk/chair/machine/table/sofa) beats loose props —
+ *   and signs/walls are never landmarks ("near the dana's desk sign" was
+ *   a label, not a place);
+ * - grammar: possessive names keep their original caps with no stacked
+ *   article ("near Tanya's mug", never "near the tanya's mug");
+ * - proximity: "at" when adjacent (≤2 cells from center), "near" beyond;
+ * - preferred target: when the action names a destination object
+ *   ("Walk to the coffee machine"), that object wins the label when
+ *   within 6 cells — the repair may stop short of it, but the label
+ *   should name where the actor was headed, not the nearest fixture
+ *   (tick-15: "near the water cooler" for a coffee-machine walk).
+ * Pure.
  */
-export function describePosition(world: World, x: number, y: number): string {
-  let best: { name: string; d: number } | undefined;
+export function describePosition(
+  world: World,
+  x: number,
+  y: number,
+  preferredObjectId?: string,
+): string {
+  const hay = (o: { id: string; name: string }): string => `${o.id} ${o.name}`;
+  const isWall = (o: { id: string; name: string }): boolean => /wall/i.test(hay(o));
+  const isSign = (o: { id: string; name: string }): boolean => /sign/i.test(hay(o));
+  const isFurniture = (o: { id: string; name: string }): boolean =>
+    /desk|chair|machine|table|sofa/i.test(hay(o));
+  const centerDist = (o: { x: number; y: number; w: number; h: number }): number =>
+    Math.hypot(x - (o.x + o.w / 2), y - (o.y + o.h / 2));
+
+  if (preferredObjectId !== undefined) {
+    const preferred = world.scene.objects.find((o) => o.id === preferredObjectId);
+    if (preferred !== undefined && !isWall(preferred)) {
+      const d = centerDist(preferred);
+      if (d <= 6) return formatLandmark(preferred.name, d);
+    }
+  }
+  let bestFurniture: { name: string; d: number } | undefined;
+  let bestOther: { name: string; d: number } | undefined;
   for (const o of world.scene.objects) {
-    if (/wall/i.test(o.id) || /wall/i.test(o.name)) continue;
-    const cx = o.x + o.w / 2;
-    const cy = o.y + o.h / 2;
-    const d = Math.hypot(x - cx, y - cy);
-    if (d <= 6 && (best === undefined || d < best.d)) best = { name: o.name, d };
+    if (isWall(o) || isSign(o)) continue;
+    const d = centerDist(o);
+    if (d > 6) continue;
+    const slot = isFurniture(o) ? "furniture" : "other";
+    if (slot === "furniture") {
+      if (bestFurniture === undefined || d < bestFurniture.d)
+        bestFurniture = { name: o.name, d };
+    } else if (bestOther === undefined || d < bestOther.d) {
+      bestOther = { name: o.name, d };
+    }
   }
-  if (best !== undefined) {
-    const name = best.name.charAt(0).toLowerCase() + best.name.slice(1);
-    return `near the ${name}`;
-  }
+  const best = bestFurniture ?? bestOther;
+  if (best !== undefined) return formatLandmark(best.name, best.d);
   return `at (${x}, ${y})`;
+}
+
+/** "at Tanya's desk" / "near the coffee machine" — possessives keep caps, no stacked article. */
+function formatLandmark(name: string, d: number): string {
+  const label = /'s\b/.test(name)
+    ? name
+    : `the ${name.charAt(0).toLowerCase()}${name.slice(1)}`;
+  return `${d <= 2 ? "at" : "near"} ${label}`;
+}
+
+/** Resolve the action's named destination object for state-label preference. Pure. */
+export function preferredStateObject(world: World, action: Action): string | undefined {
+  try {
+    return resolveDestinationObjectId(world, action.text, action.actorId) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function isPartialHistoryEntry(entry: HistoryEntry | string): boolean {
@@ -113,11 +166,17 @@ export function applyConsequence(
       const moved = patch.x !== actor.x || patch.y !== actor.y;
       actor.x = patch.x;
       actor.y = patch.y;
-      // Item C12 (S8): keep `state` coherent with position — auto-fill
+      // Exp-3 item 8 (S6): keep `state` coherent with position — auto-fill
       // when the patch moves the actor without updating `state` (an
-      // explicit patch.state always wins below).
+      // explicit patch.state always wins below). The label prefers the
+      // action's named destination object when one resolves.
       if (moved && patch.state === undefined) {
-        actor.state = describePosition(next, patch.x, patch.y);
+        actor.state = describePosition(
+          next,
+          patch.x,
+          patch.y,
+          preferredStateObject(next, action),
+        );
       }
     }
     if (patch.state !== undefined) actor.state = patch.state;

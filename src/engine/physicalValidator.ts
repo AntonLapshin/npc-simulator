@@ -22,15 +22,19 @@ import {
   validateActionVerbCoverage,
   validateExplanationCoverage,
   validateObjectGrounding,
+  validateSitPoseSeating,
   OBJECT_INTERACT_RADIUS,
 } from "./validate/objects.js";
 import {
   validateActingActorPresence,
   validateAddresseePatch,
+  validateIdentityConsistency,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
   validateObserverSubject,
   validateStateCoherence,
+  validateStateLabel,
+  validateThoughtGrounding,
 } from "./validate/narrative.js";
 
 /**
@@ -299,10 +303,22 @@ export function validateConsequence(
     const resolved = semantics ?? effectsToSemantics(normalized);
     errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
     errors.push(...validateNarrativeActors(world, normalized));
+    // Exp-3 item 6 (S3): identity-theft prose must fail in the retry loop
+    // too, not only on the accept path — tick 20's "I'm Dana, the new
+    // hire" passed every other prose gate.
+    errors.push(...validateIdentityConsistency(world, normalized.narrative, action));
+    // Exp-3 item 10 (S8): thoughts are content-gated, not just
+    // presence-gated — no invented people, no ungrounded request/grant
+    // claims.
+    errors.push(...validateThoughtGrounding(world, action, normalized));
     errors.push(...validateObjectGrounding(world, normalized, action));
+    // Exp-3 item 8 (S6): pose:sit must be backed by a chair; state labels
+    // must be grammatical and point at the right landmark.
+    errors.push(...validateSitPoseSeating(world, normalized, action));
+    errors.push(...validateStateLabel(world, normalized, action));
     errors.push(...validateNarrativeMovementGrounding(world, normalized, action));
     if (resolved) {
-      errors.push(...validateSpeechPreservation(resolved, normalized.narrative));
+      errors.push(...validateSpeechPreservation(resolved, normalized.narrative, action.text));
       errors.push(...validateMovementIntent(world, normalized, action, resolved));
       errors.push(...validateDestinationObject(world, normalized, action, resolved));
       errors.push(...validateContactAdjacency(world, normalized, action, resolved));
@@ -345,13 +361,17 @@ export {
   validateActionVerbCoverage,
   validateExplanationCoverage,
   validateObjectGrounding,
+  validateSitPoseSeating,
 } from "./validate/objects.js";
 export {
   perceiverIds,
   validateActingActorPresence,
   validateAddresseePatch,
+  validateIdentityConsistency,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
   validateObserverSubject,
   validateStateCoherence,
+  validateStateLabel,
+  validateThoughtGrounding,
 } from "./validate/narrative.js";

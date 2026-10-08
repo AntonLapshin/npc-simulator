@@ -319,10 +319,14 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
     deps.getUserAction = async () => 'Walk to N and ask "Where is my desk?"';
     const next = await runTurn(world, deps);
     expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
-    // Narrative-based history: the dropped question is recorded as a
-    // warning, not asserted as asked-and-done.
-    expect(next.history.at(-1)!.text).toMatch(/^U: U walks toward N\. \(partial\)/);
+    // Narrative-based history: the dropped question is reinserted
+    // deterministically (Exp-3 item 3) — the question is preserved in the
+    // narrative AND the engine intervention is marked honestly.
+    expect(next.history.at(-1)!.text).toMatch(/^U: U walks toward N\. U says "Where is my desk\?" \(partial\)/);
+    expect(next.history.at(-1)!.text).toContain("quote_reinserted");
     expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
+    // …and because the question is kept, it stays open for N.
+    expect(getOpenQuestions(next, "n").length).toBe(1);
   });
 });
 

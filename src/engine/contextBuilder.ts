@@ -351,6 +351,9 @@ const CORE_VERBS: Array<[RegExp, string]> = [
   [/\b(sips?|sipped|sipping|drinks?|drank|drinking|types?|typed|typing)\b/i, "use"],
   [/\b(introduces?|introduced|introducing)\b/i, "introduce"],
   [/\b(looks?|looked|looking|glances?|glanced|watch|watches|nods?|nodded|smiles?|smiled)\b/i, "gesture"],
+  // Exp-3 item 6 (S2): push/pull verbs — chair-push keyed to "other|" and
+  // escaped the per-intent failure memory entirely.
+  [/\b(push|pushes|pushed|pushing|pull|pulls|pulled|pulling|slides?|slid|sliding|shoves?|shoved)\b/i, "push"],
 ];
 
 /** Object-kind nouns for the attractor core (desk/coffee/task/…). */
@@ -365,6 +368,10 @@ const CORE_NOUNS: Array<[RegExp, string]> = [
   [/\bbreak\b|\blunch\b|\btea\b/i, "break"],
   [/\bmeeting\b/i, "meeting"],
   [/\bhand\b|\bhands\b/i, "hand"],
+  // Exp-3 item 6 (S2): chair/table nouns — "push the chair in" needs a
+  // keyable noun for the failure memory.
+  [/\bchair\b/i, "chair"],
+  [/\btable\b/i, "table"],
 ];
 
 /**
@@ -415,6 +422,51 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
     }
   }
   return `${verb}|${noun}`;
+}
+
+/**
+ * Exp-3 item 6 (S2): prompt line naming this actor's currently-banned
+ * intents so the proposal engine doesn't burn suggestion slots on them.
+ * Returns "" when nothing is banned. Single trailing scan: per-key counts
+ * in the window before the first applied own entry ARE the consecutive
+ * streaks (non-matching intents don't break the streak — only an applied
+ * own entry does), so this matches consecutiveIntentFailures exactly.
+ */
+function buildFailedIntentsLine(world: World, actorId: string, cfg: EngineConfig): string {
+  const threshold = cfg.intentFailureBanThreshold ?? 2;
+  const actor = world.actors.find((a) => a.id === actorId);
+  const prefixes =
+    actor !== undefined
+      ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+      : [`${actorId}:`, `${actorId} tried:`];
+  const counts = new Map<string, number>();
+  const examples = new Map<string, string>();
+  for (let i = world.history.length - 1; i >= 0; i--) {
+    const text = world.history[i]!.text;
+    if (!prefixes.some((p) => text.startsWith(p))) continue;
+    if (!text.includes(NOT_DONE_SENTINEL)) break;
+    const beforeSentinel = text.split(NOT_DONE_SENTINEL)[0] ?? "";
+    const triedIdx = beforeSentinel.indexOf(" tried: ");
+    if (triedIdx < 0) continue;
+    let actionText = beforeSentinel.slice(triedIdx + " tried: ".length);
+    const notDone = " (not done)";
+    if (actionText.endsWith(notDone)) actionText = actionText.slice(0, -notDone.length);
+    const key = suggestionCore(world, actionText, actorId);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (!examples.has(key)) examples.set(key, actionText);
+  }
+  const banned: string[] = [];
+  for (const [key, count] of counts) {
+    if (count < threshold) continue;
+    const example = (examples.get(key) ?? key).replace(/\s+/g, " ").trim();
+    const short = example.length > 60 ? `${example.slice(0, 57)}…` : example;
+    banned.push(`"${short}" (${key}, failed ${count}x)`);
+  }
+  if (banned.length === 0) return "";
+  return (
+    `Your recent attempts at these FAILED and could not be rendered: ${banned.join("; ")}. ` +
+    `Do NOT suggest them again — try a fundamentally different approach.`
+  );
 }
 
 /**
@@ -731,6 +783,11 @@ export function buildProposalContext(
     recentOwn.length > 0
       ? `Your recent actions (do NOT repeat yourself):\n${recentOwn.map((a) => `- ${a}`).join("\n")}\nDo not propose an action you already took above unless the situation clearly changed.`
       : "Your recent actions: (none yet)";
+  // Exp-3 item 6 (S2): surface banned intents to the proposal engine so it
+  // doesn't burn a suggestion slot on something the deterministic screen
+  // will reject anyway. Soft signal only — the hard ban in runTurn is the
+  // load-bearing half (small models ignore prompt lines).
+  const failedIntentsLine = buildFailedIntentsLine(world, actorId, cfg);
   const coworkerAnchor = buildCoworkerAnchor(world, actorId);
 
   return [
@@ -750,6 +807,7 @@ export function buildProposalContext(
     questionsLine,
     "",
     repetitionLine,
+    ...(failedIntentsLine ? ["", failedIntentsLine] : []),
     "",
     buildRosterAnchor(world),
     "",

@@ -40,9 +40,28 @@ export function parseActionQuotes(text: string): string[] {
   const doubleRe = /"([^"]{2,})"/g;
   let m: RegExpExecArray | null;
   while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
-  // Single quotes: avoid matching apostrophes inside words (don't, I'm).
-  const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(normalized)) !== null) out.push(m[2]!);
+  out.push(...singleQuotedSegments(normalized));
+  return out;
+}
+
+/**
+ * Exp-3 item 6 (S3): single-quoted segment extraction with apostrophe
+ * awareness, shared by parseActionQuotes and quotedSegments (speech.ts).
+ * Dialogue is often single-quoted after a comma or colon ("say to Anton,
+ * 'Feel free…'", "greets her: 'Good morning…'"), and quotes contain
+ * apostrophes ("I'm Dana"). The naive [^']+ content class truncates at
+ * the first apostrophe and misses comma/colon-led quotes — the tick-20
+ * invented quote was invisible to the invented_dialogue gate for exactly
+ * this reason. An interior ' counts as an apostrophe (not a closer) when
+ * followed by a letter; the closing ' must not be followed by a letter
+ * (so the ' in "Tanya's" never closes early); bare contractions
+ * ("don't", "I'm") never open because the ' isn't quote-led.
+ */
+const SINGLE_QUOTE_RE = /(^|[\s(\[{,:])'((?:[^']|'(?=[A-Za-z])){4,})'(?![A-Za-z])/g;
+
+export function singleQuotedSegments(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(SINGLE_QUOTE_RE)) out.push(m[2]!);
   return out;
 }
 
@@ -383,18 +402,31 @@ export function rankDestinationObjects(
       a.id !== actingActorId &&
       new RegExp(`\\b${a.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[''’]s\\b`, "i").test(actionText),
   );
+  // Exp-3 item 7 (S5, tick-24 repro): "Sit down on MY chair at MY new desk
+  // …, waiting for HER to show me the test plan" resolved to tanya_desk —
+  // the bare object pronoun "her" (not a possessive of "desk") hijacked
+  // ownerPrefix because third-person outranked self-possessive. "my"/"own"
+  // now wins outright; "his"/"her"/"their" only scopes ownership when
+  // grammatically attached to a landmark noun ("his desk"), never as a
+  // bare pronoun elsewhere in the sentence.
+  const thirdPossessiveAttached =
+    /\b(his|her|their)\s+(the\s+)?(desk|chair|table|machine|laptop|mug|cup|papers|sofa|office|cubicle|screen|monitor|notebook|phone)\b/i.test(
+      actionText,
+    );
   const ownerPrefix = namedOwner
     ? namedOwner.id.toLowerCase()
-    : thirdPossessive && otherMentioned.length === 1
-      ? otherMentioned[0]!.id.toLowerCase()
-      : (selfPossessive || thirdPossessive) && actorLower
-        ? actorLower
-        : undefined;
+    : selfPossessive && actorLower
+      ? actorLower
+      : thirdPossessiveAttached && otherMentioned.length === 1
+        ? otherMentioned[0]!.id.toLowerCase()
+        : (selfPossessive || thirdPossessive) && actorLower
+          ? actorLower
+          : undefined;
   // Name-prefix check follows the same owner (fixes the old fallback that
   // compared against the acting actor's name on the third-person path).
   const ownerName =
     namedOwner?.name.toLowerCase() ??
-    (thirdPossessive && otherMentioned.length === 1
+    (thirdPossessiveAttached && otherMentioned.length === 1
       ? otherMentioned[0]!.name.toLowerCase()
       : actorName);
   const scored = candidates.map((o) => {
@@ -518,6 +550,66 @@ export function resolveDestinationObjectId(
   actingActorId?: string,
 ): string | undefined {
   return resolveDestinationObjectIdDetailed(world, actionText, actingActorId).id;
+}
+
+/** Stopwords/possessives stripped before fuzzy object-id matching. */
+const FUZZY_STOPWORDS = new Set([
+  "a", "an", "the", "my", "his", "her", "their", "our", "your", "its",
+  "this", "that", "these", "those", "of", "to", "at", "on", "in",
+]);
+
+/** Near-synonym head nouns the scene uses interchangeably ("cup"→"mug"). */
+const FUZZY_SYNONYMS: Record<string, string> = {
+  cup: "mug",
+  couch: "sofa",
+  settee: "sofa",
+  pc: "laptop",
+  computer: "laptop",
+  telephone: "phone",
+};
+
+/**
+ * Exp-3 item 7 (S5, A4 — tick-15a repro): fuzzy-match a model-declared
+ * object id that names nothing in the scene ("anton's coffee cup" →
+ * `coffee_mug`). Tokenizes on non-alphanumerics, strips possessives
+ * ("anton's" → "anton") and stopwords, then scores scene objects by
+ * shared content tokens — requires ≥2 shared tokens or a head-noun
+ * match, and returns undefined when the best score is ambiguous (tied).
+ * Pure. Conservative by design: a wrong fuzzy match is worse than a drop.
+ */
+export function fuzzyMatchObjectId(declared: string, world: World): string | undefined {
+  const tokens = declared
+    .toLowerCase()
+    .replace(/[''’]s\b/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3 && !FUZZY_STOPWORDS.has(t))
+    .map((t) => FUZZY_SYNONYMS[t] ?? t);
+  if (tokens.length === 0) return undefined;
+  const tokenSet = new Set(tokens);
+  const scored = world.scene.objects.map((o) => {
+    const hay = `${o.id} ${o.name}`.toLowerCase().replace(/_/g, " ");
+    const hayTokens = new Set(
+      hay
+        .split(/[^a-z0-9]+/)
+        .filter((t) => t.length >= 3)
+        .map((t) => FUZZY_SYNONYMS[t] ?? t),
+    );
+    let shared = 0;
+    for (const t of tokenSet) if (hayTokens.has(t)) shared++;
+    const headNoun = tokens[tokens.length - 1]!;
+    const headMatch = hayTokens.has(headNoun);
+    return { o, shared, headMatch, score: shared * 2 + (headMatch ? 1 : 0) };
+  });
+  scored.sort((a, b) => b.score - a.score || a.o.id.localeCompare(b.o.id));
+  const best = scored[0];
+  if (!best || best.score === 0) return undefined;
+  // Require real evidence: ≥2 shared tokens, or a head-noun match plus at
+  // least one more shared token. A lone head-noun ("cup" alone) is too weak.
+  if (!(best.shared >= 2 || (best.headMatch && best.shared >= 1 && tokens.length >= 2)))
+    return undefined;
+  // Ambiguous: tied best score → no match rather than a guess.
+  if (scored.length > 1 && scored[1]!.score === best.score) return undefined;
+  return best.o.id;
 }
 
 export type DeterministicSemantics = {

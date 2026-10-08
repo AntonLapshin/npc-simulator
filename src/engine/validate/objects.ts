@@ -2,7 +2,7 @@
 
 import type { Action, ValidationError, World } from "../../types.js";
 import { contentWords, hasOwnUtterance, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
-import { CONTACT_RADIUS, isInterrogativeQuestion } from "./movement.js";
+import { CONTACT_RADIUS, distanceToRect, isInterrogativeQuestion } from "./movement.js";
 
 /**
  * F4: object interaction radius. Moving/resizing an object or flipping its
@@ -51,6 +51,74 @@ function openNounPattern(world: World): string {
 function mentionsWordBoundary(text: string, variant: string): boolean {
   if (variant.length < 2) return false;
   return new RegExp(`\\b${variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text);
+}
+
+/**
+ * Exp-3 item 8 (S6): seating check. True when (x, y) can host a seated
+ * actor: on or adjacent (≤1.5 cells, edge distance) to a chair/sofa
+ * object. The 1.5-radius adjacency covers non-passable lounge chairs
+ * (which can never be stood on); desk chairs are standable 1×1 passable
+ * cells, so standing on the chair cell counts. No `kind` field exists on
+ * scene objects — chairs are identified by id/name convention.
+ * Pure.
+ */
+export function isSeatingCell(world: World, x: number, y: number): boolean {
+  return world.scene.objects.some(
+    (o) =>
+      /chair|sofa/i.test(`${o.id} ${o.name}`) && distanceToRect(x, y, o) <= 1.5,
+  );
+}
+
+/**
+ * Exp-3 item 8 (S6, tick-28/11 repro): pose:sit must be backed by a chair.
+ * Tanya drifted (8,7)→(8,10) while `state` still implied sitting and
+ * `pose:sit` persisted at a non-chair cell; Dana sat at (12,11), 3 cells
+ * from his chair. Fires when the effective pose is "sit" AND the turn
+ * either sets pose:sit or moves the actor (>1 cell — catches stale sit
+ * drifting with the body) AND the effective position is not a seating
+ * cell. Reject, don't repair — silently snapping pose→stand rewrites
+ * fiction; the retry message names the nearest chair so the model can sit
+ * legally. Pure.
+ */
+export function validateSitPoseSeating(
+  world: World,
+  normalized: {
+    actorPatches: { actorId: string; x?: number; y?: number; pose?: string }[];
+  },
+  action: Action,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  const chairs = world.scene.objects.filter((o) => /chair|sofa/i.test(`${o.id} ${o.name}`));
+  // Fail open when the scene models no seating at all — without chair
+  // objects there is nothing to validate against (minimal test worlds,
+  // chairless scenes); the gate only constrains scenes that DO model
+  // chairs, where sitting in mid-air is a real error.
+  if (chairs.length === 0) return errors;
+  for (const patch of normalized.actorPatches) {
+    const actor = world.actors.find((a) => a.id === patch.actorId);
+    if (!actor) continue;
+    const effectivePose = patch.pose ?? actor.pose;
+    if (!/^sit$/i.test(effectivePose ?? "")) continue;
+    const poseChanged = patch.pose !== undefined && patch.pose !== actor.pose;
+    const ex = patch.x ?? actor.x;
+    const ey = patch.y ?? actor.y;
+    const moved = Math.hypot(ex - actor.x, ey - actor.y) > 1;
+    if (!poseChanged && !moved) continue;
+    if (isSeatingCell(world, ex, ey)) continue;
+    const nearest = chairs
+      .map((o) => ({ o, d: distanceToRect(ex, ey, o) }))
+      .sort((a, b) => a.d - b.d)[0];
+    errors.push({
+      code: "pose.sit_no_chair",
+      message:
+        `actor ${patch.actorId}: pose is "sit" at (${ex}, ${ey}) but no chair/sofa within 1.5 cells` +
+        (nearest !== undefined
+          ? ` (nearest: ${nearest.o.id} at (${nearest.o.x}, ${nearest.o.y}), ${nearest.d.toFixed(1)} cells away)`
+          : " (no chair/sofa in this scene)") +
+        `: move adjacent to a chair before sitting, or drop the sit`,
+    });
+  }
+  return errors;
 }
 
 /**

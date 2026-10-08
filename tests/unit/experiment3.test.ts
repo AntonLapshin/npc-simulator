@@ -452,7 +452,7 @@ describe("exp3-7 fuzzy object-ID repair (ticks 10/11)", () => {
 });
 
 describe("exp3-6 partial-apply / salvage (ticks 3/9)", () => {
-  it("salvages valid movement plus a stray hallucinated patch, warning on speech", () => {
+  it("salvages valid movement plus a stray hallucinated patch, repairing the dropped quote", () => {
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
     world.actors.find((a) => a.id === "u")!.y = 3;
@@ -474,7 +474,12 @@ describe("exp3-6 partial-apply / salvage (ticks 3/9)", () => {
     expect(out).not.toBeNull();
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "u")).toBe(true);
-    expect(out!.warnings.length).toBeGreaterThan(0);
+    // Exp-3 item 3 (S4): the dropped quote is reinserted deterministically
+    // (frame preserved, quote appended) — marked with the honest
+    // quote_reinserted note instead of a speech warning downgrade.
+    expect(out!.warnings.some((w) => w.code === "salvage.quote_reinserted")).toBe(true);
+    expect(out!.salvaged.narrative).toContain("I need caffeine.");
+    expect(out!.salvaged.narrative).toContain("approaches the coffee machine");
   });
 
   it("refuses salvage when the acting actor is unpatched", () => {
@@ -1162,8 +1167,10 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     // Degraded-but-advancing: movement kept, hallucination stripped.
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
-    expect(out!.warnings.length).toBeGreaterThan(0);
-    expect(errorText(out!.warnings)).toMatch(/question|exact words/);
+    // Exp-3 item 3 (S4): the dropped question is reinserted
+    // deterministically — marked with the honest quote_reinserted note.
+    expect(out!.warnings.some((w) => w.code === "salvage.quote_reinserted")).toBe(true);
+    expect(out!.salvaged.narrative).toContain("is this my spot?");
   });
 
   it("repairs missing movement in salvage when locomotion is implied", () => {

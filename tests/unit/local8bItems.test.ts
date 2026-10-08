@@ -66,8 +66,9 @@ describe("C1 roster discipline", () => {
 
   it("negative-example names avoid the actual roster", () => {
     const line = buildRosterDisciplineLine(["anton", "tanya", "dana"]);
+    // Exp-3 item 1: "Leon" is the exp-3 invention shape; "Liam" second.
+    expect(line).toContain('"Leon"');
     expect(line).toContain('"Liam"');
-    expect(line).toContain('"John"');
     expect(line).not.toMatch(/writing "Anton" or "Tanya"/);
   });
 
@@ -742,7 +743,7 @@ describe("C12 position-derived state", () => {
 
   it("describePosition names the nearest landmark within 6, else coordinates", () => {
     const world = machineWorld();
-    expect(describePosition(world, 3, 3)).toBe("near the coffee machine");
+    expect(describePosition(world, 3, 3)).toBe("at the coffee machine");
     // Walls are not landmarks.
     expect(describePosition(world, 10, 0)).toBe("at (10, 0)");
     expect(describePosition(world, 19, 19)).toBe("at (19, 19)");
@@ -757,7 +758,7 @@ describe("C12 position-derived state", () => {
       reasoning: "r",
     };
     const next = applyConsequence(world, result, { actorId: "u", text: "Walk." });
-    expect(next.actors.find((a) => a.id === "u")!.state).toBe("near the coffee machine");
+    expect(next.actors.find((a) => a.id === "u")!.state).toBe("at the coffee machine");
   });
 
   it("an explicit state patch still wins", () => {

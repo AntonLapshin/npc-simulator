@@ -67,6 +67,7 @@ describe("readLayaRuntimeConfig", () => {
       // Exp-2-E additions: also off by default.
       salvageSelect: false,
       locomotion: false,
+      renderability: false,
     });
     expect(cfg.url).toBe("http://127.0.0.1:8000");
     expect(cfg.confidenceThreshold).toBe(0.55);

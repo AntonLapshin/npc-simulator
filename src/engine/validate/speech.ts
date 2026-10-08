@@ -1,7 +1,7 @@
 // Speech and narrative-prose validation checks (extracted from physicalValidator.ts).
 
 import type { Action, ActionSemantics, ValidationError } from "../../types.js";
-import { maskResumedActivity, normalizeQuotes } from "../deterministicSemantics.js";
+import { maskResumedActivity, normalizeQuotes, singleQuotedSegments } from "../deterministicSemantics.js";
 
 /**
  * F35: the canonical "resumed activity" mask lives in
@@ -77,7 +77,8 @@ export function quotedSpeechEchoedVerbatim(actionText: string, narrative: string
 }
 
 /** Double- and single-quoted segments (content length >= 2). */
-export function quotedSegments(text: string): string[] {  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
+export function quotedSegments(text: string): string[] {
+  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
   // segments ("...") are extracted and compare equal to straight-quoted
   // action text (and vice versa).
   const normalized = normalizeQuotes(text);
@@ -85,9 +86,11 @@ export function quotedSegments(text: string): string[] {  // Exp-6 item 2: norma
   const doubleRe = /"([^"]{2,})"/g;
   let m: RegExpExecArray | null;
   while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
-  // Single quotes: avoid matching apostrophes inside words (don't, I'm).
-  const singleRe = /(^|[\s(\[{])'([^']{4,})'/g;
-  while ((m = singleRe.exec(normalized)) !== null) out.push(m[2]!);
+  // Exp-3 item 6 (S3): single-quote extraction is apostrophe-aware and
+  // sees comma/colon-led dialogue (shared with parseActionQuotes) — the
+  // tick-20 invented quote ('Good morning, Tanya. I'm Dana, the new
+  // hire.') was invisible to the invented_dialogue gate before this.
+  out.push(...singleQuotedSegments(normalized));
   return out;
 }
 
@@ -190,6 +193,7 @@ export function hasOwnUtterance(text: string): boolean {
 export function validateSpeechPreservation(
   semantics: ActionSemantics,
   narrative: string,
+  actionText?: string,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
   // Ground truth for uttered words comes from the judge/declaration —
@@ -224,6 +228,14 @@ export function validateSpeechPreservation(
 
   // 2. Quoted dialogue in the narrative must be grounded in the judged
   // utterances.
+  //
+  // Exp-3 item 6 (S3): when the judge extracted no quotes (actionQuotes
+  // empty), a narrative quote that appears VERBATIM in the action text is
+  // still grounded — the action text IS the utterance (fully-spoken
+  // actions, e.g. the golden test's "Hey guys, I'm a new team member!").
+  // Only quotes absent from both the judged utterances AND the action
+  // text are invented.
+  const actionNorm = actionText !== undefined ? normLower(actionText) : "";
   for (const q of narrativeQuotes) {
     const words = contentWords(q);
     if (words.length === 0) continue;
@@ -231,9 +243,30 @@ export function validateSpeechPreservation(
     if (normLower(q).length < 8 && words.length <= 1) continue;
     const judgedWords = contentWords(actionQuotes.join(" "));
     const grounded = words.filter((w) => judgedWords.some((aw) => sameStem(w, aw)));
+    // Verbatim-in-action-text grounding (fully-spoken actions).
+    if (
+      grounded.length === 0 &&
+      actionQuotes.length === 0 &&
+      actionNorm.length > 0 &&
+      actionNorm.includes(normLower(q))
+    )
+      continue;
     // Allow short greeting renders when the judge says speech happened
     // but records no exact quote ("Say hello" -> "says 'Hi!'").
-    if (grounded.length === 0 && actionQuotes.length === 0 && semantics.speaks) continue;
+    // Exp-3 item 6 (S3, tick-20 repro): the escape previously allowed
+    // ARBITRARILY LONG invented quotes ("Good morning, Tanya. I'm Dana,
+    // the new hire.") whenever the judge said speaks=true with no
+    // extracted quotes — bound it to actual short greetings (≤3 content
+    // words, <28 chars) so longer invented dialogue fails loudly instead
+    // of entering canonical history.
+    const isShortGreetingRender = words.length <= 3 && normLower(q).length < 28;
+    if (
+      grounded.length === 0 &&
+      actionQuotes.length === 0 &&
+      semantics.speaks &&
+      isShortGreetingRender
+    )
+      continue;
     // Require at least half the narrative quote's content words to appear
     // in the judged utterances (single-word quotes require the one word).
     const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);

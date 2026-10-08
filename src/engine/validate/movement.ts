@@ -240,7 +240,17 @@ export function validateDestinationObject(
       code: "movement.not_closer_object",
       message: `action says to move toward ${obj.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${obj.name} (${obj.id})`,
     });
-  } else if (narrativeClaimsArrival(normalized.narrative, obj.name, obj.id) && newDist > ARRIVAL_RADIUS) {
+    // Exp-3 item 7 (S5, A2): the arrival/wrong-landmark sub-checks are
+    // skipped only for FUZZY destinations (explicit === false). A fuzzy
+    // keyword-fallback resolution may name the wrong object — enforcing
+    // arrival AT it would reject good movement toward the true target.
+    // Strictly-closer above still applies. Tri-state: undefined (legacy
+    // or manually-built semantics) runs the checks — backward compatible.
+  } else if (
+    semantics.destinationObjectExplicit !== false &&
+    narrativeClaimsArrival(normalized.narrative, obj.name, obj.id) &&
+    newDist > ARRIVAL_RADIUS
+  ) {
     errors.push({
       code: "movement.arrival_too_far",
       message: `narrative claims to be AT ${obj.name} (${obj.id}) but ends at (${patch.x}, ${patch.y}), ${newDist.toFixed(1)} cells away: land within ${ARRIVAL_RADIUS} cells of it (next to it, never inside) or drop the arrival claim`,
@@ -259,15 +269,19 @@ export function validateDestinationObject(
   }
   // Exp-3 item 4: forbid claiming a DIFFERENT landmark ("stands next to
   // Tanya's desk" for "my desk" — tick 15). Strict name/id matching only:
-  // a bare kind word ("at his desk") cannot identify the object.
-  for (const other of world.scene.objects) {
-    if (other.id === obj.id) continue;
-    if (narrativeClaimsArrival(normalized.narrative, other.name, other.id, true)) {
-      errors.push({
-        code: "movement.wrong_landmark",
-        message: `narrative claims arrival at ${other.name} (${other.id}) but the action targets ${obj.name} (${obj.id}): move toward the named target, never claim a different landmark`,
-      });
-      break;
+  // a bare kind word ("at his desk") cannot identify the object. Exp-3
+  // item 7 (S5): skipped for fuzzy destinations (explicit === false) —
+  // see the arrival gate above.
+  if (semantics.destinationObjectExplicit !== false) {
+    for (const other of world.scene.objects) {
+      if (other.id === obj.id) continue;
+      if (narrativeClaimsArrival(normalized.narrative, other.name, other.id, true)) {
+        errors.push({
+          code: "movement.wrong_landmark",
+          message: `narrative claims arrival at ${other.name} (${other.id}) but the action targets ${obj.name} (${obj.id}): move toward the named target, never claim a different landmark`,
+        });
+        break;
+      }
     }
   }
   return errors;

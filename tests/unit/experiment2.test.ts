@@ -43,6 +43,12 @@ function officeWorld(): World {
       id: "coffee_machine", name: "Coffee machine", description: "Coffee.",
       x: 0, y: 0, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
     },
+    // Exp-3 item 8 (S6): the scene needs a chair — pose:sit at a
+    // chairless cell is now rejected by validateSitPoseSeating.
+    {
+      id: "spare_chair", name: "Spare chair", description: "A chair.",
+      x: 1, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    },
   );
   return world;
 }

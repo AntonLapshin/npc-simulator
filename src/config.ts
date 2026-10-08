@@ -42,6 +42,11 @@ export const defaultConfig: EngineConfig = {
    */
   livenessFallbackThreshold: 3,
   /**
+   * Exp-3 item 6 (S2): consecutive own-turn fallbacks of the same intent
+   * key before that intent is banned from selection. Default 2.
+   */
+  intentFailureBanThreshold: 2,
+  /**
    * Exp-6 item 3: wall-clock budget for one turn's consequence phase.
    * A turn burned 47 minutes in Exp-6 with no circuit breaker.
    */
@@ -80,6 +85,8 @@ export function readLayaRuntimeConfig(
     // Exp-2-E additions: OFF by default until Phase 5 validates them.
     LAYA_SALVAGE_SELECT: env["LAYA_SALVAGE_SELECT"] ?? "0",
     LAYA_LOCOMOTION: env["LAYA_LOCOMOTION"] ?? "0",
+    // Exp-3 item 6 (S2): OFF by default until Phase 5 validates it.
+    LAYA_RENDERABILITY: env["LAYA_RENDERABILITY"] ?? "0",
   });
 }
 

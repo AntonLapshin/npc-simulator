@@ -29,6 +29,7 @@ describe("readLayaConfig", () => {
         // Exp-2-E additions: OFF by default.
         salvageSelect: false,
         locomotion: false,
+        renderability: false,
       },
     });
   });

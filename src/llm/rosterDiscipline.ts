@@ -8,7 +8,12 @@
 /** Negative-example names, filtered to ones absent from the given roster. */
 function inventedNameExamples(rosterIds: string[]): string[] {
   const known = new Set(rosterIds.map((id) => id.toLowerCase()));
-  return ["Anton", "Tanya", "Liam", "John"].filter((n) => !known.has(n.toLowerCase()));
+  // Exp-3 M2: the 8B invented "leon" on a roster where Anton/Tanya/Dana
+  // are legitimate — the attractor now hides inside real vocabulary, so
+  // the negative examples name the shape explicitly.
+  return ["Anton", "Tanya", "Leon", "Liam", "John"].filter(
+    (n) => !known.has(n.toLowerCase()),
+  );
 }
 
 /**
@@ -28,7 +33,12 @@ export function buildRosterDisciplineLine(rosterIds: string[]): string {
     `ROSTER DISCIPLINE: the ONLY people who exist are ${ids}. ` +
     `Never name, address, quote, or patch anyone else — ` +
     `writing ${badExample} when it is not in the list above is INVALID (a made-up person). ` +
-    `When in doubt, re-read the list: if a name is not there, it does not exist.`
+    // Exp-3 item 1 (M2): the 8B invents people AND places mid-collapse
+    // ("Leon", "a stranger", "the cafe", "coffee table" for lounge_table).
+    // No new proper noun for a person or place may appear anywhere —
+    // every person comes from the ROSTER, every object from OBJECT IDS.
+    `Never introduce ANY new proper noun for a person or place — no 'Leon', no 'a stranger', ` +
+    `no 'the cafe', no renamed objects. If a name is not in the ROSTER list above, it does not exist.`
   );
 }
 

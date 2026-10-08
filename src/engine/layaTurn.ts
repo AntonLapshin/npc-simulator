@@ -26,7 +26,7 @@ import {
   SALIENCE_QUESTION,
   SELECTION_CASCADE,
 } from "../decision/diagrams.js";
-import { buildIntentState } from "../decision/decisionState.js";
+import { buildIntentState, buildRenderabilityState } from "../decision/decisionState.js";
 import { LayaClient } from "../decision/layaClient.js";
 import { createLayaClient } from "../decision/wiring.js";
 import {
@@ -832,6 +832,51 @@ export async function plausibilityAdvisoryForRetry(
       scored: false,
       reason: "unexpected error; no advisory appended (fail open)",
     });
+    return undefined;
+  }
+}
+
+/**
+ * Exp-3 item 6 (S2): the renderability score question. One batched
+ * decide() with a single 1–5 score: "could a simulator faithfully turn
+ * this action into concrete world changes here?" Fail-open: a missing
+ * answer scores neutral (3), Laya failure returns undefined.
+ */
+export function buildRenderabilityQuestion(actionText: string): LayaQuestion {
+  return {
+    type: "score",
+    instructions:
+      "How renderable is this action in the current scene — could a simulator faithfully turn it into concrete world changes? " +
+      "1 = impossible (target person/object doesn't exist or is far out of reach; requires teleporting; conjures props from nothing). " +
+      "2 = very unlikely (target exists but too far away; pose or props mismatch). " +
+      "3 = plausible but needs positioning or props the renderer must invent. " +
+      "4 = renderable with minor assumptions. " +
+      "5 = directly renderable: target adjacent or present, pose/props already fit. " +
+      `Action: ${actionText.slice(0, 400)}`,
+    levels: ["1", "2", "3", "4", "5"],
+  };
+}
+
+/**
+ * Exp-3 item 6 (S2): run one renderability score for the chosen action.
+ * Returns the 1–5 level, 3 on a missing answer (neutral, fail-open), or
+ * undefined when Laya itself fails (fail open — never block the turn on
+ * a decision-layer outage). Pure shell around client.decide; never
+ * throws outward.
+ */
+export async function runRenderabilityScore(
+  client: LayaClient,
+  world: World,
+  actorId: string,
+  actionText: string,
+): Promise<number | undefined> {
+  try {
+    const state = buildRenderabilityState(world, actorId, actionText);
+    const answers = await client.decide(state, {
+      renderability: buildRenderabilityQuestion(actionText),
+    });
+    return scoreAnswerToLevel(answers["renderability"], 5) ?? 3;
+  } catch {
     return undefined;
   }
 }

@@ -12,6 +12,7 @@ import type {
 } from "../types.js";
 import { NOT_DONE_SENTINEL } from "../types.js";
 import { setHonestHistoryNote } from "./turnSalvage.js";
+import { suggestionCore } from "./contextBuilder.js";
 
 /**
  * Exp-5 item 6: consecutive own-turn fallback streak for an actor. Counts
@@ -37,6 +38,47 @@ export function consecutiveFallbacks(world: World, actorId: string): number {
     if (!prefixes.some((p) => text.startsWith(p))) continue;
     if (text.includes(NOT_DONE_SENTINEL)) streak++;
     else break;
+  }
+  return streak;
+}
+
+/**
+ * Exp-3 item 6 (S2): consecutive own-turn fallback streak for a SPECIFIC
+ * intent key (`verb|noun` from suggestionCore — "shake|tanya",
+ * "push|chair"). History-derived, so it survives save/load (unlike an
+ * in-memory Map on EngineDependencies). Walks history from the tail; for
+ * entries authored by this actor: sentinel-marked fallbacks extract the
+ * action text after "tried: ", key it, and increment on match
+ * (non-matching intents are skipped, not breaking — the actor may fail a
+ * handshake, succeed at walking, then fail the handshake again); the
+ * first applied own entry (no sentinel — including salvaged/partial
+ * turns, which prove the consequence tier rendered something) breaks the
+ * streak. Interleaved other-actor turns are skipped. Pure.
+ */
+export function consecutiveIntentFailures(
+  world: World,
+  actorId: string,
+  intentKey: string,
+): number {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const prefixes =
+    actor !== undefined
+      ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+      : [`${actorId}:`, `${actorId} tried:`];
+  let streak = 0;
+  for (let i = world.history.length - 1; i >= 0; i--) {
+    const entry = world.history[i]!;
+    const text = entry.text;
+    if (!prefixes.some((p) => text.startsWith(p))) continue;
+    if (!text.includes(NOT_DONE_SENTINEL)) break;
+    // Fallback format: "<name> tried: <action text> (not done)<sentinel>".
+    const beforeSentinel = text.split(NOT_DONE_SENTINEL)[0] ?? "";
+    const triedIdx = beforeSentinel.indexOf(" tried: ");
+    if (triedIdx < 0) continue;
+    let actionText = beforeSentinel.slice(triedIdx + " tried: ".length);
+    const notDone = " (not done)";
+    if (actionText.endsWith(notDone)) actionText = actionText.slice(0, -notDone.length);
+    if (suggestionCore(world, actionText, actorId) === intentKey) streak++;
   }
   return streak;
 }

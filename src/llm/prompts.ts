@@ -101,6 +101,12 @@ export function proposalSuffix(): string {
     "",
     "Write every suggestion from the deciding actor's own point of view (never cast another roster actor as the subject, never pursue their goals).",
     "Do not repeat a recent own action listed above unless the situation clearly changed (same verb+noun core counts as a repeat).",
+    // Exp-3 item 4 (feeds S2): the selection/consequence tiers cannot
+    // render what the writer cannot ground — handshake ×5, papers-shuffle
+    // ×3, chair-push all died in validation. Suggestions must be
+    // renderable: contact only within reach, object use only with exact
+    // ids, movement only toward named targets.
+    "RENDERABILITY: only suggest actions the consequence writer can ground. Handshake/hug/high-five/hand-over/physical contact ONLY when the other person is within 2 cells (positions are listed above). Sitting ONLY when a chair/sofa object id is listed nearby. Pouring/picking up/opening/booting/moving something ONLY with the exact object id from OBJECT IDS. Walking somewhere ONLY toward a named roster actor or object id. One clear beat per suggestion — never 'organize the papers' / 'push the chair back' micro-fiddling with no observable outcome.",
     // Q7: zero object-interaction across 4 experiments — elicit it at the
     // proposal stage so object manipulation becomes a real option.
     "OBJECT INTERACTION: notice the objects listed in the context (desks, mugs, laptops, chairs, papers, …) — include suggestions that naturally use them (pick up the mug, open the laptop, move the papers, sit on the chair) whenever they fit the actor's goal; interacting with the world is a core part of the simulation, not decoration.",
@@ -117,6 +123,12 @@ export function selectionSuffix(): string {
     "",
     "Choose the action this actor actually performs — in THEIR role only (never adopt another character's job, goal, or skills).",
     "ROSTER RULE: only the actors listed in the ROSTER above exist — never invent, address, or describe anyone else (no extra names, no interviewer, no newcomers).",
+    // Exp-3 item 4 (feeds S2): selection loves social wording the
+    // consequence tier cannot ground at these distances (M5). Choose an
+    // action the writer can render — contact/hand-over only within 2
+    // cells, object use only with an exact object id, movement only
+    // toward a named actor or object.
+    "RENDERABILITY: choose an action the consequence writer can render: prefer actions whose movement target is a named roster actor or object id; avoid handshake/hug/hand-over unless the other person is within 2 cells (positions are listed); avoid pouring/picking up/opening unless the exact object id is known; never choose 'organize papers' / 'push the chair' micro-actions with no observable outcome.",
     "If the acting actor's text contains quoted/uttered words, the chosen action must preserve them — never substitute different dialogue.",
     "If an open question addressed to this actor is listed above, ANSWER it instead of repeating a past action.",
     "Do not repeat a recent own action listed above unless the situation clearly changed.",

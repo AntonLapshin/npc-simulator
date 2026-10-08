@@ -14,6 +14,7 @@ import {
   layaWiringFromEnv,
   plausibilityAdvisoryForRetry,
   runIntentCascade,
+  runRenderabilityScore,
   type LayaTurnWiring,
 } from "./layaTurn.js";
 import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
@@ -37,7 +38,8 @@ import {
   isRealProgressFailure,
   suggestMoveTarget,
 } from "./movementAssist.js";
-import { validateSelectionForActor } from "./contextBuilder.js";
+import { vetoAwayFromNarrativeTarget } from "./textHints.js";
+import { suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { buildObjectAffordanceNudge } from "./contextBuilder.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { buildRosterRetryLine, type TurnEngines } from "../llm/index.js";
@@ -56,7 +58,7 @@ import {
   trySalvageConsequence,
   type AttemptRecord,
 } from "./turnSalvage.js";
-import { buildLivenessConsequence, consecutiveFallbacks } from "./turnLiveness.js";
+import { buildLivenessConsequence, consecutiveFallbacks, consecutiveIntentFailures } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
 import type { LlmUsage } from "../logging/logTypes.js";
 import { errorMessage } from "../util/errors.js";
@@ -539,13 +541,35 @@ export async function resolveWithValidation(
     if (semantics?.moves) {
       // Item C7 (S1): the action text steers the suggestion — "walk east"
       // must not repair westward when no destination was declared.
-      const suggestion = suggestMoveTarget(
+      let suggestion = suggestMoveTarget(
         world,
         action.actorId,
         semantics.destinationActorId,
         semantics.destinationObjectId,
         action.text,
       );
+      // Exp-3 item 7 (S5, A3 — tick-28 repro): veto a repair that steps
+      // AWAY from the narrative's named approach target. Veto-only: the
+      // turn retries/salvages instead of applying corrupt movement.
+      if (suggestion) {
+        const vetted = vetoAwayFromNarrativeTarget(
+          world,
+          action.actorId,
+          result.narrative,
+          suggestion,
+        );
+        if (!vetted) {
+          logger.log({
+            module: "validator",
+            event: "movement_repair_vetoed",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target — vetoed, turn retries instead`,
+          });
+        }
+        suggestion = vetted;
+      }
       if (suggestion) {
         const dest = semantics.destinationActorId
           ? ` strictly closer to ${semantics.destinationActorId}`
@@ -738,28 +762,37 @@ export async function resolveWithValidation(
     // off-distribution); the targeted hints below stay as-is.
     feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;
-    // Item C10 (S7): abort the retry loop early when the hard-error count
-    // grows two attempts in a row — retries amplify (attempt 4 is
-    // systematically worse than attempt 1), so stop burning the budget and
-    // salvage the best attempt instead.
+    // Exp-3 item 9 (S7, RULE-C): abort the retry loop early when the last
+    // two attempts both failed to STRICTLY improve on the best-so-far
+    // hard-error count. Data-grounded on Exp-3 (25 eligible turns): the old
+    // "strictly growing twice" rule fired 6/25 and could save at most 1
+    // call (it sits after the maxRetries break); RULE-C fires 17/25,
+    // saves ~17 LLM calls, loses 0 best-attempts by construction (it only
+    // fires when the best-so-far predates the last two attempts, and
+    // pickBestAttempt breaks ties toward the earliest), at the cost of 1
+    // success (m5 tick=12: [2,4,3] would abort at 3 instead of passing at
+    // 4 — the turn still advances via salvage, as partial_applied).
+    // Attempt 1 is the pickBestAttempt winner in 72% of Exp-3 turns, so
+    // aborting a non-improving tail is safe.
     const nA = attempts.length;
-    if (
-      nA >= 3 &&
-      attempts[nA - 1]!.hardErrors > attempts[nA - 2]!.hardErrors &&
-      attempts[nA - 2]!.hardErrors > attempts[nA - 3]!.hardErrors
-    ) {
-      logger.log({
-        module: "turn",
-        event: "retry_aborted",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: action.actorId,
-        input: { action, attempt },
-        output: { hardErrors: attempts.map((a) => a.hardErrors) },
-        error:
-          "hard-error count grew two attempts in a row — stopping retries, salvaging the best attempt",
-      });
-      break;
+    if (nA >= 3 && nA <= config.maxRetries) {
+      const bestSoFar = Math.min(...attempts.slice(0, nA - 2).map((a) => a.hardErrors));
+      if (
+        attempts[nA - 1]!.hardErrors >= bestSoFar &&
+        attempts[nA - 2]!.hardErrors >= bestSoFar
+      ) {
+        logger.log({
+          module: "turn",
+          event: "retry_aborted",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, attempt },
+          output: { hardErrors: attempts.map((a) => a.hardErrors), bestSoFar },
+          error: `last two attempts failed to improve on best-so-far hard errors (${bestSoFar}) — stopping retries, salvaging the best attempt`,
+        });
+        break;
+      }
     }
     report(deps, {
       stage: "consequence_retry",
@@ -800,16 +833,35 @@ export async function resolveWithValidation(
   if (!haveParseableResult && turnRawAttempts.length > 0) {
     const degraded = salvageFormatCollapse(world, action, turnRawAttempts, config);
     if (degraded) {
-      logger.log({
-        module: "turn",
-        event: "format_salvage_applied",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: action.actorId,
-        input: { action, rawAttemptCount: turnRawAttempts.length },
-        output: { salvaged: degraded },
-      });
-      return degraded;
+      // Exp-3 item 5 (S3): defense in depth — the final accept gate runs
+      // on the format-salvage path too. The narrative is action-derived
+      // (low risk) but the donor thoughts are unvalidated model output;
+      // a gate failure falls through to the content-salvage ladder below
+      // instead of returning corrupt prose.
+      const formatGateErrors = recheckAcceptedProse(world, action, degraded);
+      if (formatGateErrors.length > 0) {
+        logger.log({
+          module: "turn",
+          event: "format_salvage_gate_rejected",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, rawAttemptCount: turnRawAttempts.length },
+          output: { errors: formatGateErrors.map((e) => e.code) },
+          error: "format-salvage payload failed the final accept gate — falling through to content salvage",
+        });
+      } else {
+        logger.log({
+          module: "turn",
+          event: "format_salvage_applied",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, rawAttemptCount: turnRawAttempts.length },
+          output: { salvaged: degraded },
+        });
+        return degraded;
+      }
     }
   }
 
@@ -917,16 +969,34 @@ export async function resolveWithValidation(
     const priorFallbacks = consecutiveFallbacks(world, action.actorId);
     if (priorFallbacks >= threshold) {
       const liveness = buildLivenessConsequence(world, action, lastSemantics, priorFallbacks);
+      // Exp-3 item 5 (S3): defense in depth — the final accept gate runs
+      // on the liveness path too. The templates are fixed (safe by
+      // construction), but bypassing validation by design is how the S2
+      // hole happened; a gate failure falls through to the plain
+      // fallback instead of applying.
+      const livenessGateErrors = recheckAcceptedProse(world, action, liveness);
+      if (livenessGateErrors.length === 0) {
+        logger.log({
+          module: "turn",
+          event: "liveness_applied",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, result: lastResult, priorFallbacks },
+          output: { liveness },
+        });
+        return liveness;
+      }
       logger.log({
         module: "turn",
-        event: "liveness_applied",
+        event: "liveness_gate_rejected",
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result: lastResult, priorFallbacks },
-        output: { liveness },
+        input: { action, priorFallbacks },
+        output: { errors: livenessGateErrors.map((e) => e.code) },
+        error: "liveness payload failed the final accept gate — falling through to fallback",
       });
-      return liveness;
     }
   }
 
@@ -1093,21 +1163,43 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // rejected here and replaced with the first clean candidate — the
     // proposal engine already dedups its own output, but the selector may
     // invent a repeat (or a mock may replay one).
+    //
+    // Exp-3 item 6 (S2): per-intent failure memory — an intent whose
+    // verb|noun key failed `intentFailureBanThreshold` consecutive own
+    // turns is banned the same way. Small models demonstrably ignore
+    // prompt lines ("do NOT repeat yourself"); the deterministic ban is
+    // the load-bearing half. The ban is per-actor and resets on the first
+    // applied own turn (consecutiveIntentFailures breaks the streak).
+    const banThreshold = config.intentFailureBanThreshold ?? 2;
+    const isIntentBanned = (text: string): boolean => {
+      const key = suggestionCore(world, text, actor.id);
+      return consecutiveIntentFailures(world, actor.id, key) >= banThreshold;
+    };
     const rejection = validateSelectionForActor(world, actor.id, actionText);
-    if (rejection !== undefined) {
+    const bannedKey = isIntentBanned(actionText)
+      ? suggestionCore(world, actionText, actor.id)
+      : undefined;
+    if (rejection !== undefined || bannedKey !== undefined) {
       logger.log({
         module: "selection",
-        event: "selection_rejected",
+        event: bannedKey !== undefined ? "intent_banned" : "selection_rejected",
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: actor.id,
         input: { action: actionText, suggestions: proposal.suggestions },
-        output: { rejection },
+        output: {
+          rejection: rejection ?? `intent "${bannedKey}" failed ${banThreshold} consecutive own turns — banned from selection`,
+        },
         error: rejection,
       });
       const clean = proposal.suggestions
         .map((s) => stripSelectionPrefix(s))
-        .find((s) => s.length > 0 && validateSelectionForActor(world, actor.id, s) === undefined);
+        .find(
+          (s) =>
+            s.length > 0 &&
+            validateSelectionForActor(world, actor.id, s) === undefined &&
+            !isIntentBanned(s),
+        );
       actionText = clean ?? FALLBACK_SELECTION.action;
       logger.log({
         module: "selection",
@@ -1120,6 +1212,59 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       });
     }
     action = { actorId: actor.id, text: actionText };
+
+    // Exp-3 item 6 (S2): Laya renderability screen — one 1–5 score on the
+    // FINAL action text (after screen/substitution), before burning
+    // consequence attempts on it. Score ≤2 drops the action from the
+    // candidate list and re-runs selection ONCE with the filtered list;
+    // the second pick stands regardless of its score (one re-pick, no
+    // loops). Fail-open throughout: Laya failure/undefined proceeds.
+    // OFF by default (LAYA_RENDERABILITY=1 to enable).
+    if (turnDeps.laya !== undefined && turnDeps.laya.config.toggles.renderability === true) {
+      const score = await runRenderabilityScore(
+        turnDeps.laya.client,
+        world,
+        actor.id,
+        actionText,
+      );
+      const rescored = score !== undefined && score <= 2;
+      logger.log({
+        module: "laya",
+        event: "renderability_scored",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: actor.id,
+        input: { action: actionText },
+        output: { score: score ?? null, rescored },
+      });
+      if (rescored) {
+        const filtered = proposal.suggestions.filter(
+          (s) => stripSelectionPrefix(s) !== actionText,
+        );
+        if (filtered.length > 0) {
+          const repick = await turnDeps.selectionEngine.select(world, actor.id, filtered);
+          const repickText = stripSelectionPrefix(repick.action);
+          const repickRejection = validateSelectionForActor(world, actor.id, repickText);
+          actionText =
+            repickRejection === undefined && !isIntentBanned(repickText)
+              ? repickText
+              : FALLBACK_SELECTION.action;
+          action = { actorId: actor.id, text: actionText };
+          logger.log({
+            module: "selection",
+            event: "selection_substituted",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: actor.id,
+            input: { rejected: selection.action, renderabilityScore: score },
+            output: { action: actionText },
+          });
+        } else {
+          actionText = FALLBACK_SELECTION.action;
+          action = { actorId: actor.id, text: actionText };
+        }
+      }
+    }
   }
 
   logger.log({

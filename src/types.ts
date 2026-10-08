@@ -251,6 +251,16 @@ export type ActionSemantics = {
   destinationActorId?: string;
   /** Named movement landmark, resolved to an object id. */
   destinationObjectId?: string;
+  /**
+   * Exp-3 item 7 (S5): tri-state destination explicitness. true = the
+   * destination came from an explicit name/id mention in a movement clause
+   * or a model declaration (strong evidence); false = it came from the
+   * fuzzy keyword/possessive fallback (a guess); undefined = legacy or
+   * manually-built semantics. validateDestinationObject skips its
+   * arrival/wrong-landmark sub-checks only when false — strictly-closer
+   * applies regardless.
+   */
+  destinationObjectExplicit?: boolean;
   /** Uttered words / explicit speech intent? */
   speaks: boolean;
   /** Canonical uttered segments (ground truth for speech preservation). */
@@ -289,6 +299,13 @@ export type EngineConfig = {
   consequenceSnapshotRadius: number;
   /** Consecutive own-turn fallbacks before the NPC liveness floor fires (Exp-5 item 6). */
   livenessFallbackThreshold: number;
+  /**
+   * Exp-3 item 6 (S2): consecutive own-turn fallbacks of the SAME intent
+   * (verb|noun key) before that intent is banned from selection — the
+   * deterministic backstop for the handshake/papers/chair attractors the
+   * consequence tier cannot render. Default 2.
+   */
+  intentFailureBanThreshold: number;
   /**
    * Exp-6 item 3: wall-clock budget for one turn's consequence phase
    * (all attempts). When exceeded, the turn stops burning LLM calls and

@@ -10,9 +10,73 @@
 
 import type { World } from "../types.js";
 import {
+  findDestinationMentionedActors,
   resolveDestinationActorId,
   resolveDestinationObjectId,
 } from "./deterministicSemantics.js";
+
+/** Approach/contact verbs: the narrative names a target it moves toward. */
+const NARRATIVE_APPROACH_RE =
+  /\b(walks?|steps?|moves?|heads?|goes?|approaches?|greets?|offers?|hands?|shakes?|turns?\s+to(?:ward)?)\b/i;
+
+/**
+ * Exp-3 item 7 (S5, A3): veto a movement-repair suggestion that steps AWAY
+ * from the narrative's named approach target. Returns the suggestion
+ * unchanged when no veto applies, null when vetoed. Veto-only for v1 (no
+ * re-steering) — a wrong-direction repair is worse than a retry, and the
+ * retry loop / salvage path will handle the turn instead.
+ */
+export function vetoAwayFromNarrativeTarget(
+  world: World,
+  actingActorId: string,
+  narrative: string,
+  suggestion: { x: number; y: number },
+): { x: number; y: number } | null {
+  const target = narrativeApproachTarget(world, actingActorId, narrative);
+  if (target === null) return suggestion;
+  const actor = world.actors.find((a) => a.id === actingActorId);
+  if (!actor) return suggestion;
+  let tx: number;
+  let ty: number;
+  if (target.kind === "actor") {
+    const t = world.actors.find((a) => a.id === target.id);
+    if (!t) return suggestion;
+    tx = t.x;
+    ty = t.y;
+  } else {
+    const o = world.scene.objects.find((o) => o.id === target.id);
+    if (!o) return suggestion;
+    tx = o.x + o.w / 2;
+    ty = o.y + o.h / 2;
+  }
+  const oldD = Math.hypot(actor.x - tx, actor.y - ty);
+  const newD = Math.hypot(suggestion.x - tx, suggestion.y - ty);
+  if (newD > oldD + 1e-9) return null;
+  return suggestion;
+}
+
+/**
+ * Exp-3 item 7 (S5, A3 — tick-28 repro): the approach target the NARRATIVE
+ * names, for the post-repair direction invariant. The repair steers by the
+ * action text, but the narrative is the model's own account of what the
+ * turn did — when the narrative says "walks over to Anton and greets him"
+ * while the repair stepped AWAY from Anton, the repair is corrupt and must
+ * be vetoed (a wrong-direction repair is worse than a retry). Actor
+ * mentions win (person is the stronger signal); object targets only count
+ * when the narrative carries approach/contact verbs. Pure.
+ */
+export function narrativeApproachTarget(
+  world: World,
+  actingActorId: string,
+  narrative: string,
+): NamedDestination | null {
+  const mentioned = findDestinationMentionedActors(world, actingActorId, narrative);
+  if (mentioned.length > 0) return { kind: "actor", id: mentioned[0]! };
+  if (!NARRATIVE_APPROACH_RE.test(narrative)) return null;
+  const obj = resolveDestinationObjectId(world, narrative, actingActorId);
+  if (obj !== undefined) return { kind: "object", id: obj };
+  return null;
+}
 
 /** Cardinal direction hint parsed from action text. */
 export type DirectionHint = "north" | "south" | "east" | "west";

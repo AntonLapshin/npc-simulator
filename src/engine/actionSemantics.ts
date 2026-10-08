@@ -12,6 +12,7 @@ import type { Action, ActionSemantics, ConsequenceResult, World } from "../types
 import type { SemanticJudge } from "../intelligence/types.js";
 import type { Logger } from "../logging/logger.js";
 import {
+  fuzzyMatchObjectId,
   hasDisplacementToken,
   hasSpeechToken,
   isActorMentioned,
@@ -230,6 +231,15 @@ export function applyDeterministicGrounding(
   ): string | undefined => {
     if (value === undefined) return undefined;
     if (objectIds.has(value)) return value;
+    // Exp-3 item 7 (S5, A4): before dropping an invented id, try a
+    // conservative fuzzy match ("anton's coffee cup" → coffee_mug when
+    // unambiguous). A wrong fuzzy match is worse than a drop, so
+    // ambiguity returns undefined and the id is still dropped.
+    const fuzzy = fuzzyMatchObjectId(value, world);
+    if (fuzzy !== undefined) {
+      disagreements.push(`fuzzy-matched unknown ${label} "${value}" → ${fuzzy}`);
+      return fuzzy;
+    }
     disagreements.push(`dropped unknown ${label} "${value}" (not in scene)`);
     return undefined;
   };
@@ -406,6 +416,43 @@ export function applyDeterministicGrounding(
     }
   }
 
+  // Exp-3 item 7 (S5, A2): when effects/judge declare no destination, the
+  // deterministic text resolution is the only signal the repair path has —
+  // populate merged.destination* from it so both repair call sites receive
+  // real ids instead of re-deriving them from text, and so
+  // validateDestinationObject can enforce strictly-closer on text-resolved
+  // targets. Model-declared existing ids still outrank (conflict block
+  // above); only undefined fields are filled. Fuzzy fills (explicit=false)
+  // get the strictly-closer check but NOT the arrival/wrong-landmark
+  // sub-checks — a fuzzy misresolution must not reject good movement.
+  const hadDeclaredObjectDestination = finalDestinationObjectId !== undefined;
+  if (
+    moves &&
+    finalDestinationActorId === undefined &&
+    det.destinationActorId !== undefined
+  ) {
+    finalDestinationActorId = det.destinationActorId;
+    disagreements.push(
+      `destination filled from deterministic text resolution: actor ${det.destinationActorId}`,
+    );
+  }
+  if (
+    moves &&
+    finalDestinationObjectId === undefined &&
+    det.destinationObjectId !== undefined
+  ) {
+    finalDestinationObjectId = det.destinationObjectId;
+    disagreements.push(
+      `destination filled from deterministic text resolution: object ${det.destinationObjectId} (explicit=${det.destinationObjectExplicit === true})`,
+    );
+  }
+  const destinationObjectExplicit =
+    finalDestinationObjectId === undefined
+      ? undefined
+      : hadDeclaredObjectDestination
+        ? true
+        : det.destinationObjectExplicit === true;
+
   return {
     semantics: {
       moves,
@@ -413,6 +460,7 @@ export function applyDeterministicGrounding(
       quotedSpeech: groundedQuotes,
       ...(finalDestinationActorId !== undefined && moves ? { destinationActorId: finalDestinationActorId } : {}),
       ...(finalDestinationObjectId !== undefined && moves ? { destinationObjectId: finalDestinationObjectId } : {}),
+      ...(destinationObjectExplicit !== undefined && moves ? { destinationObjectExplicit } : {}),
       ...(addresseeActorId !== undefined ? { addresseeActorId } : {}),
       ...(contactActorId !== undefined ? { contactActorId } : {}),
     },

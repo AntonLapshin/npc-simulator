@@ -18,6 +18,12 @@ export type LayaToggles = {
   salvageSelect: boolean;
   /** Exp-2-E (b): Laya word-sense veto on deterministic moves=true. */
   locomotion: boolean;
+  /**
+   * Exp-3 item 6 (S2): Laya scores the chosen action's renderability
+   * (1–5) before consequence attempts burn on it; ≤2 triggers one
+   * re-selection. OFF by default (Phase 5 has not validated it).
+   */
+  renderability: boolean;
 };
 
 export type LayaConfig = {
@@ -66,6 +72,8 @@ export function readLayaConfig(env: Record<string, string | undefined> = process
       // Exp-2-E additions: OFF by default (Phase 5 has not validated them).
       salvageSelect: parseToggle(env["LAYA_SALVAGE_SELECT"], false),
       locomotion: parseToggle(env["LAYA_LOCOMOTION"], false),
+      // Exp-3 item 6 (S2): OFF by default (Phase 5 has not validated it).
+      renderability: parseToggle(env["LAYA_RENDERABILITY"], false),
     },
   };
 }
