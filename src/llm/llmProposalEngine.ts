@@ -21,7 +21,7 @@ import { completeJson } from "./complete.js";
 
 export const FALLBACK_PROPOSAL: ProposalResult = {
   suggestions: ["Stay where you are.", "Look around.", "Do nothing."],
-  reasoning: "Fallback due to Proposal Engine failure.",
+  reasoning: "Fallback due to engine failure.",
 };
 
 export type LlmProposalEngineOptions = {

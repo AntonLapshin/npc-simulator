@@ -40,12 +40,13 @@ import {
   suggestMoveTarget,
 } from "./movementAssist.js";
 import {
+  effectiveRepairTarget,
   narrativeApproachTarget,
-  narrativeTargetPosition,
-  vetoAwayFromNarrativeTarget,
+  vetoAwayFromTarget,
   type NamedDestination,
 } from "./textHints.js";
-import { suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
+import { parseActionQuotes } from "./deterministicSemantics.js";
+import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { propStubForGroundingErrors } from "./validate/objects.js";
 import { buildObjectAffordanceNudge } from "./contextBuilder.js";
@@ -66,7 +67,7 @@ import {
   trySalvageConsequence,
   type AttemptRecord,
 } from "./turnSalvage.js";
-import { buildLivenessConsequence, consecutiveFallbacks, consecutiveIntentFailures } from "./turnLiveness.js";
+import { buildLivenessConsequence, consecutiveClusterFailures, consecutiveFallbacks, consecutiveIntentFailures } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
 import type { LlmUsage } from "../logging/logTypes.js";
 import { errorMessage } from "../util/errors.js";
@@ -288,6 +289,93 @@ function readEngineDiagnostics(
 
 
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
+/**
+ * Exp-5 item 6 (S2): honest stationary narrative for a vetoed movement
+ * repair with no legal toward-step. Never claims the movement that didn't
+ * happen; preserves quoted speech (it did happen); names the
+ * already-reached target when adjacent so the history reads honestly
+ * ("Tanya remains by Anton" — not "tried to walk and failed").
+ * Pure.
+ */
+export function synthesizeStationaryNarrative(
+  action: Action,
+  name: string,
+  actor: { x: number; y: number },
+  target: { x: number; y: number; kind: "actor" | "object"; id: string } | null,
+  targetLabel: string | undefined,
+): string {
+  const quotes = parseActionQuotes(action.text);
+  // "remains" (not "holds position"): the object-grounding gate reads
+  // "holds" as an object verb and would demand a prop patch.
+  let base = `${name} remains in position`;
+  if (target !== null && targetLabel !== undefined) {
+    const d = Math.hypot(actor.x - target.x, actor.y - target.y);
+    if (d <= 2.5) base += ` by ${targetLabel}`;
+  }
+  base += ".";
+  if (quotes.length > 0) {
+    base += ` ${name} says ${quotes.map((q) => `"${q}"`).join(" ")}.`;
+  }
+  return base;
+}
+
+/**
+ * Exp-5 item 6 (S2): honest stationary downgrade for a vetoed movement
+ * repair with no legal toward-step. The veto means no legal step toward
+ * the effective target exists from the actor's cell (already adjacent, or
+ * boxed in) — a world fact retries cannot change — so commit a stationary
+ * turn instead of veto → retry → fallback. Keeps the attempt's
+ * non-movement patches (thoughts/emotion), drops x/y, declares
+ * moved=false, and synthesizes an honest stationary narrative. Returns
+ * null when there is no acting-actor patch to downgrade. The caller
+ * validates the result (with moves=false semantics) and runs the accept
+ * gate before committing. Pure (no logging).
+ */
+export function buildStationaryDowngrade(
+  world: World,
+  action: Action,
+  result: ConsequenceResult,
+  effTarget: { x: number; y: number; kind: "actor" | "object"; id: string } | null,
+): ConsequenceResult | null {
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor) return null;
+  const patch = result.actorPatches.find((p) => p.actorId === action.actorId);
+  if (!patch) return null;
+  const downgraded: ConsequenceResult = structuredClone(result);
+  const dPatch = downgraded.actorPatches.find((p) => p.actorId === action.actorId)!;
+  delete dPatch.x;
+  delete dPatch.y;
+  let targetLabel: string | undefined;
+  if (effTarget !== null) {
+    if (effTarget.kind === "actor") {
+      targetLabel = world.actors.find((a) => a.id === effTarget.id)?.name;
+    } else {
+      targetLabel = world.scene.objects.find((o) => o.id === effTarget.id)?.name;
+    }
+  }
+  downgraded.narrative = synthesizeStationaryNarrative(
+    action,
+    actor.name ?? action.actorId,
+    actor,
+    effTarget,
+    targetLabel,
+  );
+  if (downgraded.effects) {
+    downgraded.effects.moved = false;
+    delete downgraded.effects.destinationActorId;
+    delete downgraded.effects.destinationObjectId;
+    const quotes = parseActionQuotes(action.text);
+    if (quotes.length > 0) {
+      downgraded.effects.spoke = true;
+      downgraded.effects.quotedSpeech = quotes;
+    } else {
+      downgraded.effects.spoke = false;
+      downgraded.effects.quotedSpeech = [];
+    }
+  }
+  return downgraded;
+}
+
 export async function resolveWithValidation(
   world: World,
   action: Action,
@@ -583,40 +671,62 @@ export async function resolveWithValidation(
       // Exp-4 item 5 (S2): a veto without a constructive alternative froze
       // the avatar for 27 of 30 exp-4 ticks (veto → retry → retry →
       // fallback, zero displacement). When the veto fires, re-steer: take
-      // a capped step TOWARD the narrative's named target instead of
-      // retrying into the same wall. Only when no legal toward-step
-      // exists does the turn fall through to retry/salvage.
+      // a capped step TOWARD the effective target instead of retrying into
+      // the same wall. Only when no legal toward-step exists does the
+      // turn commit an honest stationary downgrade (below).
+      //
+      // Exp-5 item 6 (S2): the veto and re-steer now use the EFFECTIVE
+      // target — the judge's resolved destination when present, else the
+      // narrative's (see effectiveRepairTarget). Tick-15 repro: the judge
+      // correctly resolved anton_desk while the corrupt narrative said
+      // "Tanya's desk", so the narrative-target veto killed a good repair.
+      // A judge/narrative disagreement is logged; the movement gates
+      // enforce the judge's semantics, so the repair must satisfy them.
       let resteeredTarget: NamedDestination | null = null;
       if (suggestion) {
-        const vetted = vetoAwayFromNarrativeTarget(
+        const effTarget = effectiveRepairTarget(
           world,
           action.actorId,
           result.narrative,
-          suggestion,
+          semantics,
         );
+        const narrativeTarget = narrativeApproachTarget(
+          world,
+          action.actorId,
+          result.narrative,
+        );
+        if (
+          effTarget !== null &&
+          narrativeTarget !== null &&
+          effTarget.id !== narrativeTarget.id
+        ) {
+          logger.log({
+            module: "validator",
+            event: "repair_target_disagreement",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            output: `judge destination "${effTarget.id}" disagrees with narrative target "${narrativeTarget.id}" — trusting the judge (the movement gates enforce its semantics)`,
+          });
+        }
+        const vetted =
+          effTarget !== null
+            ? vetoAwayFromTarget(world, action.actorId, suggestion, effTarget)
+            : suggestion;
         if (!vetted) {
-          const tp = narrativeTargetPosition(
-            world,
-            action.actorId,
-            result.narrative,
-          );
           const resteered =
-            tp !== null
-              ? stepTowardPoint(world, action.actorId, tp.x, tp.y)
+            effTarget !== null
+              ? stepTowardPoint(world, action.actorId, effTarget.x, effTarget.y)
               : null;
-          if (resteered) {
-            resteeredTarget = narrativeApproachTarget(
-              world,
-              action.actorId,
-              result.narrative,
-            );
+          if (resteered && effTarget !== null) {
+            resteeredTarget = { kind: effTarget.kind, id: effTarget.id };
             logger.log({
               module: "validator",
               event: "movement_repair_resteered",
               tick: world.tick,
               turnIndex: world.turnIndex,
               actorId: action.actorId,
-              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target — re-steered to a capped step toward it (${resteered.x}, ${resteered.y}) instead of retrying`,
+              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the effective approach target ("${effTarget.id}") — re-steered to a capped step toward it (${resteered.x}, ${resteered.y}) instead of retrying`,
             });
             suggestion = resteered;
           } else {
@@ -626,9 +736,53 @@ export async function resolveWithValidation(
               tick: world.tick,
               turnIndex: world.turnIndex,
               actorId: action.actorId,
-              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the narrative's approach target and no legal toward-step exists — vetoed, turn retries instead`,
+              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the effective approach target${effTarget ? ` ("${effTarget.id}")` : ""} and no legal toward-step exists — vetoed`,
             });
             suggestion = null;
+            // Exp-5 item 6 (S2): veto with no legal toward-step is a world
+            // fact (already adjacent, or boxed in) — retries cannot change
+            // it. Commit an honest stationary downgrade now instead of
+            // veto → retry → fallback. Falls through to retry only when
+            // the downgrade itself fails validation.
+            const downgrade = buildStationaryDowngrade(
+              world,
+              action,
+              result,
+              effTarget,
+            );
+            if (downgrade !== null) {
+              const dv = validateConsequence(
+                world,
+                downgrade,
+                action,
+                semantics ? { ...semantics, moves: false } : undefined,
+              );
+              const dg = recheckAcceptedProse(world, action, downgrade);
+              if (dv.valid && dg.length === 0) {
+                logger.log({
+                  module: "validator",
+                  event: "movement_downgraded_stationary",
+                  tick: world.tick,
+                  turnIndex: world.turnIndex,
+                  actorId: action.actorId,
+                  input: { action, result, attempt },
+                  output: { downgraded: downgrade },
+                });
+                return downgrade;
+              }
+              logger.log({
+                module: "validator",
+                event: "stationary_downgrade_rejected",
+                tick: world.tick,
+                turnIndex: world.turnIndex,
+                actorId: action.actorId,
+                output: {
+                  errors: [...dv.errors, ...dg].map((e) => `[${e.code}]`),
+                },
+                error:
+                  "stationary downgrade failed validation — falling through to retry",
+              });
+            }
           }
         } else {
           suggestion = vetted;
@@ -1313,20 +1467,42 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       const key = suggestionCore(world, text, actor.id);
       return consecutiveIntentFailures(world, actor.id, key) >= banThreshold;
     };
+    // Exp-5 item 9 (S8): intent-cluster bans — a near-variant of a
+    // repeatedly failed intent (same concrete object-kind nouns, different
+    // verb|noun key) is banned the same way, so the substitute can't dodge
+    // on a rewording (exp-5 ticks 13/19/22: laptop-setup offer banned, then
+    // the glance-at-test-plan variant failed too).
+    const isClusterBanned = (text: string): boolean => {
+      const nouns = suggestionClusterNouns(text);
+      return consecutiveClusterFailures(world, actor.id, nouns) >= banThreshold;
+    };
     const rejection = validateSelectionForActor(world, actor.id, actionText);
     const bannedKey = isIntentBanned(actionText)
       ? suggestionCore(world, actionText, actor.id)
       : undefined;
-    if (rejection !== undefined || bannedKey !== undefined) {
+    const bannedCluster =
+      bannedKey === undefined && isClusterBanned(actionText)
+        ? suggestionClusterNouns(actionText)
+        : undefined;
+    if (rejection !== undefined || bannedKey !== undefined || bannedCluster !== undefined) {
       logger.log({
         module: "selection",
-        event: bannedKey !== undefined ? "intent_banned" : "selection_rejected",
+        event:
+          bannedKey !== undefined
+            ? "intent_banned"
+            : bannedCluster !== undefined
+              ? "intent_cluster_banned"
+              : "selection_rejected",
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: actor.id,
         input: { action: actionText, suggestions: proposal.suggestions },
         output: {
-          rejection: rejection ?? `intent "${bannedKey}" failed ${banThreshold} consecutive own turns — banned from selection`,
+          rejection:
+            rejection ??
+            (bannedKey !== undefined
+              ? `intent "${bannedKey}" failed ${banThreshold} consecutive own turns — banned from selection`
+              : `intent cluster {${bannedCluster!.join(", ")}} failed ${banThreshold} consecutive own turns — banned from selection`),
         },
         error: rejection,
       });
@@ -1336,7 +1512,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           (s) =>
             s.length > 0 &&
             validateSelectionForActor(world, actor.id, s) === undefined &&
-            !isIntentBanned(s),
+            !isIntentBanned(s) &&
+            !isClusterBanned(s),
         );
       actionText = clean ?? FALLBACK_SELECTION.action;
       logger.log({
@@ -1384,7 +1561,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           const repickText = stripSelectionPrefix(repick.action);
           const repickRejection = validateSelectionForActor(world, actor.id, repickText);
           actionText =
-            repickRejection === undefined && !isIntentBanned(repickText)
+            repickRejection === undefined && !isIntentBanned(repickText) && !isClusterBanned(repickText)
               ? repickText
               : FALLBACK_SELECTION.action;
           action = { actorId: actor.id, text: actionText };

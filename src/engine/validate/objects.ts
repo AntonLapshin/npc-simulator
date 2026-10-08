@@ -136,7 +136,7 @@ export function validateObjectGrounding(
   world: World,
   normalized: {
     narrative: string;
-    actorPatches: { actorId: string; pose?: string; prop?: string | null; x?: number; y?: number }[];
+    actorPatches: { actorId: string; pose?: string; prop?: string | null; x?: number; y?: number; thoughts?: string }[];
     objectPatches: { objectId: string }[];
   },
   action?: Action,

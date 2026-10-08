@@ -351,6 +351,10 @@ const CORE_VERBS: Array<[RegExp, string]> = [
   [/\b(pick\s+up|picks\s+up|grabs?|grabbed|holds?|held|holding|carry|carries|carried|opens?|opened|opening)\b/i, "take"],
   [/\b(sips?|sipped|sipping|drinks?|drank|drinking|types?|typed|typing)\b/i, "use"],
   [/\b(introduces?|introduced|introducing)\b/i, "introduce"],
+  // Exp-5 item 9 (S8): the offer verb — "I offer to help Anton set up
+  // his laptop" keyed to "other|anton" and the exact-key ban lost its
+  // precision (exp-5 ticks 13/19/22).
+  [/\b(offers?|offered|offering)\b/i, "offer"],
   [/\b(looks?|looked|looking|glances?|glanced|watch|watches|nods?|nodded|smiles?|smiled)\b/i, "gesture"],
   // Exp-3 item 6 (S2): push/pull verbs — chair-push keyed to "other|" and
   // escaped the per-intent failure memory entirely.
@@ -423,6 +427,36 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
     }
   }
   return `${verb}|${noun}`;
+}
+
+/**
+ * Exp-5 item 9 (S8): concrete object-kind nouns for intent-CLUSTER bans.
+ * The exact verb|noun key misses near-variants of one failing intent
+ * ("I offer to help Anton set up his laptop" → offer|anton vs "I glance
+ * at the test plan on my laptop" → gesture|laptop — same laptop-setup
+ * cluster, different keys; exp-5 ticks 13/19/22). Only concrete object
+ * kinds cluster (desk, coffee, laptop, mug, …): actor mentions are
+ * deliberately excluded — banning every Anton-directed intent after two
+ * failed walks would also kill greetings — and so are abstract nouns
+ * (task, question). Pure.
+ */
+const CLUSTER_NOUNS: Array<[RegExp, string]> = [
+  [/\bdesk\b/i, "desk"],
+  [/\bcoffee\b/i, "coffee"],
+  [/\blaptop\b/i, "laptop"],
+  [/\bmug\b|\bcup\b/i, "mug"],
+  [/\bemail\b|\bpapers?\b|\bnotes?\b/i, "papers"],
+  [/\bchair\b/i, "chair"],
+  [/\btable\b/i, "table"],
+  [/\bhand\b|\bhands\b/i, "hand"],
+];
+
+export function suggestionClusterNouns(text: string): string[] {
+  const out: string[] = [];
+  for (const [re, stem] of CLUSTER_NOUNS) {
+    if (re.test(text) && !out.includes(stem)) out.push(stem);
+  }
+  return out;
 }
 
 /**

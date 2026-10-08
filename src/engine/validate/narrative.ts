@@ -539,13 +539,19 @@ export function findUnknownPersonNames(world: World, text: string): string[] {
  * Jeff" with no Jeff patch passes them). Fails the first person-context
  * name matching neither the roster nor object vocabulary (see
  * findUnknownPersonNames for the shared scan).
+ *
+ * Exp-5 item 5 (S4, tick-27 repro): the audit scans the NARRATIVE only —
+ * never `reasoning`. Reasoning never becomes canonical history, and the
+ * engine itself writes pipeline words into it ("Fallback due to
+ * Consequence Engine failure."), so scanning it false-positived on a
+ * perfect quote-preserving salvage. Quoted speech inside the narrative is
+ * still scanned (it is part of the narrative).
  */
 export function validateNarrativeActors(
   world: World,
-  normalized: { narrative: string; reasoning?: string },
+  normalized: { narrative: string },
 ): ValidationError[] {
-  const text = `${normalized.narrative} ${normalized.reasoning ?? ""}`;
-  const unknown = findUnknownPersonNames(world, text);
+  const unknown = findUnknownPersonNames(world, normalized.narrative);
   if (unknown.length === 0) return [];
   return [
     {
@@ -664,14 +670,28 @@ export function validateObserverSubject(
   normalized: { narrative: string },
   action: Action,
 ): ValidationError[] {
-  const observers = world.actors.filter((a) => a.id !== action.actorId);
-  if (observers.length === 0) return [];
-  const names: Array<{ token: string; id: string }> = [];
-  for (const o of observers) {
-    names.push({ token: o.name.toLowerCase(), id: o.id });
-    names.push({ token: o.id.toLowerCase(), id: o.id });
-    const first = o.name.toLowerCase().split(/[^a-z0-9]+/)[0];
-    if (first && first.length >= 3) names.push({ token: first, id: o.id });
+  const names = observerNameTokens(world, action.actorId);
+  if (names.length === 0) return [];
+  const observerError = (id: string, clause: string): ValidationError[] => [
+    {
+      code: "narrative.observer_as_subject",
+      message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
+    },
+  ];
+  // Exp-5 item 7 (S3, tick-23 repro): observer-led coordinations, checked
+  // on the UNSPLIT clause first. Splitting "Tanya and Dana turn to look…"
+  // on "and" shreds it into a bare "tanya" fragment (no Name+verb shape)
+  // and an acting-actor-led "dana turn…" clause, so both gates miss the
+  // observer cast as co-subject.
+  const sentences = normalized.narrative
+    .split(/[.!?;]+\s*/)
+    .map((c) => c.replace(/^["'(\[]+/, "").trim().toLowerCase())
+    .filter((c) => c.length > 0);
+  for (const s of sentences) {
+    const hit = matchObserverCoordination(s, names);
+    if (hit !== undefined && OBSERVER_SUBJECT_VERBS.has(hit.word)) {
+      return observerError(hit.id, s);
+    }
   }
   const clauses = normalized.narrative
     .split(/[.!?;]+\s*|\s+and\s+/i)
@@ -687,12 +707,7 @@ export function validateObserverSubject(
       const verbMatch = rest.match(/^\s+([a-z]+)/);
       if (!verbMatch) continue;
       if (OBSERVER_SUBJECT_VERBS.has(verbMatch[1]!)) {
-        return [
-          {
-            code: "narrative.observer_as_subject",
-            message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
-          },
-        ];
+        return observerError(id, clause);
       }
       break; // clause starts with this observer's name but no verb — no error
     }
@@ -700,6 +715,96 @@ export function validateObserverSubject(
   return [];
 }
 
+/**
+ * Exp-5 item 7 (S3, tick-23 repro): observer name tokens shared by the
+ * two observer-as-subject gates (validator verb-list version above and
+ * the verb-agnostic supplement in turnSalvageGates.ts) so they cannot
+ * drift apart.
+ */
+export function observerNameTokens(
+  world: World,
+  actingActorId: string,
+): Array<{ token: string; id: string }> {
+  const names: Array<{ token: string; id: string }> = [];
+  for (const o of world.actors) {
+    if (o.id === actingActorId) continue;
+    names.push({ token: o.name.toLowerCase(), id: o.id });
+    names.push({ token: o.id.toLowerCase(), id: o.id });
+    const first = o.name.toLowerCase().split(/[^a-z0-9]+/)[0];
+    if (first && first.length >= 3) names.push({ token: first, id: o.id });
+  }
+  return names;
+}
+
+/**
+ * Exp-5 item 7 (S3, tick-23 repro): observer-led coordination on an
+ * unsplit clause. "Tanya and Dana turn to look at Anton" on Dana's turn
+ * dodges the and-split gates, so match the coordination directly: a
+ * clause leading with an observer name, optionally followed by "and
+ * <name>" groups, then another word, casts the observer as (co-)subject.
+ * Possessives ("Tanya's hand") and vocatives ("Tanya, …") do not match —
+ * the name must be a whole word followed by whitespace — and a trailing
+ * "and" never counts as the verb ("Tanya and Dana." is a fragment, not a
+ * subject). Returns the observer id and the trailing word, or undefined.
+ * Pure.
+ */
+export function matchObserverCoordination(
+  clause: string,
+  tokens: Array<{ token: string; id: string }>,
+): { id: string; word: string } | undefined {
+  for (const { token, id } of tokens) {
+    if (token.length < 2) continue;
+    const m = new RegExp(
+      `^${escapeName(token)}(?![a-z'’])((?:\\s+and\\s+[a-z][a-z'’]*)+)?\\s+(?!and\\b)([a-z]+)`,
+    ).exec(clause);
+    if (m) return { id, word: m[2]! };
+  }
+  return undefined;
+}
+
+/**
+ * Exp-5 item 7 (S3, ticks 23/24 repro): stale "enters the office" prose.
+ * Entering is a first-turn event; afterwards the actor is already inside,
+ * so "X enters the office/room" is stale (tick 24: "Anton enters the
+ * office." 24 ticks after he entered; tick 23 narrated it for Anton on
+ * Dana's turn). Fails when any candidate enterer — the acting actor or a
+ * roster actor named in the narrative — already has a completed prior
+ * turn in history (fallback "tried:" entries count: the turn happened).
+ * Known limitation: re-entry across a modeled exit would false-positive;
+ * the office scenario models no exits. Pure.
+ */
+const STALE_ENTER_RE = /\benter(s|ed|ing)?\b[^.?!]{0,60}\b(office|room|building)\b/i;
+
+export function validateEnterFreshness(
+  world: World,
+  narrative: string,
+  action: Action,
+): ValidationError[] {
+  if (!STALE_ENTER_RE.test(narrative)) return [];
+  const candidates = new Set<string>([action.actorId]);
+  const lower = narrative.toLowerCase();
+  for (const a of world.actors) {
+    const idRe = new RegExp(`\\b${escapeName(a.id.toLowerCase())}\\b`);
+    const nameRe = new RegExp(`\\b${escapeName(a.name.toLowerCase())}\\b`);
+    if (idRe.test(lower) || nameRe.test(lower)) candidates.add(a.id);
+  }
+  const hasPriorTurn = (actorId: string): boolean => {
+    const actor = world.actors.find((a) => a.id === actorId);
+    const prefixes =
+      actor !== undefined
+        ? [`${actor.name}:`, `${actor.id}:`, `${actor.name} tried:`, `${actor.id} tried:`]
+        : [`${actorId}:`, `${actorId} tried:`];
+    return world.history.some((h) => prefixes.some((p) => h.text.startsWith(p)));
+  };
+  const staleId = [...candidates].find((id) => hasPriorTurn(id));
+  if (staleId === undefined) return [];
+  return [
+    {
+      code: "narrative.stale_enter",
+      message: `narrative claims an entrance ("${narrative.slice(0, 80)}...") but ${staleId} already has a completed prior turn — entering the office/room is a first-turn event; describe the actor as already inside`,
+    },
+  ];
+}
 /**
  * Exp-4 item 6 (S4/M1): narrative voice gate. NPC action text and canonical
  * narratives are third-person — first-person self-reference ("I point…",

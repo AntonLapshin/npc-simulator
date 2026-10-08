@@ -651,6 +651,16 @@ export async function triageObserverPatches(
  * threshold the model-emitted memoriesAppend/beliefsAppend are dropped.
  * The deterministic memory append in patchApplier always applies (floor).
  * Fail open.
+ *
+ * Exp-5 item 13 (S10): memory-precision (harness §3 — entries paraphrasing
+ * real turns vs stubs/fiction) is deliberately NOT wired into this gate.
+ * The gate scores event WORTHINESS (is this worth remembering?); precision
+ * scores prose TRUTHFULNESS — a stub can be salient and a fiction can be
+ * salient, so wiring precision in would conflate the axes and drop
+ * memorable-but-poorly-worded events. The pollution source is the
+ * deterministic narrative→memory append, which is fixed at the source:
+ * corrupt narratives never become memories when the S3/S4 prose gates stop
+ * them becoming canonical history first.
  */
 export async function gateMemoryAppendsOnSalience(
   wiring: LayaTurnWiring,

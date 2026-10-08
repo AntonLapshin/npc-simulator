@@ -28,6 +28,7 @@ import {
 import {
   validateActingActorPresence,
   validateAddresseePatch,
+  validateEnterFreshness,
   validateIdentityConsistency,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
@@ -303,7 +304,8 @@ export function validateConsequence(
   if (action) {
     const resolved = semantics ?? effectsToSemantics(normalized);
     errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
-    errors.push(...validateNarrativeActors(world, normalized));
+    // Exp-5 item 5 (S4): narrative-only — never pass reasoning here.
+    errors.push(...validateNarrativeActors(world, { narrative: normalized.narrative }));
     // Exp-4 item 6 (S4/M1): first-person NPC prose fails fast with a
     // targeted retry hint — "I point…"/"I gesture…" diary entries (and the
     // "Dana: Dana:" doubled prefix) never reach canonical history.
@@ -327,6 +329,9 @@ export function validateConsequence(
     errors.push(...validateSitPoseSeating(world, normalized, action));
     errors.push(...validateStateLabel(world, normalized, action));
     errors.push(...validateNarrativeMovementGrounding(world, normalized, action));
+    // Exp-5 item 7 (S3, ticks 23/24 repro): stale "enters the office"
+    // prose fails in the retry loop too, with a targeted hint.
+    errors.push(...validateEnterFreshness(world, normalized.narrative, action));
     if (resolved) {
       errors.push(...validateSpeechPreservation(resolved, normalized.narrative, action.text));
       errors.push(...validateMovementIntent(world, normalized, action, resolved));
@@ -340,7 +345,8 @@ export function validateConsequence(
     }
   } else {
     errors.push(...validateNarrativePlaceholder(normalized.narrative));
-    errors.push(...validateNarrativeActors(world, normalized));
+    // Exp-5 item 5 (S4): narrative-only — never pass reasoning here.
+    errors.push(...validateNarrativeActors(world, { narrative: normalized.narrative }));
     errors.push(...validateObjectGrounding(world, normalized));
   }
 
@@ -377,6 +383,7 @@ export {
   perceiverIds,
   validateActingActorPresence,
   validateAddresseePatch,
+  validateEnterFreshness,
   validateIdentityConsistency,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,

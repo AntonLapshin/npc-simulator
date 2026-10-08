@@ -28,6 +28,9 @@ import {
   validateIdentityConsistency,
   validateNarrativeActors,
   validateObserverSubject,
+  validateEnterFreshness,
+  matchObserverCoordination,
+  observerNameTokens,
 } from "./validate/narrative.js";
 
 /** One failed retry-loop attempt, kept for best-attempt salvage. */
@@ -100,14 +103,27 @@ export function findSupplementObserverSubject(
   narrative: string,
   action: Action,
 ): ValidationError[] {
-  const observers = world.actors.filter((a) => a.id !== action.actorId);
-  if (observers.length === 0) return [];
-  const names: Array<{ token: string; id: string }> = [];
-  for (const o of observers) {
-    names.push({ token: o.name.toLowerCase(), id: o.id });
-    names.push({ token: o.id.toLowerCase(), id: o.id });
-    const first = o.name.toLowerCase().split(/[^a-z0-9]+/)[0];
-    if (first && first.length >= 3) names.push({ token: first, id: o.id });
+  const names = observerNameTokens(world, action.actorId);
+  if (names.length === 0) return [];
+  const observerError = (id: string, clause: string): ValidationError[] => [
+    {
+      code: "narrative.observer_as_subject",
+      message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
+    },
+  ];
+  // Exp-5 item 7 (S3, tick-23 repro): observer-led coordinations, checked
+  // on the unsplit clause first — the and-split below shreds "Tanya and
+  // Dana turn…" into a bare "tanya" fragment and an acting-actor-led
+  // clause, hiding the observer. Verb-agnostic here (any trailing word
+  // counts); the validator version additionally requires a verb from its
+  // list.
+  const sentences = narrative
+    .split(/[.!?;]+\s*/)
+    .map((c) => c.replace(/^["'(\[]+/, "").trim().toLowerCase())
+    .filter((c) => c.length > 0);
+  for (const s of sentences) {
+    const hit = matchObserverCoordination(s, names);
+    if (hit !== undefined) return observerError(hit.id, s);
   }
   const clauses = narrative
     .split(/[.!?;]+\s*|\s+and\s+/i)
@@ -121,12 +137,7 @@ export function findSupplementObserverSubject(
       // Name must be a whole word followed by whitespace + another word
       // ("Jeff introduces…" matches; "Jeff's desk", "Jeff," do not).
       if (/^\s+[a-z]+/.test(rest)) {
-        return [
-          {
-            code: "narrative.observer_as_subject",
-            message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does — observers react in thoughts patches, never in the narrative`,
-          },
-        ];
+        return observerError(id, clause);
       }
       break;
     }
@@ -177,9 +188,11 @@ export function isExplicitStayAction(text: string): boolean {
   const actorName = actor?.name ?? action.actorId;
 
   errors.push(
+    // Exp-5 item 5 (S4, tick-27 repro): narrative-only — the reasoning
+    // field never becomes canonical history, and the engine itself writes
+    // pipeline words into it, so scanning it false-positives.
     ...validateNarrativeActors(world, {
       narrative: result.narrative,
-      reasoning: result.reasoning,
     }),
   );
   // Exp-3 item 6 (S3, tick-20 repro): the accept path is the last line of
@@ -191,6 +204,9 @@ export function isExplicitStayAction(text: string): boolean {
   const stripped = stripAttributionPrefix(result.narrative, actorName, action.actorId);
   errors.push(...validateObserverSubject(world, { narrative: stripped }, action));
   errors.push(...findSupplementObserverSubject(world, stripped, action));
+  // Exp-5 item 7 (S3, ticks 23/24 repro): stale "enters the office"
+  // narratives must not become canonical on the accept path either.
+  errors.push(...validateEnterFreshness(world, result.narrative, action));
 
   if (isExplicitStayAction(action.text) && actor) {
     const patch = result.actorPatches.find((p) => p.actorId === action.actorId);

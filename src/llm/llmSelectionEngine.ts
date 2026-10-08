@@ -18,7 +18,7 @@ import { completeJson } from "./complete.js";
 
 export const FALLBACK_SELECTION: SelectionResult = {
   action: "Stay where you are and observe the situation.",
-  reasoning: "Fallback due to Selection Engine failure.",
+  reasoning: "Fallback due to engine failure.",
 };
 
 export type LlmSelectionEngineOptions = {

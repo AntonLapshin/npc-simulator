@@ -33,9 +33,8 @@ import {
   suggestMoveTarget,
 } from "./movementAssist.js";
 import {
-  narrativeApproachTarget,
-  narrativeTargetPosition,
-  vetoAwayFromNarrativeTarget,
+  effectiveRepairTarget,
+  vetoAwayFromTarget,
   type NamedDestination,
 } from "./textHints.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
@@ -159,28 +158,31 @@ function applySalvageMovementRepair(
   // Exp-4 item 5 (S2): re-steer instead of giving up — a capped step
   // TOWARD the narrative's named target keeps the salvage honest AND
   // moving. Null only when no legal toward-step exists.
+  //
+  // Exp-5 item 6 (S2, tick-15 repro): vet and re-steer against the
+  // EFFECTIVE target — the judge's resolved destination when present,
+  // else the narrative's. The movement gates enforce the judge's
+  // semantics; trusting corrupt narrative prose over them vetoed good
+  // repairs.
   let resteeredTarget: NamedDestination | null = null;
   if (suggestion) {
-    const vetted = vetoAwayFromNarrativeTarget(
+    const effTarget = effectiveRepairTarget(
       world,
       action.actorId,
       candidate.narrative,
-      suggestion,
+      semantics,
     );
+    const vetted =
+      effTarget !== null
+        ? vetoAwayFromTarget(world, action.actorId, suggestion, effTarget)
+        : suggestion;
     if (!vetted) {
-      const tp = narrativeTargetPosition(
-        world,
-        action.actorId,
-        candidate.narrative,
-      );
       const resteered =
-        tp !== null ? stepTowardPoint(world, action.actorId, tp.x, tp.y) : null;
-      if (!resteered) return null;
-      resteeredTarget = narrativeApproachTarget(
-        world,
-        action.actorId,
-        candidate.narrative,
-      );
+        effTarget !== null
+          ? stepTowardPoint(world, action.actorId, effTarget.x, effTarget.y)
+          : null;
+      if (!resteered || effTarget === null) return null;
+      resteeredTarget = { kind: effTarget.kind, id: effTarget.id };
       suggestion = resteered;
     } else {
       suggestion = vetted;
@@ -554,9 +556,9 @@ export function trySalvageConsequence(
   const actorName = world.actors.find((a) => a.id === action.actorId)?.name ?? action.actorId;
   const proseNarrative = stripAttributionPrefix(candidate.narrative, actorName, action.actorId);
   const proseErrors = [
+    // Exp-5 item 5 (S4): narrative-only — never scan reasoning here.
     ...validateNarrativeActors(world, {
       narrative: candidate.narrative,
-      reasoning: candidate.reasoning,
     }),
     ...validateObserverSubject(world, { narrative: proseNarrative }, action),
     ...findSupplementObserverSubject(world, proseNarrative, action),
