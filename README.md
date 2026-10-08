@@ -108,12 +108,11 @@ levers, in order of impact:
    (Ollama honors `think: false`). Exp-6 burned a median 772 completion
    tokens per call for ~100-token JSON payloads; reasoning is pure
    overhead for schema-emitting calls. Biggest single win (~3–5×).
+   Active by default in `.env.example`.
 2. **Full GPU offload** — `OLLAMA_MODEL=npc-qwen3-14b` (the tuned
    variant), or verify the stock model with `ollama ps` (PROCESSOR must
    read `100% GPU`). Exp-6 sat at ~50% offload with llama-server at
-   ~355% CPU. Unload competing models first (`ollama stop <model>`),
-   keep `OLLAMA_NUM_PARALLEL=1`, and consider `OLLAMA_FLASH_ATTENTION=1`
-   before `ollama serve`.
+   ~355% CPU. Unload competing models first (`ollama stop <model>`).
 3. **Right-sized context** — engine prompts measure ~2k real tokens
    (Ollama tokenizer), so `num_ctx 4096` (the default) is already
    correct; larger only burns VRAM on KV cache.
@@ -123,6 +122,15 @@ levers, in order of impact:
    default `LLM_TIMEOUT_MS` from it (4× median, 60 s…600 s). An explicit
    `LLM_TIMEOUT_MS` always wins. Calls slower than half the timeout are
    logged as `<module>_slow_call` warnings.
+
+All of it lives in one place: `.env` (copy from `.env.example`, which
+ships the optimal values active). Note the split: `LLM_*` vars are read
+by the simulator, while `OLLAMA_*` vars (`OLLAMA_KEEP_ALIVE=30m`,
+`OLLAMA_NUM_PARALLEL=1`, `OLLAMA_FLASH_ATTENTION=1`) are read by the
+`ollama serve` daemon — start it via `npm run ollama:serve`
+(`scripts/start-ollama.sh`), which exports the `OLLAMA_*` lines from
+`.env` into the server's environment. Starting ollama any other way
+silently ignores them.
 
 Note on GPU utilization: 20–30% SM occupancy during generation is normal
 for batch=1 decoding (memory-bandwidth-bound, not compute-bound) — the

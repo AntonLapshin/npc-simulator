@@ -28,7 +28,8 @@
     "eval:run-quality": "tsx scripts/eval-run-quality.ts",
     "clean:logs": "rm -rf logs && mkdir logs",
     "clean:saves": "rm -rf saves && mkdir saves",
-    "clean": "npm run clean:logs && npm run clean:saves"
+    "clean": "npm run clean:logs && npm run clean:saves",
+    "ollama:serve": "bash scripts/start-ollama.sh"
   },
   "dependencies": {
     "zod": "^3.23.8"
