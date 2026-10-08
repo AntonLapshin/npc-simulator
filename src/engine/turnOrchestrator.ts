@@ -64,6 +64,7 @@ import {
   pickBestAttempt,
   recheckAcceptedProse,
   salvageFormatCollapse,
+  shouldAbortRetries,
   trySalvageConsequence,
   type AttemptRecord,
 } from "./turnSalvage.js";
@@ -445,8 +446,14 @@ export async function resolveWithValidation(
       // F28: the deadline signal is forwarded to the consequence engine
       // (which passes it to the provider call) so a hung LLM request is
       // cancelled on timeout.
+      // Exp-6 item 2: flag user turns so the engine leads with the
+      // user-turn directive (the player's words are ground truth).
       result = await withTurnDeadline(
-        (signal) => deps.consequenceEngine.resolve(world, action, feedback, { signal }),
+        (signal) =>
+          deps.consequenceEngine.resolve(world, action, feedback, {
+            signal,
+            isUserTurn: action.actorId === world.userActorId,
+          }),
         timeLeft(),
       );
     } catch (err) {
@@ -1066,25 +1073,23 @@ export async function resolveWithValidation(
     // 4 — the turn still advances via salvage, as partial_applied).
     // Attempt 1 is the pickBestAttempt winner in 72% of Exp-3 turns, so
     // aborting a non-improving tail is safe.
-    const nA = attempts.length;
-    if (nA >= 3 && nA <= config.maxRetries) {
-      const bestSoFar = Math.min(...attempts.slice(0, nA - 2).map((a) => a.hardErrors));
-      if (
-        attempts[nA - 1]!.hardErrors >= bestSoFar &&
-        attempts[nA - 2]!.hardErrors >= bestSoFar
-      ) {
-        logger.log({
-          module: "turn",
-          event: "retry_aborted",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, attempt },
-          output: { hardErrors: attempts.map((a) => a.hardErrors), bestSoFar },
-          error: `last two attempts failed to improve on best-so-far hard errors (${bestSoFar}) — stopping retries, salvaging the best attempt`,
-        });
-        break;
-      }
+    // Exp-6 item 11 (S8): the decision is a pure function
+    // (shouldAbortRetries) so the exp-6 divergence shapes are
+    // regression-tested without running turns.
+    if (shouldAbortRetries(attempts.map((a) => a.hardErrors), config.maxRetries)) {
+      const hardErrors = attempts.map((a) => a.hardErrors);
+      const bestSoFar = Math.min(...hardErrors.slice(0, hardErrors.length - 2));
+      logger.log({
+        module: "turn",
+        event: "retry_aborted",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, attempt },
+        output: { hardErrors, bestSoFar },
+        error: `last two attempts failed to improve on best-so-far hard errors (${bestSoFar}) — stopping retries, salvaging the best attempt`,
+      });
+      break;
     }
     report(deps, {
       stage: "consequence_retry",
