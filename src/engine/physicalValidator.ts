@@ -33,6 +33,7 @@ import {
   validateInventedContact,
   validateNarrativeActors,
   validateNarrativeMovementGrounding,
+  validateNarrativePronouns,
   validateNarrativeVoice,
   validateObserverSubject,
   validateRelationshipLabel,
@@ -317,6 +318,9 @@ export function validateConsequence(
         world.actors.find((a) => a.id === action.actorId)?.name,
       ),
     );
+    // Exp-7 item A6: third-person pronoun discipline (opt-in via
+    // actor.pronouns) — "she says" for a he/him actor fails fast.
+    errors.push(...validateNarrativePronouns(world, normalized.narrative, action));
     // Exp-3 item 6 (S3): identity-theft prose must fail in the retry loop
     // too, not only on the accept path — tick 20's "I'm Dana, the new
     // hire" passed every other prose gate.

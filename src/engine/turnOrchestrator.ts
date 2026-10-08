@@ -444,7 +444,12 @@ export async function resolveWithValidation(
   // once per turn. undefined = not asked yet; true = veto moves.
   let locomotionVeto: boolean | undefined;
 
-  for (let attempt = 1; attempt <= Math.max(1, config.maxRetries + 1); attempt++) {
+  // Exp-7: the outer attempt cap is consequenceMaxAttempts (default 2),
+  // not maxRetries+1. Retries don't steer the model (exp-7 B2) — the
+  // in-loop deterministic repairs below run on every attempt, and salvage
+  // handles what they can't.
+  const maxAttempts = Math.max(1, config.consequenceMaxAttempts ?? config.maxRetries + 1);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (timeLeft() <= 0) {
       deadlineExceeded = true;
       break;
@@ -479,7 +484,7 @@ export async function resolveWithValidation(
         error: errorMessage(err),
       });
       feedback = `Previous attempt raised an error: ${errorMessage(err)}`;
-      if (attempt > config.maxRetries) break;
+      if (attempt >= maxAttempts) break;
       logger.log({
         module: "turn",
         event: "retry_started",
@@ -1068,7 +1073,7 @@ export async function resolveWithValidation(
     // of the raw multi-gate dump (which pushed small models
     // off-distribution); the targeted hints below stay as-is.
     feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
-    if (attempt > config.maxRetries) break;
+    if (attempt >= maxAttempts) break;
     // Exp-3 item 9 (S7, RULE-C): abort the retry loop early when the last
     // two attempts both failed to STRICTLY improve on the best-so-far
     // hard-error count. Data-grounded on Exp-3 (25 eligible turns): the old
@@ -1329,7 +1334,9 @@ async function autosave(world: World, deps: EngineDependencies): Promise<void> {
     if (deps.onAutosave) {
       await deps.onAutosave(world);
     } else {
-      await saveWorld(defaultSavePath(config.saveDir, world.id, world.tick), world, deps.logger);
+      // Exp-7 item A12: prefer the scenario file stem over world.id so
+      // same-id scenarios (office.json vs office-anton.json) don't collide.
+      await saveWorld(defaultSavePath(config.saveDir, config.saveNamePrefix ?? world.id, world.tick), world, deps.logger);
     }
   } catch (err) {
     deps.logger.log({
@@ -1667,8 +1674,11 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   logger.log({
     module: "turn",
     event: "turn_completed",
-    tick: nextWorld.tick,
-    turnIndex: nextWorld.turnIndex,
+    // Exp-7 item T4: the record describes the turn that just completed —
+    // log its own tick/turnIndex, not the next tick's (the off-by-one
+    // silently broke per-turn log analysis).
+    tick: world.tick,
+    turnIndex: world.turnIndex,
     actorId: action.actorId,
     // F18: reuse the final world object without re-cloning. Nothing
     // mutates it afterwards: autosave only serializes, and the caller
