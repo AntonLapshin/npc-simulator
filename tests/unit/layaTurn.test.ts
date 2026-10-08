@@ -27,18 +27,24 @@ import {
   classifyIntentKind,
   describePatchesForPlausibility,
   filterObserverPatches,
+  gateMemoryAppendsOnSalience,
   intentFromCascadeDecisions,
   intentFromDiagramRun,
   layaWiringFromEnv,
   parseTriageAnswers,
+  plausibilityAdvisoryForRetry,
   plausibilityAdvisoryNote,
   resolveIntentDiagram,
+  resolveIntentDiagramDetailed,
   runIntentCascade,
   scoreAnswerToLevel,
   stripModelMemoryAppends,
   triageQuestionId,
+  type LayaTurnWiring,
 } from "../../src/engine/layaTurn.js";
+import { clearDiagramCache } from "../../src/decision/questionPlanner.js";
 import type {
+  Action,
   ActorPatch,
   ConsequenceResult,
 } from "../../src/types.js";
@@ -590,5 +596,242 @@ describe("createLlmEngines Laya sourcing", () => {
       env: { LAYA_MODE: "static", LAYA_JUDGE: "1" },
     });
     expect(engines.getEnginesForTurn(false).selection).toBeInstanceOf(LLMSelectionEngine);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exp-2 S6: per-phase Laya observability — one event per phase per turn,
+// even on no-op, through module="laya" (the Phase-5 layaEvents histogram
+// counts those).
+// ---------------------------------------------------------------------------
+
+/** LayaClient stub answering every question id with a fixed score level index. */
+function stubScoreClient(score: number): LayaClient {
+  return new LayaClient({
+    baseUrl: "http://127.0.0.1:8000",
+    fetchImpl: (async () =>
+      new Response(JSON.stringify({ answers: { salience: { score } } }), {
+        status: 200,
+      })) as typeof fetch,
+  });
+}
+
+function stubWiring(client: LayaClient, salienceThreshold = 3): LayaTurnWiring {
+  return {
+    client,
+    config: readLayaRuntimeConfig({ LAYA_MODE: "static", LAYA_SALIENCE: "1" }),
+    salienceThreshold,
+    plausibility: false,
+  };
+}
+
+function stubAction(): Action {
+  return { actorId: "u", text: "U waves hello." };
+}
+
+function stubResult(patches: ActorPatch[] = []): ConsequenceResult {
+  return {
+    narrative: "U waves hello.",
+    actorPatches: patches,
+    objectPatches: [],
+    reasoning: "test",
+  };
+}
+
+describe("resolveIntentDiagramDetailed (S6 planner outcome)", () => {
+  it("reports static in static mode", async () => {
+    const r = await resolveIntentDiagramDetailed({
+      mode: "static", plannerEnabled: true, goal: "g", state: "s",
+      chatComplete: async () => VALID_DIAGRAM_JSON,
+    });
+    expect(r.diagram).toBe(SELECTION_CASCADE);
+    expect(r.outcome).toBe("static");
+    expect(r.reason).toContain("static");
+  });
+
+  it("reports skipped when the planner toggle is off or no hook is wired", async () => {
+    const r = await resolveIntentDiagramDetailed({
+      mode: "dynamic", plannerEnabled: false, goal: "g", state: "s",
+      chatComplete: async () => VALID_DIAGRAM_JSON,
+    });
+    expect(r.outcome).toBe("skipped");
+    expect(r.reason).toContain("LAYA_PLANNER=0");
+    const r2 = await resolveIntentDiagramDetailed({
+      mode: "dynamic", plannerEnabled: true, goal: "g", state: "s",
+    });
+    expect(r2.outcome).toBe("skipped");
+    expect(r2.reason).toContain("no planner chat hook");
+  });
+
+  it("reports fallback when the planner throws", async () => {
+    clearDiagramCache(); // the ("g","s") key is cached by the resolveIntentDiagram tests above
+    const r = await resolveIntentDiagramDetailed({
+      mode: "dynamic", plannerEnabled: true, goal: "s6-fallback-goal", state: "s6-fallback-state",
+      chatComplete: async () => { throw new Error("planner down"); },
+    });
+    expect(r.diagram).toBe(SELECTION_CASCADE);
+    expect(r.outcome).toBe("fallback");
+    expect(r.reason).toContain("planner failed");
+  });
+
+  it("reports planned then cache_hit on a repeated goal+state", async () => {
+    clearDiagramCache();
+    const opts = {
+      mode: "dynamic" as const, plannerEnabled: true,
+      goal: "s6-unique-goal", state: "s6-unique-state",
+      chatComplete: async () => VALID_DIAGRAM_JSON,
+    };
+    const first = await resolveIntentDiagramDetailed(opts);
+    expect(first.outcome).toBe("planned");
+    expect(first.diagram).not.toBe(SELECTION_CASCADE);
+    const second = await resolveIntentDiagramDetailed(opts);
+    expect(second.outcome).toBe("cache_hit");
+    expect(second.diagram).toBe(first.diagram);
+    clearDiagramCache();
+  });
+});
+
+describe("runIntentCascade planner observability (S6)", () => {
+  it("logs planner_diagram_resolved with module=laya on every cascade run", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    await runIntentCascade(
+      stubClient({ intent_kind: "wait", manner: "casually" }),
+      world,
+      world.order[0]!,
+      { mode: "static", plannerEnabled: false, goal: "decide intent" },
+      logger,
+    );
+    const events = logger.store.byModule("laya");
+    const planner = events.find((e) => e.event === "planner_diagram_resolved");
+    expect(planner).toBeDefined();
+    expect(planner!.output).toMatchObject({ outcome: "static" });
+  });
+});
+
+describe("gateMemoryAppendsOnSalience observability (S6)", () => {
+  it("logs salience_scored with a no-op reason when there is nothing to gate", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    const out = await gateMemoryAppendsOnSalience(
+      stubWiring(stubScoreClient(0)),
+      world,
+      stubAction(),
+      stubResult(),
+      logger,
+    );
+    expect(out.actorPatches).toEqual([]);
+    const scored = logger.store.byEvent("salience_scored");
+    expect(scored).toHaveLength(1);
+    expect(scored[0]!.module).toBe("laya");
+    expect(scored[0]!.output).toMatchObject({
+      scored: false,
+      reason: expect.stringContaining("no model memory/belief appends"),
+    });
+  });
+
+  it("logs scored=true and gates below the threshold", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    const patches: ActorPatch[] = [
+      { actorId: "u", memoriesAppend: ["met Ana"] },
+    ];
+    const out = await gateMemoryAppendsOnSalience(
+      stubWiring(stubScoreClient(0)), // level 1 < threshold 3
+      world,
+      stubAction(),
+      stubResult(patches),
+      logger,
+    );
+    expect(out.actorPatches[0]!.memoriesAppend).toBeUndefined();
+    const scored = logger.store.byEvent("salience_scored");
+    expect(scored).toHaveLength(1);
+    expect(scored[0]!.output).toMatchObject({
+      scored: true, score: 1, threshold: 3, gated: true,
+    });
+  });
+
+  it("logs scored=true and keeps appends at/above the threshold", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    const patches: ActorPatch[] = [
+      { actorId: "u", memoriesAppend: ["met Ana"] },
+    ];
+    const out = await gateMemoryAppendsOnSalience(
+      stubWiring(stubScoreClient(4)), // level 5 >= threshold 3
+      world,
+      stubAction(),
+      stubResult(patches),
+      logger,
+    );
+    expect(out.actorPatches[0]!.memoriesAppend).toEqual(["met Ana"]);
+    expect(logger.store.byEvent("salience_scored")[0]!.output).toMatchObject({
+      scored: true, score: 5, gated: false,
+    });
+  });
+});
+
+describe("plausibilityAdvisoryForRetry observability (S6)", () => {
+  it("logs plausibility_scored with a no-op reason when there is nothing to score", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    const note = await plausibilityAdvisoryForRetry(
+      stubScoreClient(0),
+      stubAction(),
+      stubResult(),
+      { logger, tick: world.tick, turnIndex: world.turnIndex, attempt: 2 },
+    );
+    expect(note).toBeUndefined();
+    const events = logger.store.byEvent("plausibility_scored");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.module).toBe("laya");
+    expect(events[0]!.input).toMatchObject({ attempt: 2 });
+    expect(events[0]!.output).toMatchObject({
+      scored: false,
+      reason: expect.stringContaining("no object/position patches"),
+    });
+  });
+
+  it("logs scored=true with the advisory outcome when patches score low", async () => {
+    const logger = createTestLogger();
+    const world = makeTinyWorld();
+    // Plausibility scores per patch label via plaus_<i> ids; answer all low.
+    const lowClient = new LayaClient({
+      baseUrl: "http://127.0.0.1:8000",
+      fetchImpl: (async (url: unknown, init?: { body?: unknown }) => {
+        const body = JSON.parse(String((init as { body: string }).body)) as {
+          questions: Record<string, unknown>;
+        };
+        const answers: Record<string, unknown> = {};
+        for (const id of Object.keys(body.questions)) answers[id] = { score: 0 };
+        return new Response(JSON.stringify({ answers }), { status: 200 });
+      }) as typeof fetch,
+    });
+    const note = await plausibilityAdvisoryForRetry(
+      lowClient,
+      stubAction(),
+      {
+        ...stubResult(),
+        actorPatches: [{ actorId: "u", x: 99, y: 99 }],
+      },
+      { logger, tick: world.tick, turnIndex: world.turnIndex },
+    );
+    expect(note).toContain("plausibility 1/5");
+    const events = logger.store.byEvent("plausibility_scored");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.output).toMatchObject({
+      scored: true, patchCount: 1, lowScoreCount: 1, advisoryNote: true,
+    });
+  });
+
+  it("stays silent without obs (backward compatible)", async () => {
+    const logger = createTestLogger();
+    const note = await plausibilityAdvisoryForRetry(
+      stubScoreClient(0),
+      stubAction(),
+      stubResult(),
+    );
+    expect(note).toBeUndefined();
+    expect(logger.store.all()).toHaveLength(0);
   });
 });

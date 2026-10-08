@@ -39,6 +39,21 @@ export function clearDiagramCache(): void {
   cache.clear();
 }
 
+/**
+ * Observability hook (Exp-2 S6): return the cached diagram for
+ * (goal, stateSummary) without generating one — undefined on a miss or an
+ * expired entry. Lets the turn wiring report planner cache-hits instead of
+ * running silently.
+ */
+export function peekDiagramCache(
+  goal: string,
+  stateSummary: string,
+): DecisionDiagram | undefined {
+  const hit = cache.get(diagramCacheKey(goal, stateSummary));
+  if (hit !== undefined && hit.expiresAt > Date.now()) return hit.diagram;
+  return undefined;
+}
+
 /** Test hook: how many diagrams are currently cached. */
 export function diagramCacheSize(): number {
   return cache.size;

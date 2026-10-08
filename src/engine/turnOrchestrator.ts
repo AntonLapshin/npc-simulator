@@ -687,7 +687,14 @@ export async function resolveWithValidation(
     // advisory note to the retry feedback. Never invalidates on its own.
     let plausibilityNote: string | undefined;
     if (deps.laya?.plausibility === true) {
-      plausibilityNote = await plausibilityAdvisoryForRetry(deps.laya.client, action, result);
+      // Exp-2 S6: thread observability through so the phase reports
+      // (scored / no-op reason) into the layaEvents histogram.
+      plausibilityNote = await plausibilityAdvisoryForRetry(
+        deps.laya.client,
+        action,
+        result,
+        { logger, tick: world.tick, turnIndex: world.turnIndex, attempt },
+      );
     }
     feedback = `Previous consequence output was invalid:\n${validation.errors.map((e) => `- [${e.code}] ${e.message}`).join("\n")}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt > config.maxRetries) break;

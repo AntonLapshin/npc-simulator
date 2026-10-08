@@ -30,6 +30,7 @@ import { buildIntentState } from "../decision/decisionState.js";
 import { LayaClient } from "../decision/layaClient.js";
 import { createLayaClient } from "../decision/wiring.js";
 import {
+  peekDiagramCache,
   planDiagram,
   type ChatComplete,
 } from "../decision/questionPlanner.js";
@@ -385,26 +386,92 @@ export type ResolveIntentDiagramOptions = {
 };
 
 /**
+ * Exp-2 S6: how the turn's intent diagram was obtained. Reported on the
+ * `planner_diagram_resolved` event so the Phase-5 `layaEvents` histogram
+ * can tell "planner ran" from "planner dead".
+ */
+export type PlannerOutcome =
+  /** The planner generated a fresh diagram this turn. */
+  | "planned"
+  /** The questionPlanner TTL cache served the diagram (no LLM call). */
+  | "cache_hit"
+  /** Static mode: the planner is never attempted. */
+  | "static"
+  /** Dynamic mode, but the planner was disabled or had no chat hook. */
+  | "skipped"
+  /** The planner was attempted and failed; static cascade used. */
+  | "fallback";
+
+export type IntentDiagramResolution = {
+  diagram: DecisionDiagram;
+  outcome: PlannerOutcome;
+  /** Human-readable why, carried on the observability event. */
+  reason: string;
+};
+
+/**
  * Phase 4: in dynamic mode with the planner on, generate the selection
  * diagram per turn (cached by questionPlanner); on ANY planner failure
  * fall back to the static SELECTION_CASCADE. Static mode always uses the
- * static diagram.
+ * static diagram. Reports HOW the diagram was obtained (S6).
  */
-export async function resolveIntentDiagram(
+export async function resolveIntentDiagramDetailed(
   opts: ResolveIntentDiagramOptions,
-): Promise<DecisionDiagram> {
+): Promise<IntentDiagramResolution> {
   if (
     opts.mode === "dynamic" &&
     opts.plannerEnabled &&
     opts.chatComplete !== undefined
   ) {
+    const cached = peekDiagramCache(opts.goal, opts.state);
     try {
-      return await planDiagram(opts.goal, opts.state, opts.chatComplete);
-    } catch {
-      return SELECTION_CASCADE;
+      const diagram = await planDiagram(
+        opts.goal,
+        opts.state,
+        opts.chatComplete,
+      );
+      return cached !== undefined
+        ? {
+            diagram,
+            outcome: "cache_hit",
+            reason: "questionPlanner TTL cache hit (no planner LLM call)",
+          }
+        : {
+            diagram,
+            outcome: "planned",
+            reason: "planner generated a fresh diagram",
+          };
+    } catch (err) {
+      return {
+        diagram: SELECTION_CASCADE,
+        outcome: "fallback",
+        reason: `planner failed (${errorMessage(err)}); using static SELECTION_CASCADE`,
+      };
     }
   }
-  return SELECTION_CASCADE;
+  if (opts.mode !== "dynamic") {
+    return {
+      diagram: SELECTION_CASCADE,
+      outcome: "static",
+      reason: `LAYA_MODE=${opts.mode}: the planner only runs in dynamic mode`,
+    };
+  }
+  return {
+    diagram: SELECTION_CASCADE,
+    outcome: "skipped",
+    reason: opts.plannerEnabled
+      ? "no planner chat hook wired"
+      : "LAYA_PLANNER=0",
+  };
+}
+
+/**
+ * Thin wrapper kept for existing callers/tests that only need the diagram.
+ */
+export async function resolveIntentDiagram(
+  opts: ResolveIntentDiagramOptions,
+): Promise<DecisionDiagram> {
+  return (await resolveIntentDiagramDetailed(opts)).diagram;
 }
 
 export type RunIntentCascadeOptions = {
@@ -429,9 +496,24 @@ export async function runIntentCascade(
 ): Promise<Intent | undefined> {
   try {
     const state = buildIntentState(world, actorId);
-    const diagram = await resolveIntentDiagram({ ...opts, state });
-    const run = await runDiagram(diagram, state, (s, q) => client.decide(s, q));
-    const intent = intentFromDiagramRun(diagram, run);
+    const resolution = await resolveIntentDiagramDetailed({ ...opts, state });
+    // Exp-2 S6: one observability event per phase per turn, even when the
+    // planner was skipped or fell back — the Phase-5 layaEvents histogram
+    // counts module="laya" events and must distinguish "ran silently"
+    // from "dead".
+    logger?.log({
+      module: "laya",
+      event: "planner_diagram_resolved",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId,
+      input: { mode: opts.mode, plannerEnabled: opts.plannerEnabled },
+      output: { outcome: resolution.outcome, reason: resolution.reason },
+    });
+    const run = await runDiagram(resolution.diagram, state, (s, q) =>
+      client.decide(s, q),
+    );
+    const intent = intentFromDiagramRun(resolution.diagram, run);
     logger?.log({
       module: "laya",
       event: "intent_decided",
@@ -580,7 +662,22 @@ export async function gateMemoryAppendsOnSalience(
   const hasAppends = result.actorPatches.some(
     (p) => (p.memoriesAppend?.length ?? 0) > 0 || (p.beliefsAppend?.length ?? 0) > 0,
   );
-  if (!hasAppends) return result;
+  // Exp-2 S6: log on EVERY path, including no-ops — a silent no-op and a
+  // dead phase look identical in the layaEvents histogram otherwise.
+  if (!hasAppends) {
+    logger.log({
+      module: "laya",
+      event: "salience_scored",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      output: {
+        scored: false,
+        reason: "no model memory/belief appends to gate",
+      },
+    });
+    return result;
+  }
   let score: number | undefined;
   try {
     score = await runSalienceScore(
@@ -598,7 +695,20 @@ export async function gateMemoryAppendsOnSalience(
     });
     return result;
   }
-  if (score === undefined) return result;
+  if (score === undefined) {
+    logger.log({
+      module: "laya",
+      event: "salience_scored",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      output: {
+        scored: false,
+        reason: "laya returned no score; keeping model appends (fail open)",
+      },
+    });
+    return result;
+  }
   const gated = score < wiring.salienceThreshold;
   logger.log({
     module: "laya",
@@ -606,7 +716,7 @@ export async function gateMemoryAppendsOnSalience(
     tick: world.tick,
     turnIndex: world.turnIndex,
     actorId: action.actorId,
-    output: { score, threshold: wiring.salienceThreshold, gated },
+    output: { scored: true, score, threshold: wiring.salienceThreshold, gated },
   });
   return gated ? stripModelMemoryAppends(result) : result;
 }
@@ -635,27 +745,93 @@ export async function applyLayaPostHooks(
 }
 
 /**
+ * Observability context for the plausibility phase (Exp-2 S6). The phase
+ * previously took no logger at all, so it could never appear in the
+ * Phase-5 layaEvents histogram — running and dead were indistinguishable.
+ */
+export type PlausibilityObs = {
+  logger: Logger;
+  tick: number;
+  turnIndex: number;
+  /** Retry attempt that triggered the advisory (when run from retry feedback). */
+  attempt?: number;
+};
+
+/**
  * Phase 4: advisory plausibility note for retry feedback. Scores every
  * object/position patch 1–5 in one batched decide(); scores ≤2 become an
  * advisory note. Returns undefined when there is nothing to score, when
  * nothing scores low, or on any failure — advisory ONLY, never throws.
+ *
+ * Exp-2 S6: emits one `plausibility_scored` event per invocation (module
+ * "laya") whenever `obs` is provided — including every no-op reason — so
+ * the histogram can tell "ran" from "dead".
  */
 export async function plausibilityAdvisoryForRetry(
   client: LayaClient,
   action: Action,
   result: ConsequenceResult,
+  obs?: PlausibilityObs,
 ): Promise<string | undefined> {
+  const emit = (
+    output: Record<string, unknown>,
+    input?: Record<string, unknown>,
+  ): void => {
+    if (obs === undefined) return;
+    obs.logger.log({
+      module: "laya",
+      event: "plausibility_scored",
+      tick: obs.tick,
+      turnIndex: obs.turnIndex,
+      actorId: action.actorId,
+      input: {
+        ...(obs.attempt !== undefined ? { attempt: obs.attempt } : {}),
+        ...input,
+      },
+      output,
+    });
+  };
   try {
     const labels = describePatchesForPlausibility(result);
-    if (labels.length === 0) return undefined;
+    if (labels.length === 0) {
+      emit({
+        scored: false,
+        reason: "no object/position patches to score",
+      });
+      return undefined;
+    }
     const scores = await runPlausibilityScores(
       client,
       slimEventText(action, result.narrative),
       labels,
     );
-    if (scores === undefined) return undefined;
-    return plausibilityAdvisoryNote(scores);
+    if (scores === undefined) {
+      emit(
+        {
+          scored: false,
+          reason: "laya failure; no advisory appended (fail open)",
+          patchCount: labels.length,
+        },
+        { patchLabels: labels },
+      );
+      return undefined;
+    }
+    const note = plausibilityAdvisoryNote(scores);
+    emit(
+      {
+        scored: true,
+        patchCount: labels.length,
+        lowScoreCount: scores.filter((s) => s.level <= 2).length,
+        advisoryNote: note !== undefined,
+      },
+      { patchLabels: labels },
+    );
+    return note;
   } catch {
+    emit({
+      scored: false,
+      reason: "unexpected error; no advisory appended (fail open)",
+    });
     return undefined;
   }
 }
