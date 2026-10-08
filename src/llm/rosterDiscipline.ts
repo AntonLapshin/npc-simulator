@@ -41,3 +41,20 @@ export function buildRosterRetryLine(rosterIds: string[]): string {
   const ids = rosterIds.length > 0 ? rosterIds.map((id) => `"${id}"`).join(", ") : "(none)";
   return `ROSTER REPEAT: the ONLY valid actor ids are ${ids} — re-read them, any other name is invented.`;
 }
+
+/**
+ * Exp-2 item 1: positive-example actors for prompt examples, drawn from
+ * the real roster. The static "Anton walks toward Tanya" movement example
+ * was copied verbatim by the 8B in exp-2 m1 attempt 2 — for any other
+ * roster those names are invented people shown as POSITIVE examples,
+ * priming the attractor the discipline line tries to suppress. Returns
+ * the first two roster ids (display name = id with the first letter
+ * capitalized); empty when the roster is empty so callers can keep the
+ * legacy Anton/Tanya examples byte-identical.
+ */
+export function rosterExampleActors(rosterIds: string[]): Array<{ id: string; name: string }> {
+  return rosterIds.slice(0, 2).map((id) => ({
+    id,
+    name: id.length > 0 ? id[0]!.toUpperCase() + id.slice(1) : id,
+  }));
+}

@@ -62,7 +62,7 @@ export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
 export { LLMSelectionEngine, FALLBACK_SELECTION } from "./llmSelectionEngine.js";
 export { LLMSemanticJudge, buildSemanticJudgePrompt } from "./llmSemanticJudge.js";
 export { LLM_SYSTEM_PROMPT } from "./prompts.js";
-export { buildRosterDisciplineLine, buildRosterRetryLine } from "./rosterDiscipline.js";
+export { buildRosterDisciplineLine, buildRosterRetryLine, rosterExampleActors } from "./rosterDiscipline.js";
 export { extractJsonPayload, parseJsonObject, formatRepairPrompt } from "./json.js";
 
 export type LlmEngines = {

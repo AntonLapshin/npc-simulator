@@ -4,7 +4,7 @@
 // Context Builder (subjective for proposal/selection, objective for
 // consequence) — this file only adds the shared system prompt and the
 // per-module output-schema suffixes.
-import { buildRosterDisciplineLine } from "./rosterDiscipline.js";
+import { buildRosterDisciplineLine, rosterExampleActors } from "./rosterDiscipline.js";
 
 /** Common base system prompt (§11.1). Sent on every LLM call. */
 export const LLM_SYSTEM_PROMPT = [
@@ -51,6 +51,48 @@ export const CONSEQUENCE_OUTPUT_SCHEMA = `{
   "reasoning": "string"
 }`;
 
+/**
+ * Exp-2 item 3: canonical form for fully-spoken actions (the action text
+ * IS the utterance). Pairs with the echo-gate exemption for quoted-speech
+ * turns: quote the utterance VERBATIM — never paraphrase (paraphrase drops
+ * words and trips speech.dropped_words, which then fights the echo gate
+ * until the turn dies) — and narrate only the non-speech frame. One line:
+ * it must earn its tokens.
+ */
+export const FULLY_SPOKEN_ACTION_LINE =
+  "FULLY-SPOKEN ACTION: when the action text IS the utterance, quote it VERBATIM in the narrative " +
+  "(never paraphrase — paraphrase drops words and fails validation) and narrate only the non-speech " +
+  "frame (posture, gesture, glance); the quote IS the speech, everything else is what the body does.";
+
+/** Legacy positive examples (Anton/Tanya roster) — kept byte-identical when no roster ids are given. */
+const LEGACY_GREETING_EXAMPLE =
+  "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}";
+const LEGACY_MOVEMENT_EXAMPLE =
+  "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"x\": 5, \"y\": 8, \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya.\"}";
+
+/**
+ * Exp-2 item 1: positive examples built from real roster actors (see
+ * rosterExampleActors). Byte-identical to the legacy strings for the
+ * Anton/Tanya roster.
+ */
+function greetingExample(a: { id: string; name: string }): string {
+  return (
+    `Example: {"narrative": "${a.name} greets the office.", ` +
+    `"actorPatches": [{"actorId": "${a.id}", "thoughts": "Hope they like me."}], ` +
+    `"objectPatches": [], "effects": {"moved": false, "spoke": true, "quotedSpeech": []}, ` +
+    `"reasoning": "Greeting is heard by everyone nearby."}`
+  );
+}
+
+function movementExample(a: { id: string; name: string }, b: { id: string; name: string }): string {
+  return (
+    `Movement example: {"narrative": "${a.name} walks toward ${b.name}.", ` +
+    `"actorPatches": [{"actorId": "${a.id}", "x": 5, "y": 8, "thoughts": "Trying to make a good impression."}], ` +
+    `"objectPatches": [], "effects": {"moved": true, "destinationActorId": "${b.id}", "spoke": false, "quotedSpeech": []}, ` +
+    `"reasoning": "${a.name} moves closer to ${b.name}."}`
+  );
+}
+
 export function proposalSuffix(): string {
   return [
     "Output Schema",
@@ -95,13 +137,21 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
   // short core (identity + roster + movement + speech + turn discipline +
   // minimal field rules, incl. the exp-3 one-liners); retries get the full
   // text plus validation feedback.
+  // Exp-2 item 1: positive examples name real roster actors — the static
+  // Anton/Tanya examples prime invention for any other roster (exp-2 m1
+  // attempt 2 copied the movement example verbatim). Empty roster keeps
+  // the legacy examples byte-identical.
+  const [exA, exB] = rosterExampleActors(rosterIds);
+  const greetingLine = exA !== undefined ? greetingExample(exA) : LEGACY_GREETING_EXAMPLE;
+  const movementLine =
+    exA !== undefined && exB !== undefined ? movementExample(exA, exB) : LEGACY_MOVEMENT_EXAMPLE;
   if (mode === "short") {
     return [
       "Output Schema",
       "",
       CONSEQUENCE_OUTPUT_SCHEMA,
       "",
-      "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}",
+      greetingLine,
       "",
       "FIELD RULES (must follow exactly, or the output is rejected):",
       "actorPatches MUST be a real JSON array of objects with \"actorId\" (never \"id\"); objectPatches a real array with \"objectId\" (never \"id\"). Do NOT nest objectPatches inside actorPatches.",
@@ -116,6 +166,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       // turns), so the mapping is stated as examples up front.
       "PROP AUTO-HINTS: typing/working on a computer means the actor holds it — set prop:\"laptop\" (never narrate typing with empty hands); picking up, holding, or drinking from a cup/mug — set prop:\"cup\". The prop lives on the acting actor's patch.",
       "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
+      // Exp-2 item 3: canonical form for fully-spoken actions.
+      FULLY_SPOKEN_ACTION_LINE,
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
       // Exp-6 item 8: never name the pipeline in prose.
       "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning.",
@@ -128,8 +180,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "",
     CONSEQUENCE_OUTPUT_SCHEMA,
     "",
-    "Example: {\"narrative\": \"Anton greets the office.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": []}, \"reasoning\": \"Greeting is heard by everyone nearby.\"}",
-    "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"x\": 5, \"y\": 8, \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya.\"}",
+    greetingLine,
+    movementLine,
     "",
     "FIELD RULES (must follow exactly, or the output is rejected):",
     "actorPatches MUST be a real JSON array of objects (never a quoted string).",
@@ -199,6 +251,9 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "grounded strictly in the given action text. If the action is speech, preserve",
     "its wording (quote or close paraphrase of the FULL utterance) — never invent different dialogue and",
     "never truncate a longer speech to a fragment.",
+    // Exp-2 item 3: canonical form for fully-spoken actions (pairs with the
+    // echo-gate exemption for quoted-speech turns).
+    FULLY_SPOKEN_ACTION_LINE,
     "If the action text contains quoted/uttered words, the narrative MUST contain",
     "those same words (same wording, not a different greeting or sentence).",
     "Never invent new quoted dialogue that is not in the action text.",

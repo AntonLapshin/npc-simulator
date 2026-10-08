@@ -12,6 +12,7 @@ import type { ConsequenceEngine } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
+import { buildPropHint } from "../engine/textHints.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, CONSEQUENCE_OUTPUT_SCHEMA, consequenceSuffix } from "./prompts.js";
@@ -71,7 +72,16 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       feedback ? "full" : "short",
       world.actors.map((a) => a.id),
     );
-    const userPrompt = `${buildConsequenceContext(world, action, feedback)}\n\n${suffix}`;
+    // Exp-2 item 4: prop auto-hint — when the action text carries
+    // prop-bearing activity (typing→laptop, sipping→cup), name the exact
+    // roster object ids up front so the model emits the patch convention
+    // instead of inventing holder ids. Inserted before the protected
+    // instruction tail (suffix), which stays last for F33 truncation
+    // safety. Deterministic per action, so retries repeat it harmlessly.
+    const propHint = buildPropHint(action.text, world, action.actorId);
+    const context = buildConsequenceContext(world, action, feedback);
+    const userPrompt =
+      propHint !== undefined ? `${context}\n\n${propHint}\n\n${suffix}` : `${context}\n\n${suffix}`;
 
     const result = await completeJson({
       logger: this.logger,
