@@ -16,6 +16,11 @@ import {
   runIntentCascade,
   type LayaTurnWiring,
 } from "./layaTurn.js";
+import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
+import {
+  deterministicSalvageOrder,
+  rankSalvageCandidates,
+} from "../decision/layaSalvageSelect.js";
 import type {
   ConsequenceEngine,
   ProposalEngine,
@@ -326,6 +331,11 @@ export async function resolveWithValidation(
   // consequence context via buildConsequenceContext).
   const affordanceNudge = buildObjectAffordanceNudge(world, action);
 
+  // Exp-2-E item (b): per-turn cache for the Laya locomotion veto. The
+  // action text is constant across attempts, so the noul is asked at most
+  // once per turn. undefined = not asked yet; true = veto moves.
+  let locomotionVeto: boolean | undefined;
+
   for (let attempt = 1; attempt <= Math.max(1, config.maxRetries + 1); attempt++) {
     if (timeLeft() <= 0) {
       deadlineExceeded = true;
@@ -429,8 +439,37 @@ export async function resolveWithValidation(
       logger,
     );
     lastResult = result;
-    lastSemantics = resolved.semantics;
-    const validation = validateConsequence(world, result, action, resolved.semantics);
+    // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1,
+    // off by default). Deterministic/merged semantics decide moves first;
+    // Laya only ever VETOES a moves=true — when it is confident the action
+    // needs no relocation ("turn to face Dan", "where should I sit?").
+    // Laya failure or low confidence keeps the deterministic verdict.
+    let semantics = resolved.semantics;
+    let semanticsSource = resolved.source;
+    if (
+      semantics?.moves === true &&
+      deps.laya?.config.toggles.locomotion === true
+    ) {
+      if (locomotionVeto === undefined) {
+        locomotionVeto =
+          (await checkLocomotionVeto(deps.laya.client, action.text)) === true;
+        logger.log({
+          module: "laya",
+          event: locomotionVeto ? "locomotion_veto" : "locomotion_confirmed",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { actionText: action.text, deterministicMoves: true },
+          output: { veto: locomotionVeto },
+        });
+      }
+      if (locomotionVeto) {
+        semantics = { ...semantics, moves: false };
+        semanticsSource = "merged";
+      }
+    }
+    lastSemantics = semantics;
+    const validation = validateConsequence(world, result, action, semantics);
     if (validation.valid) {
       logger.log({
         module: "validator",
@@ -438,7 +477,7 @@ export async function resolveWithValidation(
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+        input: { action, result, attempt, semanticsSource, semantics },
         output: validation,
       });
       return result;
@@ -450,7 +489,7 @@ export async function resolveWithValidation(
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId: action.actorId,
-      input: { action, result, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+      input: { action, result, attempt, semanticsSource, semantics },
       // LogInput.validationErrors is string[] — log the messages; the
       // codes stay on the ValidationError objects in the trace output.
       validationErrors: validation.errors.map((e) => `[${e.code}] ${e.message}`),
@@ -459,7 +498,7 @@ export async function resolveWithValidation(
     // Item C10 (S7): record the failed attempt for best-attempt salvage.
     attempts.push({
       result,
-      semantics: resolved.semantics,
+      semantics: semantics,
       hardErrors: countHardErrors(validation.errors),
     });
 
@@ -470,26 +509,26 @@ export async function resolveWithValidation(
     // changes." fallback. The narrative already describes the movement, so
     // filling in coordinates preserves intent.
     let movementHint: string | undefined;
-    if (resolved.semantics?.moves) {
+    if (semantics?.moves) {
       // Item C7 (S1): the action text steers the suggestion — "walk east"
       // must not repair westward when no destination was declared.
       const suggestion = suggestMoveTarget(
         world,
         action.actorId,
-        resolved.semantics.destinationActorId,
-        resolved.semantics.destinationObjectId,
+        semantics.destinationActorId,
+        semantics.destinationObjectId,
         action.text,
       );
       if (suggestion) {
-        const dest = resolved.semantics.destinationActorId
-          ? ` strictly closer to ${resolved.semantics.destinationActorId}`
-          : resolved.semantics.destinationObjectId
-            ? ` strictly closer to ${resolved.semantics.destinationObjectId}`
+        const dest = semantics.destinationActorId
+          ? ` strictly closer to ${semantics.destinationActorId}`
+          : semantics.destinationObjectId
+            ? ` strictly closer to ${semantics.destinationObjectId}`
             : "";
         movementHint =
           `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
           ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
-          `Set effects.moved=true${resolved.semantics.destinationActorId ? ` and effects.destinationActorId="${resolved.semantics.destinationActorId}"` : ""}${resolved.semantics.destinationObjectId ? ` and effects.destinationObjectId="${resolved.semantics.destinationObjectId}"` : ""}.`;
+          `Set effects.moved=true${semantics.destinationActorId ? ` and effects.destinationActorId="${semantics.destinationActorId}"` : ""}${semantics.destinationObjectId ? ` and effects.destinationObjectId="${semantics.destinationObjectId}"` : ""}.`;
         // F24: the in-loop repair also covers "make real progress" /
         // token-shuffle failures — try suggestMoveTarget first, then
         // clampMoveToCap below.
@@ -508,11 +547,11 @@ export async function resolveWithValidation(
           }
           if (repaired.effects) {
             repaired.effects.moved = true;
-            if (resolved.semantics.destinationActorId !== undefined) {
-              repaired.effects.destinationActorId = resolved.semantics.destinationActorId;
+            if (semantics.destinationActorId !== undefined) {
+              repaired.effects.destinationActorId = semantics.destinationActorId;
             }
-            if (resolved.semantics.destinationObjectId !== undefined) {
-              repaired.effects.destinationObjectId = resolved.semantics.destinationObjectId;
+            if (semantics.destinationObjectId !== undefined) {
+              repaired.effects.destinationObjectId = semantics.destinationObjectId;
             }
           }
           // Re-validate against the same judged semantics (effects may now
@@ -521,7 +560,7 @@ export async function resolveWithValidation(
             world,
             repaired,
             action,
-            resolved.semantics,
+            semantics,
           );
           if (revalidation.valid) {
             logger.log({
@@ -530,7 +569,7 @@ export async function resolveWithValidation(
               tick: world.tick,
               turnIndex: world.turnIndex,
               actorId: action.actorId,
-              input: { action, result: repaired, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+              input: { action, result: repaired, attempt, semanticsSource, semantics },
               output: { ...revalidation, repaired: true, suggestion },
             });
             logger.log({
@@ -583,7 +622,7 @@ export async function resolveWithValidation(
             world,
             clampedResult,
             action,
-            resolved.semantics,
+            semantics,
           );
           if (revalidation.valid) {
             logger.log({
@@ -592,7 +631,7 @@ export async function resolveWithValidation(
               tick: world.tick,
               turnIndex: world.turnIndex,
               actorId: action.actorId,
-              input: { action, result: clampedResult, attempt, semanticsSource: resolved.source, semantics: resolved.semantics },
+              input: { action, result: clampedResult, attempt, semanticsSource, semantics },
               output: { ...revalidation, repaired: true, clamped: true, suggestion: clamped },
             });
             logger.log({
@@ -734,16 +773,55 @@ export async function resolveWithValidation(
   // Item C10 (S7): salvage from the attempt with the FEWEST hard
   // (non-speech-nit) errors, not the last — attempt 1 is systematically
   // the best.
-  const bestAttempt =
-    attempts.length > 0
-      ? attempts.reduce((a, b) => (b.hardErrors < a.hardErrors ? b : a))
-      : undefined;
-  if (bestAttempt?.result && bestAttempt.semantics) {
+  // Exp-2-E item (a): salvage candidate order. The deterministic default
+  // is the fewest-hard-errors attempt only (S7: attempt 1 is systematically
+  // the best); LAYA_SALVAGE_SELECT=1 (off by default) asks Laya which
+  // candidate narrative best matches the action and tries the ranked order,
+  // applying the first salvageable candidate. Any Laya failure degrades to
+  // the deterministic order. When the flag is off the path is unchanged:
+  // only the single fewest-hard-errors attempt is tried.
+  const salvageCandidates = attempts.map((a) => ({
+    result: a.result,
+    hardErrors: a.hardErrors,
+  }));
+  const salvageLaya =
+    deps.laya?.config.toggles.salvageSelect === true ? deps.laya : undefined;
+  const deterministicOrder = deterministicSalvageOrder(salvageCandidates);
+  let salvageOrder: number[] | undefined;
+  if (salvageLaya && salvageCandidates.length > 1) {
+    salvageOrder = await rankSalvageCandidates(
+      salvageLaya.client,
+      action,
+      salvageCandidates,
+    );
+    logger.log({
+      module: "laya",
+      event: "salvage_ranked",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { hardErrors: salvageCandidates.map((c) => c.hardErrors) },
+      output: {
+        order: salvageOrder,
+        usedLaya: salvageOrder !== undefined,
+        agreedWithDeterministic:
+          salvageOrder !== undefined &&
+          JSON.stringify(salvageOrder) === JSON.stringify(deterministicOrder),
+      },
+    });
+  }
+  const salvageTryOrder =
+    salvageLaya !== undefined
+      ? (salvageOrder ?? deterministicOrder)
+      : deterministicOrder.slice(0, 1);
+  for (const i of salvageTryOrder) {
+    const candidate = attempts[i];
+    if (!candidate?.result || !candidate.semantics) continue;
     const salvage = trySalvageConsequence(
       world,
       action,
-      bestAttempt.result,
-      bestAttempt.semantics,
+      candidate.result,
+      candidate.semantics,
       logger,
       config,
     );
@@ -754,7 +832,7 @@ export async function resolveWithValidation(
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result: bestAttempt.result },
+        input: { action, result: candidate.result },
         output: { salvaged: salvage.salvaged, warnings: salvage.warnings },
         ...(salvage.warnings.length > 0
           ? { error: `speech warnings (applied anyway): ${salvage.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ")}` }

@@ -14,6 +14,10 @@ export type LayaToggles = {
   triage: boolean;
   salience: boolean;
   planner: boolean;
+  /** Exp-2-E (a): Laya ranks failed-attempt narratives for salvage order. */
+  salvageSelect: boolean;
+  /** Exp-2-E (b): Laya word-sense veto on deterministic moves=true. */
+  locomotion: boolean;
 };
 
 export type LayaConfig = {
@@ -59,6 +63,9 @@ export function readLayaConfig(env: Record<string, string | undefined> = process
       triage: parseToggle(env["LAYA_TRIAGE"], true),
       salience: parseToggle(env["LAYA_SALIENCE"], true),
       planner: parseToggle(env["LAYA_PLANNER"], false),
+      // Exp-2-E additions: OFF by default (Phase 5 has not validated them).
+      salvageSelect: parseToggle(env["LAYA_SALVAGE_SELECT"], false),
+      locomotion: parseToggle(env["LAYA_LOCOMOTION"], false),
     },
   };
 }

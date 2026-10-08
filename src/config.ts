@@ -77,6 +77,9 @@ export function readLayaRuntimeConfig(
     LAYA_TRIAGE: env["LAYA_TRIAGE"] ?? "0",
     LAYA_SALIENCE: env["LAYA_SALIENCE"] ?? "0",
     LAYA_PLANNER: env["LAYA_PLANNER"] ?? "0",
+    // Exp-2-E additions: OFF by default until Phase 5 validates them.
+    LAYA_SALVAGE_SELECT: env["LAYA_SALVAGE_SELECT"] ?? "0",
+    LAYA_LOCOMOTION: env["LAYA_LOCOMOTION"] ?? "0",
   });
 }
 

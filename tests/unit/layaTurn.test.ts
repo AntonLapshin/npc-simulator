@@ -58,6 +58,9 @@ describe("readLayaRuntimeConfig", () => {
       triage: false,
       salience: false,
       planner: false,
+      // Exp-2-E additions: also off by default.
+      salvageSelect: false,
+      locomotion: false,
     });
     expect(cfg.url).toBe("http://127.0.0.1:8000");
     expect(cfg.confidenceThreshold).toBe(0.55);
@@ -72,6 +75,8 @@ describe("readLayaRuntimeConfig", () => {
       LAYA_TRIAGE: "0",
       LAYA_SALIENCE: "yes",
       LAYA_PLANNER: "1",
+      LAYA_SALVAGE_SELECT: "1",
+      LAYA_LOCOMOTION: "1",
       LAYA_URL: "http://example:9000",
       LAYA_CONFIDENCE_THRESHOLD: "0.7",
     });
@@ -81,6 +86,8 @@ describe("readLayaRuntimeConfig", () => {
     expect(cfg.toggles.triage).toBe(false);
     expect(cfg.toggles.salience).toBe(true);
     expect(cfg.toggles.planner).toBe(true);
+    expect(cfg.toggles.salvageSelect).toBe(true);
+    expect(cfg.toggles.locomotion).toBe(true);
     expect(cfg.url).toBe("http://example:9000");
     expect(cfg.confidenceThreshold).toBe(0.7);
   });

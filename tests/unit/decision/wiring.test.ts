@@ -26,6 +26,9 @@ describe("readLayaConfig", () => {
         triage: true,
         salience: true,
         planner: false,
+        // Exp-2-E additions: OFF by default.
+        salvageSelect: false,
+        locomotion: false,
       },
     });
   });
@@ -50,6 +53,18 @@ describe("readLayaConfig", () => {
     expect(cfg.toggles.judge).toBe(false);
     expect(cfg.toggles.planner).toBe(true);
     expect(cfg.toggles.triage).toBe(true);
+  });
+
+  it("parses the Exp-2-E toggles (off by default)", () => {
+    const off = readLayaConfig({});
+    expect(off.toggles.salvageSelect).toBe(false);
+    expect(off.toggles.locomotion).toBe(false);
+    const on = readLayaConfig({
+      LAYA_SALVAGE_SELECT: "1",
+      LAYA_LOCOMOTION: "yes",
+    });
+    expect(on.toggles.salvageSelect).toBe(true);
+    expect(on.toggles.locomotion).toBe(true);
   });
 
   it("falls back to safe values on garbage input", () => {
