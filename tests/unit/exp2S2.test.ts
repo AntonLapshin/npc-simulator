@@ -197,7 +197,7 @@ describe("exp2-5 attribution prefix stripping", () => {
 describe("exp2-7 pickBestAttempt (S7)", () => {
   function rec(attempt: number, hardErrors: number): AttemptRecord {
     return {
-      result: { narrative: `n${attempt}`, actorPatches: [], objectPatches: [] },
+      result: { narrative: `n${attempt}`, actorPatches: [], objectPatches: [], reasoning: "r" },
       semantics: stillSemantics(),
       hardErrors,
       attempt,

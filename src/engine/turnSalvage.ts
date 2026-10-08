@@ -39,13 +39,21 @@ import {
 import { tryCloseTruncatedJson } from "../llm/json.js";
 import {
   findSupplementObserverSubject,
+  isSpeechOnlyFailure,
+  isTier2Salvageable,
   recheckAcceptedProse,
   stripAttributionPrefix,
 } from "./turnSalvageGates.js";
 
 // Re-exported so the retry loop (turnOrchestrator.ts) keeps a single
-// import path for the salvage-side helpers.
+// import path for the salvage-side helpers. The error-severity taxonomy
+// and the S2 accept-gate helpers live in turnSalvageGates.ts (moved there
+// when this file passed ~800 lines).
 export {
+  buildRetryDirective,
+  countHardErrors,
+  isSpeechOnlyFailure,
+  isTier2Salvageable,
   pickBestAttempt,
   recheckAcceptedProse,
   stripAttributionPrefix,
@@ -67,64 +75,6 @@ export function isFallbackConsequence(result: ConsequenceResult): boolean {
     result.actorPatches.length === 0 &&
     result.objectPatches.length === 0
   );
-}
-
-/** F2: speech-nit codes — salvage tier 1 downgrades these to warnings. */
-const SPEECH_ONLY_CODES = new Set([
-  "speech.dropped_words",
-  "speech.invented_dialogue",
-  "speech.question_dropped",
-  "speech.no_speech_rendered",
-]);
-
-/** True when every validation error is a speech-rendering nit (dropped/invented wording, lost question, silent-behavior swap). */
-export function isSpeechOnlyFailure(errors: ValidationError[]): boolean {
-  if (errors.length === 0) return false;
-  return errors.every((e) => SPEECH_ONLY_CODES.has(e.code));
-}
-
-/**
- * Item C10 (S7): hard (non-speech-nit) error count for best-attempt
- * salvage. Speech-rendering nits are downgradable noise; everything else
- * is a hard error. Pure.
- */
-export function countHardErrors(errors: ValidationError[]): number {
-  return errors.filter((e) => !SPEECH_ONLY_CODES.has(e.code)).length;
-}
-
-/**
- * Exp-5 item 1: tier-2 (degraded) salvage eligibility. Tier 1 accepts fully
- * valid turns or speech-only misses. Tier 2 additionally downgrades
- * speech + object/prop/pose WORDING misses to warnings — dropped quotes,
- * lost questions, silent-behavior swaps, hollow explanations, and
- * pour/brew/open/pick-up/sip/hold/sit wording without a backing patch —
- * so a turn with good clampable movement still advances position +
- * thoughts instead of freezing whole. Staying HARD (never salvaged):
- * physics (bounds/blocked/path), movement direction + real progress,
- * contact adjacency (a handshake across the room), observer-move/state
- * discipline, observer-as-subject prose, unknown actors in the narrative,
- * acting-actor presence, and the direct-addressee patch (repaired
- * deterministically with a stub reaction instead of downgraded).
- */
-/** F2: tier-2 codes — speech + object/prop/pose WORDING misses downgraded to warnings. */
-const TIER2_CODES = new Set([
-  ...SPEECH_ONLY_CODES,
-  "speech.topic_dropped",
-  "object_grounding.sit_no_pose",
-  "object_grounding.brew_no_patch",
-  "object_grounding.pickup_no_patch",
-  "object_grounding.open_no_patch",
-  "object_grounding.sip_no_prop",
-  "object_grounding.hold_no_prop",
-  "action.pour_no_patch",
-  "action.pickup_no_patch",
-  "action.sit_no_pose",
-  "action.stand_no_pose",
-]);
-
-export function isTier2Salvageable(errors: ValidationError[]): boolean {
-  if (errors.length === 0) return false;
-  return errors.every((e) => TIER2_CODES.has(e.code));
 }
 
 /**
@@ -796,32 +746,4 @@ export function salvageFormatCollapse(
 /** Attach an honest-history note to a consequence result (used by the liveness floor). */
 export function setHonestHistoryNote(result: ConsequenceResult, note: string): void {
   honestHistoryNotes.set(result, note);
-}
-
-/**
- * Coordinator follow-up (Exp-2 M4 retry divergence): deterministic
- * "most severe error first, one line" retry-feedback directive. The Laya
- * expansion worker evaluated a decision-model approach for "which error to
- * fix first" and rejected it — the subtask is already encodable
- * deterministically. Severity follows the existing salvage taxonomy:
- * hard gates (physics, movement, contact, discipline, prose — never
- * downgradable) first, then tier-2 wording misses (salvageable), then
- * speech nits (downgradable noise) last; ties keep original order (stable
- * sort). Replaces the raw multi-gate error dump in the retry feedback —
- * the dump pushed small models off-distribution (attempt 4 systematically
- * worse than attempt 1). Pure.
- */
-function retryDirectiveSeverity(code: string): number {
-  if (SPEECH_ONLY_CODES.has(code)) return 2;
-  if (TIER2_CODES.has(code)) return 1;
-  return 0;
-}
-
-export function buildRetryDirective(errors: ValidationError[]): string {
-  if (errors.length === 0) {
-    return "Fix this first: [unknown] the previous output was rejected with no details — re-emit the consequence with valid patches and grounded prose.";
-  }
-  const [top] = [...errors].sort((a, b) => retryDirectiveSeverity(a.code) - retryDirectiveSeverity(b.code));
-  const oneLine = top!.message.replace(/\s+/g, " ").trim().slice(0, 220);
-  return `Fix this first: [${top!.code}] ${oneLine}`;
 }
