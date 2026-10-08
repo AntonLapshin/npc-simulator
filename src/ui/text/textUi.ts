@@ -11,6 +11,11 @@
 //   --base-url overrides the provider endpoint
 //     (JOINGONKA_BASE_URL / LAYA_BASE_URL / OLLAMA_BASE_URL).
 //   --mock forces deterministic mock engines (no network, no API key).
+//   --auto runs autonomous mode: every character is an NPC (no user,
+//     no prompts) for --limit-turns turns, then prints a summary, saves
+//     and exits. Shorter: npm run start:auto -- [--limit-turns <n>].
+//   --limit-turns <n> (requires --auto) caps the autonomous run at n
+//     actor-turns; defaults to 30.
 //   Without --mock the real LLM engines are used; if provider setup fails
 //   (e.g. missing JOINGONKA_API_KEY) the UI falls back to mocks with a
 //   warning so the simulation stays playable.
@@ -63,7 +68,14 @@ export type TextUiOptions = {
   model?: string;
   /** Endpoint override for the selected provider. */
   baseUrl?: string;
+  /** Autonomous mode: no user, every actor runs as an NPC. */
+  auto?: boolean;
+  /** Turn cap for autonomous mode (default 30). Requires --auto. */
+  limitTurns?: number;
 };
+
+/** Default turn cap for autonomous runs (matches the experiment reports). */
+export const DEFAULT_AUTO_TURNS = 30;
 
 export class TextSession {
   world: World | null = null;
@@ -142,9 +154,11 @@ function buildDeps(
   logger: Logger,
   useMock: boolean,
   autosave: boolean,
-  llmOpts: Pick<TextUiOptions, "provider" | "model" | "baseUrl"> = {},
+  llmOpts: Pick<TextUiOptions, "provider" | "model" | "baseUrl" | "auto"> = {},
 ): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
   const config = resolveConfig({ autosaveEnabled: autosave });
+  // Autonomous mode: no user turns — every actor runs the NPC pipeline.
+  const forceAllNpc = llmOpts.auto === true;
   if (useMock) {
     return {
       usingMock: true,
@@ -154,6 +168,7 @@ function buildDeps(
         consequenceEngine: new MockConsequenceEngine(logger),
         logger,
         config,
+        forceAllNpc,
       },
     };
   }
@@ -174,7 +189,7 @@ function buildDeps(
     const llmLabel = hardTasks && simpleTasks
       ? `hard=${cfg.backend}/${hardModel} simple=${cfg.simpleBackend}/${simpleModel}`
       : `proposal=${cfg.taskBackends.proposal ?? cfg.backend} selection=${cfg.taskBackends.selection ?? cfg.simpleBackend} consequence=${cfg.taskBackends.consequence ?? cfg.backend} semantic=${cfg.taskBackends.semantic ?? cfg.simpleBackend}`;
-    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel };
+    return { usingMock: false, deps: { ...engines, logger, config, forceAllNpc }, llmLabel };
   } catch (err) {
     console.log(
       `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,
@@ -187,12 +202,13 @@ function buildDeps(
         consequenceEngine: new MockConsequenceEngine(logger),
         logger,
         config,
+        forceAllNpc,
       },
     };
   }
 }
 
-async function loadScenarioFile(path: string, session: TextSession): Promise<string> {
+async function loadScenarioFile(path: string, session: TextSession, auto = false): Promise<string> {
   const raw = JSON.parse(await readFile(path, "utf-8"));
   const world = loadScenario(raw, session.logger);
   session.world = world;
@@ -201,7 +217,8 @@ async function loadScenarioFile(path: string, session: TextSession): Promise<str
   session.lastAction = null;
   // Opening narrative is shown exactly once here — subsequent scene panels
   // omit it (see TextSession.showScene).
-  return [`Loaded scenario: ${world.title} (you play ${world.userActorId}).`, session.showScene(true)].join("\n");
+  const mode = auto ? "autonomous mode: all characters are NPCs, no user" : `you play ${world.userActorId}`;
+  return [`Loaded scenario: ${world.title} (${mode}).`, session.showScene(true)].join("\n");
 }
 
 /**
@@ -220,7 +237,7 @@ async function runSingleTurn(
   session: TextSession,
   ask: (query: string) => Promise<string>,
   forcedActionText?: string,
-  opts: { includeScene?: boolean } = {},
+  opts: { includeScene?: boolean; auto?: boolean } = {},
 ): Promise<string> {
   if (!session.world) return "No scenario loaded. Use: start [path]";
   const actor = getCurrentActor(session.world);
@@ -345,7 +362,10 @@ async function runSingleTurn(
   // The user's own action needs no echo — they just typed it.
   // NPC turns are shown only when the user can currently perceive that
   // actor (see or hear); imperceptible turns stay silent.
-  if (!isUser && session.world) {
+  // In autonomous mode there is no user, so every turn's narrative prints.
+  if (opts.auto) {
+    out.push(historyEntry);
+  } else if (!isUser && session.world) {
     if (isPerceivable(session.world, session.world.userActorId, actor.id)) {
       out.push(historyEntry);
     }
@@ -400,6 +420,62 @@ async function runUserTurnAndNpcs(
     }
   }
   return parts.filter((p) => p.trim().length > 0).join("\n");
+}
+
+/**
+ * Autonomous experiment loop (--auto): run `limit` actor-turns with every
+ * character simulated as an NPC (forceAllNpc is set on the deps, so
+ * runTurn never prompts for input). Each turn prints its narrative; at the
+ * end the final scene is shown and the world is saved. Returns the process
+ * exit code.
+ */
+async function runAutoSession(session: TextSession, limit: number): Promise<number> {
+  if (!session.world) {
+    console.log("No scenario loaded.");
+    return 2;
+  }
+  console.log(`Autonomous mode: ${session.world.actors.length} characters, all NPCs (no user). Running ${limit} turn(s).`);
+  // Safety net: nothing in auto mode should ever prompt — a prompt means
+  // a code path forgot about forceAllNpc, and hanging on stdin would be
+  // worse than failing loudly.
+  const neverAsk = async (_query: string): Promise<string> => {
+    throw new Error("auto mode: unexpected input prompt");
+  };
+  let ran = 0;
+  for (let i = 0; i < limit; i++) {
+    if (!session.world) break;
+    const actor = getCurrentActor(session.world);
+    const tick = session.world.tick;
+    let text: string;
+    try {
+      text = await runSingleTurn(session, neverAsk, undefined, { includeScene: false, auto: true });
+    } catch (err) {
+      console.log(`Turn ${i + 1} crashed (${err instanceof Error ? err.message : String(err)}) — stopping early.`);
+      break;
+    }
+    ran++;
+    console.log(`── turn ${i + 1}/${limit} · tick ${tick} · ${actor.name} (${actor.id}) ──`);
+    console.log(text);
+    console.log("");
+    if (text.startsWith("Turn failed:")) {
+      console.log("Stopping early: the engine reported a failed turn.");
+      break;
+    }
+  }
+  if (!session.world) {
+    console.log("World lost — nothing to save.");
+    return 1;
+  }
+  console.log(session.showScene());
+  const savePath = defaultSavePath(resolveConfig().saveDir, session.world.id, session.world.tick);
+  try {
+    await saveWorld(savePath, session.world, session.logger);
+    console.log(`\nDone: ran ${ran}/${limit} turn(s), final tick ${session.world.tick}. Saved to ${savePath}.`);
+    return ran === limit ? 0 : 1;
+  } catch (err) {
+    console.log(`\nDone: ran ${ran}/${limit} turn(s), final tick ${session.world.tick}. Save failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
 }
 
 function showLogs(session: TextSession, filter: { module?: string; tick?: number }, limit = 10): string {
@@ -563,7 +639,7 @@ export async function handleLine(
   }
 }
 
-function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
+export function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
   const opts: TextUiOptions & { help: boolean } = { help: false };
   const positional: string[] = [];
   const takeValue = (i: number, flag: string): string | undefined => {
@@ -576,8 +652,17 @@ function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
     if (a === "--mock") opts.useMock = true;
     else if (a === "--debug") opts.debug = true;
     else if (a === "--no-autosave") opts.autosave = false;
+    else if (a === "--auto") opts.auto = true;
     else if (a === "--help" || a === "-h") opts.help = true;
-    else if (a === "--provider" || a === "--backend" || a.startsWith("--provider=") || a.startsWith("--backend=")) {
+    else if (a === "--limit-turns" || a.startsWith("--limit-turns=")) {
+      const v = takeValue(i, a);
+      const n = Number(v);
+      if (v === undefined || !Number.isInteger(n) || n <= 0) {
+        throw new Error("--limit-turns needs a positive integer (number of turns to run)");
+      }
+      opts.limitTurns = n;
+      if (!a.includes("=")) i++;
+    } else if (a === "--provider" || a === "--backend" || a.startsWith("--provider=") || a.startsWith("--backend=")) {
       const v = takeValue(i, a);
       if (!v) throw new Error(`${a.split("=")[0]} needs a value: joingonka | laya-local | ollama`);
       opts.provider = v;
@@ -595,6 +680,9 @@ function parseArgv(argv: string[]): TextUiOptions & { help: boolean } {
     } else if (!a.startsWith("--")) positional.push(a);
   }
   if (positional[0]) opts.scenarioPath = positional[0];
+  if (opts.limitTurns !== undefined && !opts.auto) {
+    throw new Error("--limit-turns requires --auto");
+  }
   return opts;
 }
 
@@ -610,12 +698,12 @@ async function main(): Promise<void> {
     opts = parseArgv(process.argv.slice(2));
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave]", "", HELP_TEXT].join("\n"));
+    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave] [--auto] [--limit-turns <n>]", "", HELP_TEXT].join("\n"));
     process.exitCode = 2;
     return;
   }
   if (opts.help) {
-    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave]", "  backends: joingonka | laya-local | ollama", "", HELP_TEXT].join("\n"));
+    console.log(["Usage: npm run start:text -- [scenario] [--provider <backend>] [--model <id>] [--base-url <url>] [--mock] [--debug] [--no-autosave] [--auto] [--limit-turns <n>]", "  backends: joingonka | laya-local | ollama", "  --auto runs every character as an NPC for --limit-turns turns (default 30), then saves and exits", "", HELP_TEXT].join("\n"));
     return;
   }
 
@@ -627,15 +715,27 @@ async function main(): Promise<void> {
   const { deps, usingMock, llmLabel } = buildDeps(logger, opts.useMock ?? false, opts.autosave ?? true, opts);
   const session = new TextSession(logger, deps, opts.debug ?? false, usingMock);
 
-  console.log("NPC Simulator — text interface (Milestone 3). Type 'help' for commands.");
+  console.log(
+    opts.auto === true
+      ? "NPC Simulator — autonomous mode (no user, all characters are NPCs)."
+      : "NPC Simulator — text interface (Milestone 3). Type 'help' for commands.",
+  );
   console.log(usingMock ? "Engines: MOCK (deterministic, offline)." : `Engines: REAL LLM (${llmLabel ?? "see .env for backend"}).`);
 
   const scenarioPath = opts.scenarioPath ?? DEFAULT_SCENARIO;
   try {
-    console.log(await loadScenarioFile(scenarioPath, session));
+    console.log(await loadScenarioFile(scenarioPath, session, opts.auto === true));
   } catch (err) {
     console.log(`Could not load '${scenarioPath}': ${err instanceof Error ? err.message : String(err)}`);
     console.log("Use: start <path> to load a scenario.");
+  }
+
+  // Autonomous experiment mode: no prompts, no REPL — run the turn loop to
+  // the limit, save, and exit.
+  if (opts.auto === true) {
+    process.exitCode = await runAutoSession(session, opts.limitTurns ?? DEFAULT_AUTO_TURNS);
+    await logger.flush();
+    return;
   }
 
   // Event-based line reader (no rl.question / async-iterator mixing):

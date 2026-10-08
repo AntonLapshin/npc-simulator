@@ -236,6 +236,42 @@ Notes:
   impossible mutations are rejected and retried.
 - Session logs go to `logs/text_<session>.jsonl`; autosaves to `saves/`.
 
+### Autonomous mode (no user — all characters are NPCs)
+
+For experiments where nobody plays: every character — including the one the
+scenario names as the user — runs the NPC pipeline (proposal → selection →
+consequence). There are no prompts and no REPL; the loop stops after the
+turn cap, prints the final scene, saves the world, and exits.
+
+```bash
+# 30 turns (default cap), mock engines, office scenario
+npm run start:auto -- --mock
+
+# 60 turns, local Ollama, your scenario, then evaluate the saved world
+npm run start:auto -- --limit-turns 60 --provider ollama scenarios/office-anton.json
+npm run eval:run-quality -- saves/office-anton_tick60.json
+```
+
+Flags: `--auto` (also reachable as `npm run start:text -- --auto …`) and
+`--limit-turns <n>` (positive integer, default 30; requires `--auto`).
+All other `start:text` flags (`--provider`, `--model`, `--base-url`,
+`--mock`, `--debug`, `--no-autosave`) apply as usual, so the same
+`.env` / tier / Laya configuration used in the interactive UI drives the
+autonomous run.
+
+Notes:
+
+- Engine-wise this is `forceAllNpc` on `EngineDependencies`: `runTurn`
+  never takes the user path, so no `getUserAction` prompt can appear —
+  every turn gets NPC engine-tier routing and the liveness floor.
+- Every turn's narrative is printed (no perceivability filtering — in an
+  experiment you want the full log).
+- The run saves to `saves/<scenario>_tick<tick>.json` on completion (and
+  autosaves per turn unless `--no-autosave`), so a Ctrl-C'd run can be
+  resumed with `load` in the interactive UI or re-run from the save.
+- Exit code is 0 when all requested turns ran, 1 when the run stopped
+  early (engine-reported turn failure or crash).
+
 ## Playing (Milestone 4 — graphic interface)
 
 ```bash

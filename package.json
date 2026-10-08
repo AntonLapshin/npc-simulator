@@ -8,6 +8,7 @@
     "dev": "tsx src/index.ts",
     "start": "bash scripts/start.sh",
     "start:text": "tsx src/ui/text/textUi.ts",
+    "start:auto": "tsx src/ui/text/textUi.ts --auto",
     "start:graphic": "tsx src/ui/graphic/server.ts",
     "bundle:graphic": "node src/ui/graphic/tools/bundle.mjs",
     "test:graphic": "node src/ui/graphic/tests/smoke.mjs && node src/ui/graphic/tools/bundle.mjs && node src/ui/graphic/tests/dom.mjs",
