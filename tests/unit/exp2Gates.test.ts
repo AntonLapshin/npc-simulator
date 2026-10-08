@@ -14,6 +14,7 @@ import {
   validateNarrativePlaceholder,
 } from "../../src/engine/validate/speech.js";
 import { validateActingActorPresence } from "../../src/engine/validate/narrative.js";
+import { validateActionVerbCoverage } from "../../src/engine/validate/objects.js";
 import { makeTinyWorld, errorText } from "../helpers.js";
 import type { Action, ActionSemantics } from "../../src/types.js";
 
@@ -165,5 +166,35 @@ describe("exp2 #8 (S5): facing is not locomotion", () => {
       llmMovesSemantics(),
     );
     expect(errorText(errors)).toContain("turn_discipline.acting_actor_not_patched");
+  });
+});
+
+describe("exp2 #8 (S4): sit_no_pose does not fire on questions", () => {
+  it("'where I should sit?' (question) does not demand a sit pose (tick 9 repro)", () => {
+    const world = makeTinyWorld();
+    const errors = validateActionVerbCoverage(
+      world,
+      action("Thanks Ana! …where should I sit? stay near her desk"),
+      {
+        narrative: "Jeff asks Ana where he should sit, staying near her desk.",
+        actorPatches: [],
+        objectPatches: [],
+      },
+    );
+    expect(errorText(errors)).not.toContain("action.sit_no_pose");
+  });
+
+  it("genuine sit actions still demand the pose", () => {
+    const world = makeTinyWorld();
+    const errors = validateActionVerbCoverage(
+      world,
+      action("Sit down on the chair."),
+      {
+        narrative: "Jeff walks to the chair.",
+        actorPatches: [],
+        objectPatches: [],
+      },
+    );
+    expect(errorText(errors)).toContain("action.sit_no_pose");
   });
 });

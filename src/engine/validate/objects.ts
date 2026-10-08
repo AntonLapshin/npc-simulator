@@ -2,7 +2,7 @@
 
 import type { Action, ValidationError, World } from "../../types.js";
 import { contentWords, hasOwnUtterance, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
-import { CONTACT_RADIUS } from "./movement.js";
+import { CONTACT_RADIUS, isInterrogativeQuestion } from "./movement.js";
 
 /**
  * F4: object interaction radius. Moving/resizing an object or flipping its
@@ -231,7 +231,12 @@ export function validateActionVerbCoverage(
     }
   }
 
-  const sitMatch = /\bsit\b|\bsits\b|\bsitting\b|\bsat\b|\btake[sn]?\s+a\s+seat\b/i.test(text);
+  // Exp-2 item 8 (S4): a *question* about sitting ("where I should sit?")
+  // is not a sit action — exempt interrogative questions from the pose
+  // demand (isInterrogativeQuestion also requires no genuine movement
+  // clause, so "walk over and ask where I should sit" still moves).
+  const isQuestion = isInterrogativeQuestion(text);
+  const sitMatch = !isQuestion && /\bsit\b|\bsits\b|\bsitting\b|\bsat\b|\btake[sn]?\s+a\s+seat\b/i.test(text);
   const standMatch = /\bstand\b|\bstands\b|\bstanding\b|\bstood\b|\bstand\s+up\b/i.test(text);
   if (sitMatch && !standMatch) {
     const poseOk =
