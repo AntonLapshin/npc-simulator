@@ -5,7 +5,8 @@ import type { Action, ActionSemantics, EngineConfig, ValidationError, World } fr
 import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity, quotedSegments } from "./speech.js";
-import { isNonLocomotionSense } from "./movement.js";
+import { distanceToRect, isNonLocomotionSense } from "./movement.js";
+import { OBJECT_INTERACT_RADIUS } from "./objects.js";
 
 /**
  * Actors that perceived the acting actor's event (mirrors contextBuilder).
@@ -294,6 +295,182 @@ export function validateIdentityConsistency(
     }
   }
   return errors;
+}
+
+/** True when free text names a roster actor (id, full name, or first name). Pure. */
+function textMentionsActor(text: string, actor: { id: string; name: string }): boolean {
+  const lower = text.toLowerCase();
+  const first = actor.name.split(/[^a-z0-9]+/i)[0]?.toLowerCase() ?? "";
+  return (
+    (actor.id.length >= 2 && lower.includes(actor.id.toLowerCase())) ||
+    (actor.name.length >= 2 && lower.includes(actor.name.toLowerCase())) ||
+    (first.length >= 3 && new RegExp(`\\b${first}\\b`).test(lower))
+  );
+}
+
+/**
+ * Exp-6 item 7 (S4, tick-10 repro): relationship-label consistency. The
+ * consequence relabeled a known coworker "the stranger" ("Tanya: approach
+ * the stranger" — Anton is the ex-coworker who referred her). In a closed
+ * roster an alienation label can only mislabel someone the actor knows.
+ * Fires when the narrative carries such a label and the acting actor's
+ * relationships name at least one other roster actor they actually know.
+ * A "has not met X yet" entry does NOT count as knowing — Dana may
+ * legitimately call Anton a stranger. Pure.
+ */
+const ALIENATION_LABEL_RE =
+  /\b(a|the|some)\s+stranger\b|\bunknown\s+(person|man|woman|coworker|colleague|guy|visitor)\b/i;
+const NOT_MET_RE =
+  /\b(not met|never met|hasn't met|has not met|haven't met|have not met|unknown to)\b/i;
+
+export function validateRelationshipLabel(
+  world: World,
+  narrative: string,
+  action: Action,
+): ValidationError[] {
+  const m = ALIENATION_LABEL_RE.exec(narrative);
+  if (!m) return [];
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor) return [];
+  // The label is only certainly wrong when the actor knows at least one
+  // roster coworker and has NO relationship naming someone they have not
+  // met yet. Dana knows Tanya but has not met Anton — "the stranger" may
+  // legitimately refer to Anton, so the gate fails open there.
+  let knownOthers = 0;
+  let hasUnknownOther = false;
+  for (const o of world.actors) {
+    if (o.id === action.actorId) continue;
+    const entries = (actor.relationships ?? []).filter((r) =>
+      textMentionsActor(r, o),
+    );
+    if (entries.length === 0) continue;
+    if (entries.some((r) => NOT_MET_RE.test(r))) {
+      hasUnknownOther = true;
+    } else {
+      knownOthers += 1;
+    }
+  }
+  if (knownOthers === 0 || hasUnknownOther) return [];
+  return [
+    {
+      code: "narrative.stranger_label",
+      message:
+        `narrative labels someone "${m[0]}" but ${action.actorId} knows their roster coworkers ` +
+        `(${(actor.relationships ?? []).slice(0, 2).join("; ")}): in a closed roster there are ` +
+        `no strangers — name the known coworker instead`,
+    },
+  ];
+}
+
+/**
+ * Exp-6 item 7 (S4, tick-13 repro): invented-contact attribution. A
+ * description-only object patch claimed "Tanya's papers now have a coffee
+ * stain from Anton's cup" — Anton was 7 cells away and never touched the
+ * papers. Description patches are exempt from the F4 proximity rule, so
+ * cross-actor physical causation slips through. Fires when an objectPatch
+ * description attributes a physical effect (stain/spill/break/tear/
+ * scratch/dent/mark/dirty/burn/wet/knock/splash) to ANOTHER roster actor
+ * (not the acting actor) who stands farther than OBJECT_INTERACT_RADIUS
+ * (edge distance) from the object in the pre-patch world. Pure.
+ */
+const CONTACT_EFFECT_RE =
+  /\b(stains?|stained|spills?|spilled|breaks?|brok(?:e|en)|tears?|tore|torn|scratch(?:es|ed)?|dents?|dented|marks?|marked|dirt(?:y|ied)|burn(?:s|ed|t)?|wets?|wetted|knocks?|knocked|splash(?:es|ed)?)\b/i;
+
+export function validateInventedContact(
+  world: World,
+  normalized: {
+    objectPatches: { objectId: string; description?: string }[];
+  },
+  action: Action,
+): ValidationError[] {
+  const errors: ValidationError[] = [];
+  for (const patch of normalized.objectPatches) {
+    if (patch.description === undefined) continue;
+    if (!CONTACT_EFFECT_RE.test(patch.description)) continue;
+    const obj = world.scene.objects.find((o) => o.id === patch.objectId);
+    if (!obj) continue;
+    for (const other of world.actors) {
+      if (other.id === action.actorId) continue;
+      if (!textMentionsActor(patch.description, other)) continue;
+      const d = distanceToRect(other.x, other.y, obj);
+      if (d > OBJECT_INTERACT_RADIUS) {
+        errors.push({
+          code: "object.invented_contact",
+          message:
+            `object ${patch.objectId}: description attributes a physical effect to ${other.id} ` +
+            `("${patch.description.slice(0, 90)}") but ${other.id} is ${d.toFixed(1)} cells away ` +
+            `(at (${other.x}, ${other.y})): cross-actor physical contact needs the named actor ` +
+            `within ${OBJECT_INTERACT_RADIUS} cells — invented causation`,
+        });
+      }
+    }
+  }
+  return errors;
+}
+
+/**
+ * Exp-6 item 8 (M8): third-person fallback rewrite. User-turn fallbacks
+ * canonicalize the raw user text ("Anton tried: I turn toward Dana and
+ * say: …") — the first-person narrator then leaks into third-person
+ * history (exp-6 ticks 9/18). Quoted segments are the character speaking
+ * (legitimately first-person) and are preserved verbatim, as is the text
+ * following a speech verb + colon ("say: Hi Dana, I am Anton" — the
+ * utterance is the character's voice, correctly first-person); unquoted,
+ * non-utterance first-person self-reference is rewritten deterministically
+ * (I→they, my→their, me→them, myself→themself, we→they, …), with
+ * sentence-start capitalization preserved. Pure.
+ */
+const SPEECH_TAIL_RE =
+  /\b(says?|said|asks?|asked|tells?|told|replies?|replied|answers?|answered|shouts?|shouted|whispers?|whispered|exclaims?|exclaimed|utters?|uttered)\s*:/i;
+
+export function thirdPersonFallbackText(text: string): string {
+  // Split off the spoken tail first: "say: Hi Dana, I am Anton" keeps its
+  // first-person voice (it is the character speaking, not the narrator).
+  const tailMatch = SPEECH_TAIL_RE.exec(text);
+  let head = text;
+  let tail = "";
+  if (tailMatch) {
+    const cut = tailMatch.index + tailMatch[0].length;
+    head = text.slice(0, cut);
+    tail = text.slice(cut);
+  }
+  const quotes = quotedSegments(head);
+  let out = head;
+  const saved: string[] = [];
+  quotes.forEach((q, i) => {
+    const placeholder = `Q${i}`;
+    saved.push(q);
+    out = out.split(q).join(placeholder);
+  });
+  const atSentenceStart = (offset: number): boolean => {
+    const before = out.slice(0, offset).replace(/\s+$/, "");
+    return before.length === 0 || /[.!?]$/.test(before);
+  };
+  const rules: Array<[RegExp, string]> = [
+    [/\bI'm\b/g, "they're"],
+    [/\bI've\b/g, "they've"],
+    [/\bI'll\b/g, "they'll"],
+    [/\bI'd\b/g, "they'd"],
+    [/\bI\b/g, "they"],
+    [/\bmyself\b/gi, "themself"],
+    [/\bmy\b/gi, "their"],
+    [/\bmine\b/gi, "theirs"],
+    [/\bme\b/gi, "them"],
+    [/\bourselves\b/gi, "themselves"],
+    [/\bours\b/gi, "theirs"],
+    [/\bour\b/gi, "their"],
+    [/\bwe\b/gi, "they"],
+    [/\bus\b/gi, "them"],
+  ];
+  for (const [re, word] of rules) {
+    out = out.replace(re, (_m, offset: number) =>
+      atSentenceStart(offset) ? word.charAt(0).toUpperCase() + word.slice(1) : word,
+    );
+  }
+  saved.forEach((q, i) => {
+    out = out.split(`Q${i}`).join(q);
+  });
+  return out + tail;
 }
 
 /**
