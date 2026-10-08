@@ -109,6 +109,14 @@ export type EngineDependencies = {
   semanticJudge?: SemanticJudge;
   /** Resolve free-form user action text (UI layer). Required for user turns. */
   getUserAction?: (actorId: string, suggestions: string[]) => Promise<string>;
+  /**
+   * Autonomous mode: treat every actor as an NPC — including the actor
+   * named by world.userActorId. When true, runTurn never takes the user
+   * path (no proposal/selection skip, no getUserAction call) and every
+   * turn gets the NPC engine routing and the liveness floor. Lets a UI
+   * run a fully autonomous, user-free experiment (see text UI --auto).
+   */
+  forceAllNpc?: boolean;
   /** Optional save hook (defaults to file persistence when autosave is on). */
   onAutosave?: (world: World) => Promise<void> | void;
   /** Optional progress hook for UIs to show a loading indicator during slow LLM calls. */
@@ -452,7 +460,7 @@ export async function resolveWithValidation(
         (signal) =>
           deps.consequenceEngine.resolve(world, action, feedback, {
             signal,
-            isUserTurn: action.actorId === world.userActorId,
+            isUserTurn: !deps.forceAllNpc && action.actorId === world.userActorId,
           }),
         timeLeft(),
       );
@@ -1353,7 +1361,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // deps.laya, otherwise from env (off by default, so plain chat runs are
   // untouched). plannerChatComplete comes from createLlmEngines when the
   // Laya layer is on.
-  const turnEngines = deps.getEnginesForTurn?.(actor.id === world.userActorId);
+  const turnEngines = deps.getEnginesForTurn?.(!deps.forceAllNpc && actor.id === world.userActorId);
   const plannerChatComplete = turnEngines?.plannerChatComplete ?? deps.plannerChatComplete;
   const layaWiring = layaWiringFromEnv({ injected: deps.laya, plannerChatComplete });
   const engineOverrides =
@@ -1394,7 +1402,10 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   report(turnDeps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
 
   let action: Action;
-  if (actor.id === world.userActorId) {
+  // Autonomous mode (forceAllNpc): the "user" actor is simulated like any
+  // other NPC — proposal + selection + consequence, never getUserAction.
+  const isUserTurn = !turnDeps.forceAllNpc && actor.id === world.userActorId;
+  if (isUserTurn) {
     // User turns: no proposal, no selection. The user decides how to act
     // without suggestions — skip both engines entirely so no
     // proposal/selection LLM calls (or logs) happen for the user.
@@ -1599,8 +1610,9 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   report(turnDeps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
   let consequence = await resolveWithValidation(world, action, turnDeps, {
     // Exp-5 item 6: the liveness floor rewrites failed turns — never the
-    // user's own action text.
-    allowLiveness: action.actorId !== world.userActorId,
+    // user's own action text. In autonomous mode every actor is an NPC, so
+    // the floor applies to all of them.
+    allowLiveness: turnDeps.forceAllNpc === true || action.actorId !== world.userActorId,
   });
   report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
 
