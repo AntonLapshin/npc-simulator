@@ -66,6 +66,10 @@ export const actorSchema = z
     pose: actorPoseSchema.default("stand"),
     prop: actorPropSchema.default(null),
     look: actorLookSchema.default({}),
+    // Exp-7 item A6: third-person pronouns for narrative prose
+    // ("he/him", "she/her", "they/them"). Optional so older files load;
+    // when present, prompts name them and the validator checks prose.
+    pronouns: z.string().optional(),
   })
   .strict();
 
