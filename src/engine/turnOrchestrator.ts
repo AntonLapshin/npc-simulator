@@ -56,6 +56,7 @@ import {
   trySalvageConsequence,
   type AttemptRecord,
 } from "./turnSalvage.js";
+import type { AttemptRecord } from "./turnSalvageGates.js";
 import { buildLivenessConsequence, consecutiveFallbacks } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
 import type { LlmUsage } from "../logging/logTypes.js";
