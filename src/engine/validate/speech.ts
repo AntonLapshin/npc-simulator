@@ -45,17 +45,39 @@ export function validateNarrativePlaceholder(
     return errors;
   }
   if (action && stripped.length > 0 && stripped === stripForCompare(action.text)) {
-    errors.push({
-      code: "narrative.echoes_action",
-      message: `narrative echoes the action text verbatim instead of describing the outcome: narrate what observably happens as a result of the action`,
-    });
+    // Exp-2 item 6 (S3): a verbatim quote of a fully-spoken action is
+    // correct rendering, not an echo — exempt it so the turn isn't pushed
+    // into a paraphrase that speech.dropped_words then rejects (the two
+    // gates were jointly unsatisfiable on speech turns, ticks 7/19).
+    if (!quotedSpeechEchoedVerbatim(action.text, narrative)) {
+      errors.push({
+        code: "narrative.echoes_action",
+        message: `narrative echoes the action text verbatim instead of describing the outcome: narrate what observably happens as a result of the action`,
+      });
+    }
   }
   return errors;
 }
 
+/**
+ * Exp-2 item 6 (S3): fully-spoken actions are exempt from the echo gate.
+ * When the action text IS (or carries) the utterance, the narrative
+ * quoting it verbatim is correct rendering, not an echo — rejecting it
+ * forces a paraphrase that then fails speech.dropped_words. Detect
+ * robustly: an action quoted segment that also appears verbatim
+ * (quote-canonicalized, case- and whitespace-insensitive) among the
+ * narrative's quoted segments. Non-speech turns (no quoted segments in
+ * the action text) keep the gate.
+ */
+export function quotedSpeechEchoedVerbatim(actionText: string, narrative: string): boolean {
+  const actionQuotes = quotedSegments(actionText);
+  if (actionQuotes.length === 0) return false;
+  const narrNorm = new Set(quotedSegments(narrative).map(normLower));
+  return actionQuotes.some((q) => narrNorm.has(normLower(q)));
+}
+
 /** Double- and single-quoted segments (content length >= 2). */
-export function quotedSegments(text: string): string[] {
-  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
+export function quotedSegments(text: string): string[] {  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
   // segments ("...") are extracted and compare equal to straight-quoted
   // action text (and vice versa).
   const normalized = normalizeQuotes(text);
