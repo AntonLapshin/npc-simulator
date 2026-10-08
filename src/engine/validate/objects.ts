@@ -1,6 +1,6 @@
 // Object-interaction validation checks (extracted from physicalValidator.ts).
 
-import type { Action, ValidationError, World } from "../../types.js";
+import type { Action, Actor, ValidationError, World } from "../../types.js";
 import { contentWords, hasOwnUtterance, maskResumedActivity, quotedSegments, sameStem } from "./speech.js";
 import { CONTACT_RADIUS, distanceToRect, isInterrogativeQuestion } from "./movement.js";
 
@@ -11,6 +11,9 @@ import { CONTACT_RADIUS, distanceToRect, isInterrogativeQuestion } from "./movem
  * telekinesis. Description-only patches are always allowed.
  */
 export const OBJECT_INTERACT_RADIUS = 4;
+
+/** Scene objects that brewing/pouring must happen next to (Exp-4 item 10). */
+const BREW_MACHINE_RE = /coffee|machine|kettle|brewer|espresso|cooler|dispenser/i;
 
 /**
  * F8: object-noun vocabulary for the object/verb validators. When the
@@ -133,7 +136,7 @@ export function validateObjectGrounding(
   world: World,
   normalized: {
     narrative: string;
-    actorPatches: { actorId: string; pose?: string; prop?: string | null }[];
+    actorPatches: { actorId: string; pose?: string; prop?: string | null; x?: number; y?: number }[];
     objectPatches: { objectId: string }[];
   },
   action?: Action,
@@ -169,6 +172,30 @@ export function validateObjectGrounding(
       errors.push({
         code: "object_grounding.brew_no_patch",
         message: `narrative describes brewing/pouring but no object patch backs it: add an objectPatch for the coffee machine/mug (or a prop patch for the cup picked up)`,
+      });
+    }
+    // Exp-4 item 10 (S6, tick-29 repro): brewing/pouring from across the
+    // room is telekinesis — the actor must be within interact radius of a
+    // machine-like object. A fresh prop patch alone no longer suffices
+    // (Dana "poured" from 16 cells away). Fail open when the scene models
+    // no machine at all. Measured at the effective (post-patch) position
+    // so a turn that walks to the machine and pours stays legal.
+    const ex = actingPatch?.x ?? actingWorld?.x;
+    const ey = actingPatch?.y ?? actingWorld?.y;
+    if (
+      ex !== undefined &&
+      ey !== undefined &&
+      world.scene.objects.some((o) => BREW_MACHINE_RE.test(`${o.id} ${o.name}`)) &&
+      !world.scene.objects.some(
+        (o) =>
+          BREW_MACHINE_RE.test(`${o.id} ${o.name}`) &&
+          Math.hypot(ex - (o.x + o.w / 2), ey - (o.y + o.h / 2)) <=
+            OBJECT_INTERACT_RADIUS,
+      )
+    ) {
+      errors.push({
+        code: "object_grounding.pour_too_far",
+        message: `narrative describes brewing/pouring but the actor is not within ${OBJECT_INTERACT_RADIUS} cells of a coffee machine/kettle/cooler: walk there first — pouring is a separate turn once adjacent`,
       });
     }
   }
@@ -215,6 +242,86 @@ export function validateObjectGrounding(
     }
   }
   return errors;
+}
+
+/**
+ * Error codes the deterministic prop-stub repair may resolve. Anything
+ * else (movement, speech, identity, distance, …) disqualifies the stub —
+ * it only ever fixes a pure "the model narrated the object verb but
+ * forgot the prop patch" miss.
+ */
+const PROP_STUB_CODES = new Set([
+  "object_grounding.sip_no_prop",
+  "object_grounding.hold_no_prop",
+  "object_grounding.open_no_patch",
+  "object_grounding.pickup_no_patch",
+  "object_grounding.brew_no_patch",
+  "action.pour_no_patch",
+  "action.pickup_no_patch",
+]);
+
+/** True when the actor stands within interact radius of a brew machine. */
+function nearBrewMachine(world: World, x: number, y: number): boolean {
+  return world.scene.objects.some(
+    (o) =>
+      BREW_MACHINE_RE.test(`${o.id} ${o.name}`) &&
+      Math.hypot(x - (o.x + o.w / 2), y - (o.y + o.h / 2)) <=
+        OBJECT_INTERACT_RADIUS,
+  );
+}
+
+/**
+ * Exp-4 item 10 (S6): deterministic prop-stub repair. Small models narrate
+ * object verbs (sip, type, open the laptop, pick up the mug) without the
+ * prop patch the grounding gate demands — and retry feedback alone rarely
+ * teaches the convention (exp-4: 26 pour_no_patch, zero applied
+ * objectPatches in 30 turns). When EVERY error is a prop-mappable
+ * grounding miss and the actor holds nothing, return the prop to set:
+ * sip/drink → cup, typing/computer work → laptop, open/boot + laptop →
+ * laptop, pick up/hold/grab + cup|mug → cup, + laptop → laptop,
+ * pour/brew → cup but ONLY next to a machine (across the room the turn is
+ * genuinely unrenderable — the pour_too_far gate, not the stub, owns
+ * that). Returns null when the errors aren't purely prop-mappable or the
+ * verb→prop mapping is ambiguous. Pure.
+ */
+export function propStubForGroundingErrors(
+  world: World,
+  action: Action,
+  narrative: string,
+  errors: ValidationError[],
+): "cup" | "laptop" | null {
+  if (errors.length === 0) return null;
+  if (!errors.every((e) => PROP_STUB_CODES.has(e.code))) return null;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  if (!actor || (actor.prop ?? null) !== null) return null;
+  const text = `${action.text} ${narrative}`;
+  const laptopSignal =
+    /\b(typ(?:e|es|ed|ing)?|keyboards?|cod(?:e|es|ed|ing)?|program(?:s|med|ming)?)\b/i.test(
+      text,
+    ) ||
+    (/\bopens?(?:ed|ing)?\b/i.test(text) && /\blaptop\b/i.test(text)) ||
+    (/\b(holds?|holding|held|picks?(?:\s+up)?|picking(?:\s+up)?|grabs?|takes?|taking)\b/i.test(
+      text,
+    ) &&
+      /\blaptop\b/i.test(text));
+  const cupSignal =
+    /\b(sips?|sipping|sipped|drinks?|drinking|drank|swigs?|gulps?)\b/i.test(text) ||
+    (/\b(holds?|holding|held|picks?(?:\s+up)?|picking(?:\s+up)?|grabs?|takes?|taking)\b/i.test(
+      text,
+    ) &&
+      /\b(cup|mug)\b/i.test(text));
+  const pourSignal =
+    /\b(brews?|brewing|pours?|pouring|makes?\s+coffee)\b/i.test(text) ||
+    /\bfills?(?:ing)?\s+(?:his|her|their|my|the|a)\s+mug\b/i.test(text);
+  if (pourSignal) {
+    // The stub picks up the cup — but only next to a machine. Pouring
+    // from across the room stays a hard failure (pour_too_far).
+    if (laptopSignal && !cupSignal) return null;
+    return nearBrewMachine(world, actor.x, actor.y) ? "cup" : null;
+  }
+  if (laptopSignal && !cupSignal) return "laptop";
+  if (cupSignal && !laptopSignal) return "cup";
+  return null;
 }
 
 /**

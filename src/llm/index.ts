@@ -21,6 +21,7 @@ import {
   parseBackend,
   resolveLlmEnv,
   resolveTaskBackend,
+  resolveTaskModel,
   type LlmBackend,
   type LlmCallOptions,
   type LLMProvider,
@@ -55,6 +56,7 @@ export {
   ollamaApiRoot,
   resolveLlmEnv,
   resolveTaskBackend,
+  resolveTaskModel,
   resolveTaskTemperature,
 } from "./provider.js";
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
@@ -104,6 +106,11 @@ export type TurnEngines = {
  * silent fallback to the standard engines: LLM_USER_CAPABLE_TIER off
  * (default ON), explicit provider instances (F12: caller-owned, backend
  * opaque), or hard tier identical to the simple tier.
+ *
+ * Exp-4 item 2 (S1): the identical-tier check compares provider AND model
+ * (LLM_USER_CAPABLE_TIER=1 with both tiers on the same local 8B is a
+ * no-op — the env flag alone changes nothing). Callers that want the
+ * reason should use capableTierNoopReason().
  */
 export function userCapableTierBackend(
   env: NodeJS.ProcessEnv,
@@ -116,14 +123,34 @@ export function userCapableTierBackend(
   if (providers?.proposal !== undefined || providers?.consequence !== undefined) {
     return undefined;
   }
+  if (capableTierNoopReason(env, backends) !== undefined) return undefined;
   const cfg = resolveLlmEnv(env);
   // The capable tier is the hard-task default backend (proposal is the
   // representative hard task), honoring an explicit per-task proposal
   // override; compared against the simple tier (selection's backend).
+  return backends?.proposal ?? resolveTaskBackend("proposal", cfg);
+}
+
+/**
+ * Exp-4 item 2 (S1): why the capable tier is a no-op, or undefined when it
+ * applies. Pure — the imperative shell logs the reason as a warning.
+ */
+export function capableTierNoopReason(
+  env: NodeJS.ProcessEnv,
+  backends?: CreateLlmEnginesOptions["backends"],
+): string | undefined {
+  const cfg = resolveLlmEnv(env);
   const hardBackend = backends?.proposal ?? resolveTaskBackend("proposal", cfg);
   const simpleBackend = backends?.selection ?? resolveTaskBackend("selection", cfg);
-  if (hardBackend === simpleBackend) return undefined;
-  return hardBackend;
+  const hardModel = resolveTaskModel("proposal", cfg);
+  const simpleModel = resolveTaskModel("selection", cfg);
+  if (hardBackend === simpleBackend && hardModel === simpleModel) {
+    return (
+      `LLM_USER_CAPABLE_TIER is enabled but the hard tier resolves to the same provider+model as the simple tier ` +
+      `(${hardBackend}:${hardModel}) — user turns silently use the standard engines`
+    );
+  }
+  return undefined;
 }
 
 /** Thin imperative shell over userCapableTierBackend: builds the engines. */
@@ -133,7 +160,25 @@ function resolveUserCapableTier(
   options: CreateLlmEnginesOptions,
 ): { proposal: ProposalEngine; consequence: ConsequenceEngine } | undefined {
   const hardBackend = userCapableTierBackend(env, options.backends, options.providers);
-  if (hardBackend === undefined) return undefined;
+  if (hardBackend === undefined) {
+    // Exp-4 item 2 (S1): the flag alone is a no-op when both tiers resolve
+    // to the same provider+model (exp-4: LLM_USER_CAPABLE_TIER=1, both
+    // tiers on the same local 8B) — say so loudly instead of silently
+    // falling back.
+    const reason = capableTierNoopReason(env, options.backends);
+    if (reason !== undefined) {
+      logger.log({
+        module: "llm",
+        event: "user_capable_tier_noop",
+        // Startup-time warning: no turn context yet.
+        tick: -1,
+        turnIndex: -1,
+        input: { LLM_USER_CAPABLE_TIER: env["LLM_USER_CAPABLE_TIER"] },
+        error: reason,
+      });
+    }
+    return undefined;
+  }
   // F12: mirror the failover wrapping of the standard routing.
   const failoverBackend = parseBackend(env["LLM_FAILOVER_BACKEND"]);
   const hardProvider = (): LLMProvider => {
