@@ -178,6 +178,14 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       // turns), so the mapping is stated as examples up front.
       "PROP AUTO-HINTS: typing/working on a computer means the actor holds it — set prop:\"laptop\" (never narrate typing with empty hands); picking up, holding, or drinking from a cup/mug — set prop:\"cup\". The prop lives on the acting actor's patch.",
       "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
+      // Exp-4 item 1 (S4/M1): third-person discipline for the canonical
+      // narrative — first-person NPC prose ("I point…", "I gesture…")
+      // fails validation, so say it up front with the negative example.
+      "NARRATIVE VOICE: third person, always ('Tanya walks…', never 'I walk…'). First-person I/my/me/we outside quoted dialogue fails validation — inside quotes it is the character speaking and is correct.",
+      // Exp-4 item 11 (S10): emotions froze for 30/30 exp-4 turns — nudge
+      // the writer to update the emotion patch when the turn changes how
+      // the actor feels instead of copying the old value out of habit.
+      "EMOTION: update the acting actor's emotion when the turn changes how they feel (relief when a greeting is returned, frustration when ignored) — one word, never a frozen copy of the old value.",
       // Exp-2 item 3: canonical form for fully-spoken actions.
       FULLY_SPOKEN_ACTION_LINE,
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
@@ -263,6 +271,17 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "grounded strictly in the given action text. If the action is speech, preserve",
     "its wording (quote or close paraphrase of the FULL utterance) — never invent different dialogue and",
     "never truncate a longer speech to a fragment.",
+    // Exp-4 item 1 (S4/M1): third-person discipline for the canonical
+    // narrative — first-person NPC prose ("I point…", "I gesture…") fails
+    // validation, so say it up front with the negative example.
+    "NARRATIVE VOICE: the narrative describes the acting actor in third person ('Tanya walks toward the desk',",
+    "never 'I walk toward the desk'). First-person self-reference (I/my/me/we/us/our) outside quoted dialogue",
+    "fails validation — inside quotes it is the character speaking and is correct.",
+    // Exp-4 item 11 (S10): emotions froze for 30/30 exp-4 turns — nudge
+    // the writer to update the emotion patch when the turn changes how
+    // the actor feels instead of copying the old value out of habit.
+    "EMOTION: update the acting actor's emotion when the turn changes how they feel (relief when a greeting is",
+    "returned, frustration when ignored) — one word, never a frozen copy of the old value.",
     // Exp-2 item 3: canonical form for fully-spoken actions (pairs with the
     // echo-gate exemption for quoted-speech turns).
     FULLY_SPOKEN_ACTION_LINE,

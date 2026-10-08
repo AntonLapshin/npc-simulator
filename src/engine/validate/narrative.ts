@@ -4,7 +4,7 @@
 import type { Action, ActionSemantics, EngineConfig, ValidationError, World } from "../../types.js";
 import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
-import { maskResumedActivity } from "./speech.js";
+import { maskResumedActivity, quotedSegments } from "./speech.js";
 import { isNonLocomotionSense } from "./movement.js";
 
 /**
@@ -698,4 +698,95 @@ export function validateObserverSubject(
     }
   }
   return [];
+}
+
+/**
+ * Exp-4 item 6 (S4/M1): narrative voice gate. NPC action text and canonical
+ * narratives are third-person — first-person self-reference ("I point…",
+ * "I gesture…") reads as a diary entry in world history (exp-4 M1: 6+
+ * occurrences on NPC turns). Quoted speech is stripped first: an uttered
+ * "I" inside quotes is the character speaking, not the narrator slipping.
+ * Also catches the doubled-name prefix ("Dana: Dana: I glance…", tick 11).
+ * Pure.
+ */
+export type VoiceViolationCode = "first_person" | "doubled_prefix";
+
+export interface VoiceViolation {
+  code: VoiceViolationCode;
+  detail: string;
+}
+
+function escapeName(name: string): string {
+  return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripQuotedForVoice(text: string): string {
+  let out = text;
+  for (const q of quotedSegments(text)) {
+    // Remove the quoted content (the quote marks may stay — harmless).
+    out = out.split(q).join(" ");
+  }
+  return out;
+}
+
+export function detectVoiceViolation(
+  text: string,
+  actorName?: string,
+): VoiceViolation[] {
+  const out: VoiceViolation[] = [];
+  const trimmed = text.trim();
+  if (actorName !== undefined && actorName.length > 0) {
+    // "Dana: Dana: …" — two or more stacked author prefixes.
+    const m = new RegExp(`^(${escapeName(actorName)}\\s*:\\s*){2,}`, "i").exec(trimmed);
+    if (m) {
+      out.push({
+        code: "doubled_prefix",
+        detail: `narrative starts with a doubled author prefix ("${m[0].trim()}"): emit exactly one "Name:" prefix`,
+      });
+    }
+  }
+  const unquoted = stripQuotedForVoice(text);
+  // Capital-I is always the pronoun (\bI\b also catches I'm/I'll/I've —
+  // the apostrophe is a word boundary). The rest match case-insensitively.
+  const m =
+    /\bI\b/.exec(unquoted) ??
+    /\b(me|my|mine|we|us|our|ours|myself|ourselves)\b/i.exec(unquoted);
+  if (m) {
+    const ctx = unquoted
+      .slice(Math.max(0, m.index - 32), m.index + 32)
+      .replace(/\s+/g, " ")
+      .trim();
+    out.push({
+      code: "first_person",
+      detail: `first-person self-reference ("${m[0]}" in "…${ctx}…"): NPC action text and canonical narrative are third-person — rewrite without I/my/me/we outside quoted speech`,
+    });
+  }
+  return out;
+}
+
+/** Validator wrapper: voice violations surface as `narrative.*` errors. */
+export function validateNarrativeVoice(
+  narrative: string,
+  actorName?: string,
+): ValidationError[] {
+  return detectVoiceViolation(narrative, actorName).map((v) => ({
+    code: `narrative.${v.code}`,
+    message: v.detail,
+  }));
+}
+
+/**
+ * Deterministic repair for the doubled-prefix shape: "Dana: Dana: …" →
+ * "Dana: …". Pure. First-person prose is NOT auto-rewritten (too risky) —
+ * it fails the voice gate with a targeted retry hint instead.
+ */
+export function collapseDoubledPrefix(
+  narrative: string,
+  actorName?: string,
+): string {
+  if (actorName === undefined || actorName.length === 0) return narrative;
+  return narrative.replace(
+    new RegExp(`^(${escapeName(actorName)}\\s*:\\s*){2,}`, "i"),
+    `${actorName}: `,
+  );
 }

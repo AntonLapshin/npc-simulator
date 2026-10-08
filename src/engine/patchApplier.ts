@@ -37,6 +37,15 @@ export const FALLBACK_HISTORY_MARKER = "(not done)";
 /** Marker for salvaged/liveness history entries recorded from the narrative (Exp-5 item 2). */
 export const PARTIAL_HISTORY_MARKER = "(partial)";
 
+/**
+ * Exp-4 item 7 (S3): marker embedded in liveness-floor history entries
+ * ("…(partial) [liveness floor]"). Intent-failure streaks skip these
+ * entries — the liveness path bypasses validation entirely, so a liveness
+ * turn proves nothing about a banned intent's renderability and must not
+ * reset its consecutive-failure count (exp-4 ticks 19→22 repro).
+ */
+export const LIVENESS_HISTORY_MARKER = "[liveness floor]";
+
 function entryText(entry: HistoryEntry | string): string {
   return typeof entry === "string" ? entry : entry.text;
 }
@@ -76,6 +85,10 @@ export function summarizeNarrativeForMemory(narrative: string, actorName: string
  *   within 6 cells — the repair may stop short of it, but the label
  *   should name where the actor was headed, not the nearest fixture
  *   (tick-15: "near the water cooler" for a coffee-machine walk).
+ * - pose-aware seating (Exp-4 item 8 / S5): a standing actor is never "at"
+ *   a chair — "at Tanya's chair" while standing (exp-4 final state) reads
+ *   as sitting. Chairs/sofas only yield "at" when pose is "sit"; otherwise
+ *   they fall back to "near" (or lose to the desk).
  * Pure.
  */
 export function describePosition(
@@ -83,24 +96,30 @@ export function describePosition(
   x: number,
   y: number,
   preferredObjectId?: string,
+  pose?: string,
 ): string {
   const hay = (o: { id: string; name: string }): string => `${o.id} ${o.name}`;
   const isWall = (o: { id: string; name: string }): boolean => /wall/i.test(hay(o));
   const isSign = (o: { id: string; name: string }): boolean => /sign/i.test(hay(o));
+  const isSeating = (o: { id: string; name: string }): boolean =>
+    /chair|sofa/i.test(hay(o));
   const isFurniture = (o: { id: string; name: string }): boolean =>
     /desk|chair|machine|table|sofa/i.test(hay(o));
   const centerDist = (o: { x: number; y: number; w: number; h: number }): number =>
     Math.hypot(x - (o.x + o.w / 2), y - (o.y + o.h / 2));
+  /** A standing actor next to a chair is "near" it, never "at" it. */
+  const atDistance = (o: { id: string; name: string }, d: number): number =>
+    isSeating(o) && pose !== undefined && pose !== "sit" && d <= 2 ? 2.01 : d;
 
   if (preferredObjectId !== undefined) {
     const preferred = world.scene.objects.find((o) => o.id === preferredObjectId);
     if (preferred !== undefined && !isWall(preferred)) {
       const d = centerDist(preferred);
-      if (d <= 6) return formatLandmark(preferred.name, d);
+      if (d <= 6) return formatLandmark(preferred.name, atDistance(preferred, d));
     }
   }
-  let bestFurniture: { name: string; d: number } | undefined;
-  let bestOther: { name: string; d: number } | undefined;
+  let bestFurniture: { name: string; d: number; seating: boolean } | undefined;
+  let bestOther: { name: string; d: number; seating: boolean } | undefined;
   for (const o of world.scene.objects) {
     if (isWall(o) || isSign(o)) continue;
     const d = centerDist(o);
@@ -108,13 +127,20 @@ export function describePosition(
     const slot = isFurniture(o) ? "furniture" : "other";
     if (slot === "furniture") {
       if (bestFurniture === undefined || d < bestFurniture.d)
-        bestFurniture = { name: o.name, d };
+        bestFurniture = { name: o.name, d, seating: isSeating(o) };
     } else if (bestOther === undefined || d < bestOther.d) {
-      bestOther = { name: o.name, d };
+      bestOther = { name: o.name, d, seating: isSeating(o) };
     }
   }
   const best = bestFurniture ?? bestOther;
-  if (best !== undefined) return formatLandmark(best.name, best.d);
+  if (best !== undefined) {
+    // A standing actor next to seating is "near" it, never "at" it.
+    const d =
+      best.seating && pose !== undefined && pose !== "sit" && best.d <= 2
+        ? 2.01
+        : best.d;
+    return formatLandmark(best.name, d);
+  }
   return `at (${x}, ${y})`;
 }
 
@@ -170,12 +196,15 @@ export function applyConsequence(
       // when the patch moves the actor without updating `state` (an
       // explicit patch.state always wins below). The label prefers the
       // action's named destination object when one resolves.
+      // Exp-4 item 8 (S5): pass the effective pose so a standing actor is
+      // never labeled "at <chair>".
       if (moved && patch.state === undefined) {
         actor.state = describePosition(
           next,
           patch.x,
           patch.y,
           preferredStateObject(next, action),
+          patch.pose ?? actor.pose,
         );
       }
     }

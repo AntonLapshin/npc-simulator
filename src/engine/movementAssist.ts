@@ -320,3 +320,50 @@ export function clampMoveToCap(
   }
   return null;
 }
+
+/**
+ * Exp-4 item 5 (S2): constructive alternative for a vetoed movement repair.
+ * A veto without a legal alternative froze the avatar for 27 of 30 exp-4
+ * ticks (veto → retry → retry → fallback, zero displacement). When the
+ * narrative names an approach target the repair stepped away from, scan
+ * the reachable box for a legal step strictly TOWARD that target point and
+ * return the closest-to-target one. Returns null when no such step exists
+ * (fully blocked / already adjacent) — the caller then falls through to
+ * the honest stationary path instead of burning retries. Pure.
+ */
+export function stepTowardPoint(
+  world: World,
+  actorId: string,
+  tx: number,
+  ty: number,
+): MoveSuggestion | null {
+  const actor = world.actors.find((a) => a.id === actorId);
+  if (!actor) return null;
+  const from = { x: actor.x, y: actor.y };
+  const oldD = Math.hypot(actor.x - tx, actor.y - ty);
+  const occupied = occupiedCells(world, actorId);
+  const scanR = Math.ceil(MAX_STEP_DISTANCE) + 1;
+  const x0 = Math.max(0, Math.floor(actor.x - scanR));
+  const x1 = Math.min(world.scene.width - 1, Math.ceil(actor.x + scanR));
+  const y0 = Math.max(0, Math.floor(actor.y - scanR));
+  const y1 = Math.min(world.scene.height - 1, Math.ceil(actor.y + scanR));
+  let best: MoveSuggestion | null = null;
+  let bestD = oldD;
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) {
+      if (x === actor.x && y === actor.y) continue;
+      if (occupied.has(`${x},${y}`)) continue;
+      if (!isFree(world, x, y)) continue;
+      if (Math.hypot(x - actor.x, y - actor.y) > MAX_STEP_DISTANCE + 1e-9) continue;
+      const d = Math.hypot(x - tx, y - ty);
+      // Strictly closer to the target than the current position, and —
+      // like suggestMoveTarget — never stack exactly on an actor target.
+      if (!(d < bestD - 1e-9)) continue;
+      if (d < 0.5) continue;
+      if (!canMoveBetween(world.scene, from, { x, y })) continue;
+      best = { x, y };
+      bestD = d;
+    }
+  }
+  return best;
+}
