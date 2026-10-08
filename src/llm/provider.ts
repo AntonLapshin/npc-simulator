@@ -489,6 +489,21 @@ export function resolveTaskBackend(task: LlmTask, cfg: LlmEnvConfig): LlmBackend
   return cfg.taskBackends[task] ?? (isSimpleLlmTask(task) ? cfg.simpleBackend : cfg.backend);
 }
 
+/**
+ * Exp-4 item 2 (S1): effective model name for a task, mirroring
+ * createProviderForTask's resolution (per-task LLM_BACKEND_* override →
+ * tier default; LLM_SIMPLE_MODEL applies to simple tasks). Used to detect
+ * a no-op capable tier (same provider AND same model as the simple tier).
+ * Pure.
+ */
+export function resolveTaskModel(task: LlmTask, cfg: LlmEnvConfig): string {
+  const which = resolveTaskBackend(task, cfg);
+  if (isSimpleLlmTask(task) && cfg.simpleModel) return cfg.simpleModel;
+  if (which === "laya-local") return cfg.laya.model;
+  if (which === "ollama") return cfg.ollama.model;
+  return cfg.joingonka.model;
+}
+
 /** Backends accepted by LLM_BACKEND / --provider. */
 export function knownBackends(): LlmBackend[] {
   return [...KNOWN_BACKENDS];
