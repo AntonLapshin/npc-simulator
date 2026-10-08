@@ -359,24 +359,37 @@ const CORE_VERBS: Array<[RegExp, string]> = [
   // Exp-3 item 6 (S2): push/pull verbs — chair-push keyed to "other|" and
   // escaped the per-intent failure memory entirely.
   [/\b(push|pushes|pushed|pushing|pull|pulls|pulled|pulling|slides?|slid|sliding|shoves?|shoved)\b/i, "push"],
+  // Exp-6 item 9 (S7): verb-form normalization for micro-fiddling —
+  // "shift/shifts/shifted", "rearrange", "adjust", "nudge", "tidy" all
+  // stem to "adjust" so paraphrase variants core identically
+  // (exp-6: "move dana_papers to the side" vs "shifts the dana_papers
+  // to the left" evaded the string-match ban).
+  [/\b(shifts?|shifted|shifting|rearranges?|rearranged|adjusts?|adjusted|adjusting|nudges?|nudged|straightens?|straightened|tidi(?:es|ed|ying))\b/i, "adjust"],
 ];
 
-/** Object-kind nouns for the attractor core (desk/coffee/task/…). */
+/** Object-kind nouns for the attractor core (desk/coffee/task/…).
+ * Boundaries are snake_case-aware: "dana_papers" names papers ("_" and "-"
+ * are separators for object compounds). Actor mentions in `mentioned()`
+ * stay strict-\b — "dana_papers" must NOT count as naming Dana, or
+ * "move dana_papers" keys to "move|dana" and the paraphrase ban misses
+ * (exp-6 item 9, tick-24). */
+const looseWord = (body: string): RegExp =>
+  new RegExp(`(?:^|[^a-z0-9])(?:${body})(?:$|[^a-z0-9])`, "i");
 const CORE_NOUNS: Array<[RegExp, string]> = [
-  [/\bdesk\b/i, "desk"],
-  [/\bcoffee\b/i, "coffee"],
-  [/\blaptop\b/i, "laptop"],
-  [/\bmug\b|\bcup\b/i, "mug"],
-  [/\btask\b|\bcode\b|\bbackend\b/i, "task"],
-  [/\bquestion\b|\bhelp\b|\bdirections?\b/i, "question"],
-  [/\bemail\b|\bpapers?\b|\bnotes?\b/i, "papers"],
-  [/\bbreak\b|\blunch\b|\btea\b/i, "break"],
-  [/\bmeeting\b/i, "meeting"],
-  [/\bhand\b|\bhands\b/i, "hand"],
+  [looseWord("desk"), "desk"],
+  [looseWord("coffee"), "coffee"],
+  [looseWord("laptop"), "laptop"],
+  [looseWord("mug|cup"), "mug"],
+  [looseWord("task|code|backend"), "task"],
+  [looseWord("question|help|directions?"), "question"],
+  [looseWord("email|papers?|notes?"), "papers"],
+  [looseWord("break|lunch|tea"), "break"],
+  [looseWord("meeting"), "meeting"],
+  [looseWord("hand|hands"), "hand"],
   // Exp-3 item 6 (S2): chair/table nouns — "push the chair in" needs a
   // keyable noun for the failure memory.
-  [/\bchair\b/i, "chair"],
-  [/\btable\b/i, "table"],
+  [looseWord("chair"), "chair"],
+  [looseWord("table"), "table"],
 ];
 
 /**
@@ -387,7 +400,9 @@ const CORE_NOUNS: Array<[RegExp, string]> = [
  * another prompt line. The deciding actor (`selfId`) is skipped when
  * scanning mentions so both "Shake Anton's hand" and the observer-subject
  * variant "Anton shakes hands with Tanya" core to the other participant;
- * when nobody else is named, the self mention (or object kind) is kept.
+ * when nobody else is named, the concrete object kind wins over the self
+ * mention ("Dana shifts the dana_papers" → "adjust|papers", not
+ * "adjust|dana") — the intent is about the object.
  */
 export function suggestionCore(world: World, text: string, selfId?: string): string {
   const lower = text.toLowerCase();
@@ -398,26 +413,33 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
       break;
     }
   }
+  const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const mentioned = (a: { id: string; name: string }): boolean => {
     const first = a.name.split(/[^a-z0-9]+/i)[0]?.toLowerCase() ?? "";
+    // Exp-6 item 9: word-boundary matches — "dana_papers" must not count
+    // as mentioning actor "dana" (exp-6 tick-24 keyed "move|dana" instead
+    // of "adjust|papers" and the paraphrase ban missed).
     return (
-      (a.id.length >= 2 && lower.includes(a.id.toLowerCase())) ||
-      (a.name.length >= 2 && lower.includes(a.name.toLowerCase())) ||
+      (a.id.length >= 2 &&
+        new RegExp(`\\b${escapeRe(a.id.toLowerCase())}\\b`).test(lower)) ||
+      (a.name.length >= 2 &&
+        new RegExp(`\\b${escapeRe(a.name.toLowerCase())}\\b`).test(lower)) ||
       (first.length >= 3 && new RegExp(`\\b${first}\\b`).test(lower))
     );
   };
   let noun = "";
+  let nounIsActor = false;
   for (const a of world.actors) {
     if (selfId !== undefined && a.id === selfId) continue;
     if (mentioned(a)) {
       noun = a.id;
+      nounIsActor = true;
       break;
     }
   }
-  if (noun === "" && selfId !== undefined) {
-    const self = world.actors.find((a) => a.id === selfId);
-    if (self && mentioned(self)) noun = self.id;
-  }
+  // Exp-6 item 9: object-kind before the self-mention fallback — "Dana
+  // shifts the dana_papers" is about the papers, not about Dana; the self
+  // mention ("Dana" at the start) is the weaker signal.
   if (noun === "") {
     for (const [re, stem] of CORE_NOUNS) {
       if (re.test(text)) {
@@ -425,6 +447,21 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
         break;
       }
     }
+  }
+  if (noun === "" && selfId !== undefined) {
+    const self = world.actors.find((a) => a.id === selfId);
+    if (self && mentioned(self)) {
+      noun = self.id;
+      nounIsActor = true;
+    }
+  }
+  // Exp-6 item 9 (S7): object-strip normalization — "move the papers"
+  // and "shift the papers" are the same micro-fiddling intent, so an
+  // object-kind noun unifies move/adjust verbs under "adjust".
+  // Locomotion keeps "move": its noun is a roster actor, never an
+  // object kind ("Walk to Tanya" stays "move|tanya").
+  if (!nounIsActor && noun !== "" && (verb === "move" || verb === "adjust")) {
+    verb = "adjust";
   }
   return `${verb}|${noun}`;
 }
@@ -441,14 +478,14 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
  * (task, question). Pure.
  */
 const CLUSTER_NOUNS: Array<[RegExp, string]> = [
-  [/\bdesk\b/i, "desk"],
-  [/\bcoffee\b/i, "coffee"],
-  [/\blaptop\b/i, "laptop"],
-  [/\bmug\b|\bcup\b/i, "mug"],
-  [/\bemail\b|\bpapers?\b|\bnotes?\b/i, "papers"],
-  [/\bchair\b/i, "chair"],
-  [/\btable\b/i, "table"],
-  [/\bhand\b|\bhands\b/i, "hand"],
+  [looseWord("desk"), "desk"],
+  [looseWord("coffee"), "coffee"],
+  [looseWord("laptop"), "laptop"],
+  [looseWord("mug|cup"), "mug"],
+  [looseWord("email|papers?|notes?"), "papers"],
+  [looseWord("chair"), "chair"],
+  [looseWord("table"), "table"],
+  [looseWord("hand|hands"), "hand"],
 ];
 
 export function suggestionClusterNouns(text: string): string[] {
