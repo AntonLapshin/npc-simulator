@@ -9,8 +9,7 @@ import { loadOfficeScenario, makeTinyWorld } from "../helpers.js";
 import {
   extractJsonPayload,
   LLMConsequenceEngine,
-  LLMProposalEngine,
-  LLMSelectionEngine,
+  LLMIntentEngine,
   JoinGonkaProvider,
   LocalLayaProvider,
   resolveLlmEnv,
@@ -53,9 +52,9 @@ const proposalJson = JSON.stringify({
   reasoning: "Jeff wants to make a good first impression.",
 });
 
-const selectionJson = JSON.stringify({
-  action: "Introduce yourself to the office.",
-  reasoning: "Breaking the silence fits Jeff's goal.",
+const intentJson = JSON.stringify({
+  action: "Introduce himself to the office.",
+  quote: "",
 });
 
 const consequenceJson = JSON.stringify({
@@ -114,38 +113,38 @@ describe("provider configuration", () => {
   });
 });
 
-describe("LLM proposal engine", () => {
+describe("LLM intent engine", () => {
   it("returns valid JSON output and logs prompt + raw + parsed response", async () => {
     const logger = createTestLogger();
-    const provider = new StubProvider(["Here is my answer:\n```json\n" + proposalJson + "\n```"]);
-    const engine = new LLMProposalEngine(logger, provider);
+    const provider = new StubProvider(["Here is my answer:\n```json\n" + intentJson + "\n```"]);
+    const engine = new LLMIntentEngine(logger, provider);
 
-    const result = await engine.propose(loadOfficeScenario(), "jeff");
+    const result = await engine.intent(loadOfficeScenario(), "jeff");
 
-    expect(result.suggestions).toHaveLength(2);
-    expect(result.reasoning).toContain("first impression");
+    expect(result.action).toBe("Introduce himself to the office.");
+    expect(result.quote).toBe("");
     expect(provider.calls).toHaveLength(1);
-    expect(provider.calls[0]!.system).toContain("uncensored");
 
     const events = logger.store.events();
-    expect(events).toContain("proposal_started");
-    expect(events).toContain("proposal_completed");
-    const completed = logger.store.byEvent("proposal_completed")[0]!;
-    expect(completed.prompt).toContain("Current Actor");
-    expect(completed.rawResponse).toContain("suggestions");
-    expect(completed.parsedResponse).toMatchObject({ reasoning: result.reasoning });
+    expect(events).toContain("intent_started");
+    expect(events).toContain("intent_completed");
+    const completed = logger.store.byEvent("intent_completed")[0]!;
+    expect(completed.prompt).toContain("TASK:");
+    expect(completed.rawResponse).toContain("action");
+    expect(completed.parsedResponse).toMatchObject({ action: result.action });
   });
 
   it("retries invalid JSON then succeeds", async () => {
     const logger = createTestLogger();
-    const provider = new StubProvider(["definitely not json", proposalJson]);
-    const engine = new LLMProposalEngine(logger, provider, { maxRetries: 3 });
+    const provider = new StubProvider(["definitely not json", intentJson]);
+    const engine = new LLMIntentEngine(logger, provider, { maxRetries: 3 });
 
-    const result = await engine.propose(makeTinyWorld(), "u");
+    const result = await engine.intent(makeTinyWorld(), "u");
 
-    expect(result.suggestions.length).toBeGreaterThan(0);
+    expect(result.action.length).toBeGreaterThan(0);
     expect(provider.calls).toHaveLength(2);
-    expect(logger.store.byEvent("proposal_failed")).toHaveLength(1);
+    // completeJson logs one per-attempt failure for the bad-JSON attempt.
+    expect(logger.store.byEvent("intent_failed")).toHaveLength(1);
     // Formatting-correction retry carries the repair instruction.
     expect(provider.calls[1]!.user).toContain("not valid JSON");
   });
@@ -156,42 +155,28 @@ describe("LLM proposal engine", () => {
       new Error("stub: timed out after 60000ms"),
       new Error("stub: timed out after 60000ms"),
     ]);
-    const engine = new LLMProposalEngine(logger, provider, { maxRetries: 1 });
+    const engine = new LLMIntentEngine(logger, provider, { maxRetries: 1 });
 
-    const result = await engine.propose(makeTinyWorld(), "u");
+    const result = await engine.intent(makeTinyWorld(), "u");
 
-    expect(result.suggestions).toEqual(["Stay where you are.", "Look around.", "Do nothing."]);
-    expect(result.reasoning).toContain("Fallback");
+    expect(result.action).toBe("waits and observes the situation.");
+    expect(result.quote).toBe("");
+    // Two timed-out attempts (one intent_failed each) + the engine's final
+    // fallback log.
+    expect(logger.store.byEvent("intent_failed")).toHaveLength(3);
     expect(provider.calls).toHaveLength(2);
   });
 
   it("falls back on schema mismatch", async () => {
     const logger = createTestLogger();
     const provider = new StubProvider([
-      JSON.stringify({ suggestions: "not-an-array", reasoning: "x" }),
+      JSON.stringify({ suggestions: ["Wave."], reasoning: "x" }),
       JSON.stringify({ nope: true }),
     ]);
-    const engine = new LLMProposalEngine(logger, provider, { maxRetries: 1 });
+    const engine = new LLMIntentEngine(logger, provider, { maxRetries: 1 });
 
-    const result = await engine.propose(makeTinyWorld(), "u");
-    expect(result.reasoning).toContain("Fallback");
-  });
-});
-
-describe("LLM selection engine", () => {
-  it("retries empty action text then accepts a real action", async () => {
-    const logger = createTestLogger();
-    const provider = new StubProvider([
-      JSON.stringify({ action: "   ", reasoning: "empty" }),
-      selectionJson,
-    ]);
-    const engine = new LLMSelectionEngine(logger, provider);
-
-    const result = await engine.select(loadOfficeScenario(), "jeff", ["Introduce yourself."]);
-
-    expect(result.action).toBe("Introduce yourself to the office.");
-    expect(provider.calls).toHaveLength(2);
-    expect(provider.calls[1]!.user).toContain("empty action text");
+    const result = await engine.intent(makeTinyWorld(), "u");
+    expect(result.action).toBe("waits and observes the situation.");
   });
 });
 
@@ -209,7 +194,7 @@ describe("LLM consequence engine + validation retry", () => {
     expect(logger.store.events()).toContain("consequence_completed");
   });
 
-  it("prose violation triggers validation feedback on retry, then fallback", async () => {
+  it("prose violation triggers validation feedback on retry, then accept-and-mark", async () => {
     const logger = createTestLogger();
     // Phase 4: the narrative claims a walk the engine never executed — a
     // prose violation (movement is engine-owned). Old-schema patch keys
@@ -222,8 +207,7 @@ describe("LLM consequence engine + validation retry", () => {
     });
     const provider = new StubProvider([bad, bad]);
     const deps = {
-      proposalEngine: new LLMProposalEngine(logger, provider),
-      selectionEngine: new LLMSelectionEngine(logger, provider),
+      intentEngine: new LLMIntentEngine(logger, provider),
       consequenceEngine: new LLMConsequenceEngine(logger, provider),
       logger,
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
@@ -232,14 +216,17 @@ describe("LLM consequence engine + validation retry", () => {
 
     const result = await resolveRender(world, { actorId: "u", text: "Wave." }, deps);
 
-    expect(result.render.narrative).toBe("Nothing changes.");
+    // PLAN_V2 Phase 4: the flawed paragraph is accepted and marked honest.
+    expect(result.render.narrative).toBe("U walks across the room.");
+    expect(result.render.narrateAcceptedDespiteViolations).toBe(true);
     expect(provider.calls).toHaveLength(2);
     // The second attempt carries the validator's feedback (§16.3/§16.5).
     expect(provider.calls[1]!.user).toContain("movement.narrated_without_move");
     const events = logger.store.events();
     expect(events).toContain("render_failed");
     expect(events).toContain("retry_started");
-    expect(events).toContain("fallback_used");
+    expect(events).toContain("narrate_accepted_despite_violations");
+    expect(events).not.toContain("fallback_used");
   });
 
   it("dishonest movement narration is rejected and retried with feedback", async () => {
@@ -259,8 +246,7 @@ describe("LLM consequence engine + validation retry", () => {
     });
     const provider = new StubProvider([dishonest, validTiny]);
     const deps = {
-      proposalEngine: new LLMProposalEngine(logger, provider),
-      selectionEngine: new LLMSelectionEngine(logger, provider),
+      intentEngine: new LLMIntentEngine(logger, provider),
       consequenceEngine: new LLMConsequenceEngine(logger, provider),
       logger,
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
@@ -350,35 +336,26 @@ describe("lenient consequence parsing for small models", () => {
 });
 
 describe("subjective vs objective contexts (§16.6)", () => {
-  it("proposal/selection hide other actors' private knowledge; consequence sees involved state, not far privates", async () => {
+  it("intent hides other actors' private knowledge; narrate sees executed facts, not far privates", async () => {
     const logger = createTestLogger();
-    const provider = new StubProvider([proposalJson, selectionJson, consequenceJson]);
+    const provider = new StubProvider([intentJson, consequenceJson]);
     const world = loadOfficeScenario();
-    const proposal = new LLMProposalEngine(logger, provider);
-    const selection = new LLMSelectionEngine(logger, provider);
+    const intent = new LLMIntentEngine(logger, provider);
     const consequence = new LLMConsequenceEngine(logger, provider);
 
-    await proposal.propose(world, "jeff");
-    await selection.select(world, "jeff", ["Introduce yourself."]);
+    await intent.intent(world, "jeff");
     await consequence.resolve(world, { actorId: "jeff", text: "Hello!" });
 
-    const proposalPrompt = provider.calls[0]!.user;
-    const selectionPrompt = provider.calls[1]!.user;
-    const consequencePrompt = provider.calls[2]!.user;
+    const intentPrompt = provider.calls[0]!.user;
+    const narratePrompt = provider.calls[1]!.user;
 
-    // Dan's private beliefs/goals must not leak into Jeff's subjective context.
-    for (const prompt of [proposalPrompt, selectionPrompt]) {
-      expect(prompt).not.toContain("The design deadline is close.");
-      expect(prompt).not.toContain("Finish an urgent design draft.");
-    }
-    // The consequence engine receives the slim objective snapshot (Phase 5):
-    // acting actor + perceivers in detail, every position, but NOT the
+    // Dan's private beliefs/goals must not leak into Jeff's intent prompt.
+    expect(intentPrompt).not.toContain("The design deadline is close.");
+    expect(intentPrompt).not.toContain("Finish an urgent design draft.");
+    // The narrate prompt carries executed facts and positions, not
     // compounding private lists of far actors (Dan is ~14 cells away).
-    expect(consequencePrompt).toContain("Introduce himself to the team.");
-    expect(consequencePrompt).toContain("Finish a small engineering task before lunch.");
-    expect(consequencePrompt).toContain("All actor positions");
-    expect(consequencePrompt).not.toContain("The design deadline is close.");
-    expect(consequencePrompt).not.toContain("Finish an urgent design draft.");
+    expect(narratePrompt).toContain("All actor positions");
+    expect(narratePrompt).not.toContain("The design deadline is close.");
   });
 });
 

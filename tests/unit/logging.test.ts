@@ -3,38 +3,23 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Logger } from "../../src/logging/logger.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
-import {
-  buildConsequenceContext,
-  buildProposalContext,
-  buildSelectionContext,
-} from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import { makeTinyWorld } from "../helpers.js";
 
 describe("logging", () => {
-  it("proposal logs prompt and parsed response", async () => {
+  it("intent logs prompt and parsed response", async () => {
     const logger = new Logger({ sessionId: "t1", writeToFile: false });
-    const engine = new MockProposalEngine(logger);
+    const engine = new MockIntentEngine(logger, { u: { action: "Wave.", quote: "" } });
     const world = makeTinyWorld();
-    await engine.propose(world, "u");
+    await engine.intent(world, "u");
     const events = logger.store.events();
-    expect(events).toContain("proposal_started");
-    expect(events).toContain("proposal_completed");
-    const completed = logger.store.byEvent("proposal_completed")[0]!;
+    expect(events).toContain("intent_started");
+    expect(events).toContain("intent_completed");
+    const completed = logger.store.byEvent("intent_completed")[0]!;
     expect(typeof completed.prompt).toBe("string");
-    expect(completed.parsedResponse).toBeDefined();
-  });
-
-  it("selection logs prompt and parsed response", async () => {
-    const logger = new Logger({ sessionId: "t2", writeToFile: false });
-    const engine = new MockSelectionEngine(logger);
-    const world = makeTinyWorld();
-    await engine.select(world, "u", ["Do this."]);
-    const completed = logger.store.byEvent("selection_completed")[0]!;
-    expect(typeof completed.prompt).toBe("string");
-    expect(completed.parsedResponse).toMatchObject({ action: "Do this." });
+    expect(completed.parsedResponse).toMatchObject({ action: "Wave." });
   });
 
   it("consequence logs prompt and parsed response", async () => {
@@ -49,12 +34,10 @@ describe("logging", () => {
 
   it("every module log entry has id, sessionId, timestamp, tick, turnIndex", async () => {
     const logger = new Logger({ sessionId: "t4", writeToFile: false });
-    const proposal = new MockProposalEngine(logger);
-    const selection = new MockSelectionEngine(logger);
+    const intent = new MockIntentEngine(logger);
     const consequence = new MockConsequenceEngine(logger);
     const world = makeTinyWorld();
-    await proposal.propose(world, "u");
-    await selection.select(world, "u", ["x"]);
+    await intent.intent(world, "u");
     await consequence.resolve(world, { actorId: "u", text: "x" });
     for (const entry of logger.store.all()) {
       expect(typeof entry.id).toBe("string");
@@ -174,45 +157,41 @@ describe("log rotation (F29)", () => {
 });
 
 describe("contextBuilder", () => {
-  it("proposal/selection contexts hide other actors' private knowledge", () => {
+  it("narrate context carries no private knowledge at all", () => {
+    // The narrate prompt is executed facts + grounding rules — no memory,
+    // belief, or goal dumps for anyone, so nothing private can leak.
     const world = makeTinyWorld();
     const n = world.actors.find((a) => a.id === "n")!;
     n.memories = ["SECRET_N_MEMORY"];
     n.beliefs = ["SECRET_N_BELIEF"];
     n.goal = "SECRET_N_GOAL";
-    const proposalCtx = buildProposalContext(world, "u");
-    expect(proposalCtx).not.toContain("SECRET_N_MEMORY");
-    expect(proposalCtx).not.toContain("SECRET_N_BELIEF");
-    expect(proposalCtx).not.toContain("SECRET_N_GOAL");
-    // Own knowledge is included.
     const u = world.actors.find((a) => a.id === "u")!;
     u.memories = ["OWN_MEMORY"];
-    expect(buildProposalContext(world, "u")).toContain("OWN_MEMORY");
-
-    const selectionCtx = buildSelectionContext(world, "u", ["Do x."]);
-    expect(selectionCtx).not.toContain("SECRET_N_MEMORY");
-    expect(selectionCtx).toContain("Do x.");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Hi" }, undefined, {});
+    expect(ctx).not.toContain("SECRET_N_MEMORY");
+    expect(ctx).not.toContain("SECRET_N_BELIEF");
+    expect(ctx).not.toContain("SECRET_N_GOAL");
+    expect(ctx).not.toContain("OWN_MEMORY");
+    // Positions are still visible (the narrator grounds the scene).
+    expect(ctx).toContain("All actor positions");
   });
 
-  it("consequence context ships a slim snapshot, not the full world", () => {
+  it("narrate context ships positions, not the full world", () => {
     const world = makeTinyWorld();
     const u = world.actors.find((a) => a.id === "u")!;
     u.memories = ["OWN_U_MEMORY"];
     const n = world.actors.find((a) => a.id === "n")!;
     n.memories = ["SECRET_N_MEMORY"];
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Hi" });
-    // Acting actor's memories (summarized) and positions are visible…
-    expect(ctx).toContain("OWN_U_MEMORY");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Hi" }, undefined, {});
     expect(ctx).toContain("All actor positions");
-    expect(ctx).toContain("Hi");
-    // …but other actors' compounding private lists never enter the prompt.
+    expect(ctx).not.toContain("OWN_U_MEMORY");
     expect(ctx).not.toContain("SECRET_N_MEMORY");
     expect(ctx).not.toContain("Full Objective World");
   });
 
-  it("consequence context includes validation feedback on retry", () => {
+  it("narrate context includes validation feedback on retry", () => {
     const world = makeTinyWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Hi" }, "bad output");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Hi" }, "bad output", {});
     expect(ctx).toContain("bad output");
   });
 });

@@ -40,7 +40,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { renderSuffix, STUB_BAN_LINE } from "../../src/llm/prompts.js";
 import { LLMConsequenceEngine } from "../../src/llm/llmConsequenceEngine.js";
-import { filterUnrenderableSuggestions } from "../../src/llm/llmProposalEngine.js";
 import {
   isThinkingModel,
   JoinGonkaProvider,
@@ -175,7 +174,7 @@ describe("exp-6 item 2: user-turn directive", () => {
       isUserTurn: true,
     });
     expect(prompts.length).toBe(1);
-    expect(prompts[0]!.startsWith(LLMConsequenceEngine.USER_TURN_DIRECTIVE)).toBe(true);
+    expect(prompts[0]!.startsWith(LLMConsequenceEngine.V2_USER_TURN_DIRECTIVE)).toBe(true);
   });
 
   it("omits the directive on NPC turns", async () => {
@@ -261,62 +260,6 @@ describe("exp-6 item 3: thinking-model control", () => {
     });
     await provider.complete("sys", "user");
     expect("think" in (bodies[0] as Record<string, unknown>)).toBe(false);
-  });
-});
-
-describe("exp-6 item 4: renderability-matched proposals", () => {
-  it("drops contact verbs naming a far actor", () => {
-    const world = officeWorld(); // anton (3,3), tanya (8,6): ~5.8 cells
-    const { kept, dropped } = filterUnrenderableSuggestions(world, "anton", [
-      "Shake Tanya's hand warmly.",
-      "Walk toward Tanya's desk.",
-      "Look around the office.",
-    ]);
-    expect(dropped.map((d) => d.suggestion)).toEqual(["Shake Tanya's hand warmly."]);
-    expect(kept).toEqual(["Walk toward Tanya's desk.", "Look around the office."]);
-  });
-
-  it("keeps contact verbs when the actor is adjacent", () => {
-    const world = officeWorld();
-    world.actors.find((a) => a.id === "anton")!.x = 8;
-    world.actors.find((a) => a.id === "anton")!.y = 5; // adjacent to tanya (8,6)
-    const { kept, dropped } = filterUnrenderableSuggestions(world, "anton", [
-      "Shake Tanya's hand warmly.",
-      "Look around.",
-    ]);
-    expect(dropped).toEqual([]);
-    expect(kept).toHaveLength(2);
-  });
-
-  it("drops pour verbs with no machine named and none nearby", () => {
-    // anton stands at (16,2): far from the machine at (2,1) and far from any
-    // seating, so both the pour and the sit are unrenderable.
-    const world = officeWorld();
-    const farWorld: World = {
-      ...world,
-      actors: world.actors.map((a) => (a.id === "anton" ? { ...a, x: 16, y: 2 } : a)),
-    };
-    const { kept, dropped } = filterUnrenderableSuggestions(farWorld, "anton", [
-      "Pour a fresh coffee.",
-      "Walk to the coffee machine.",
-      "Sit down and rest.",
-      "Look around the office.",
-    ]);
-    expect(dropped.map((d) => d.suggestion)).toEqual([
-      "Pour a fresh coffee.",
-      "Sit down and rest.",
-    ]);
-    expect(kept).toEqual(["Walk to the coffee machine.", "Look around the office."]);
-  });
-
-  it("fails open: never filters below 2 suggestions", () => {
-    const world = officeWorld();
-    const { kept, dropped } = filterUnrenderableSuggestions(world, "anton", [
-      "Pour a fresh coffee.",
-      "Sit down and rest.",
-    ]);
-    expect(kept).toHaveLength(2);
-    expect(dropped).toEqual([]);
   });
 });
 
