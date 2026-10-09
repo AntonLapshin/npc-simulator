@@ -61,14 +61,21 @@ export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig
 // Laya decision-layer configuration (LAYA_PLAN.md phases 3–5).
 //
 // decision/wiring's readLayaConfig is the single parser; the engine-facing
-// entry point below wraps it with OFF-by-default values so the chat path
-// stays the default until Phase 5 validates Laya end to end. Direction is
-// one-way: config -> decision/wiring, never the reverse.
+// entry point below wraps it with Phase-5 defaults: the cascade is the
+// default decision path (the chat path is one LAYA_MODE=off away).
+// Direction is one-way: config -> decision/wiring, never the reverse.
 // ---------------------------------------------------------------------------
 
 /**
- * Laya config as the engine consumes it: LAYA_MODE defaults to "off" and
- * every per-phase toggle defaults to 0 (disabled). Explicit env values win.
+ * Laya config as the engine consumes it.
+ *
+ * Phase 5: the Laya decision cascade is the DEFAULT proposal/selection
+ * path — LAYA_MODE defaults to "static" and the decision toggles
+ * (selection, renderability screen, locomotion veto) default on. The LLM
+ * proposal/selection engines stay available as the fallback (see
+ * readLlmDecisionFallback). Explicit env values win; LAYA_MODE=off
+ * restores the pure chat path.
+ *
  * Pure — pass a fake env in tests.
  */
 export function readLayaRuntimeConfig(
@@ -76,18 +83,32 @@ export function readLayaRuntimeConfig(
 ): LayaConfig {
   return readLayaConfig({
     ...env,
-    LAYA_MODE: env["LAYA_MODE"] ?? "off",
-    LAYA_SELECTION: env["LAYA_SELECTION"] ?? "0",
+    LAYA_MODE: env["LAYA_MODE"] ?? "static",
+    LAYA_SELECTION: env["LAYA_SELECTION"] ?? "1",
     LAYA_JUDGE: env["LAYA_JUDGE"] ?? "0",
     LAYA_TRIAGE: env["LAYA_TRIAGE"] ?? "0",
     LAYA_SALIENCE: env["LAYA_SALIENCE"] ?? "0",
     LAYA_PLANNER: env["LAYA_PLANNER"] ?? "0",
-    // Exp-2-E additions: OFF by default until Phase 5 validates them.
+    // Exp-2-E salvageSelect: machinery deleted in Phase 4 — stays off.
     LAYA_SALVAGE_SELECT: env["LAYA_SALVAGE_SELECT"] ?? "0",
-    LAYA_LOCOMOTION: env["LAYA_LOCOMOTION"] ?? "0",
-    // Exp-3 item 6 (S2): OFF by default until Phase 5 validates it.
-    LAYA_RENDERABILITY: env["LAYA_RENDERABILITY"] ?? "0",
+    // Phase 5: validated as part of the default cascade.
+    LAYA_LOCOMOTION: env["LAYA_LOCOMOTION"] ?? "1",
+    // Phase 5: the renderability screen is part of the default cascade.
+    LAYA_RENDERABILITY: env["LAYA_RENDERABILITY"] ?? "1",
   });
+}
+
+/**
+ * Phase 5: when the Laya cascade fails or is under-confident, fall back
+ * to the LLM proposal/selection engines (1, default during transition)
+ * or to the deterministic stub engines (0 — zero LLM calls anywhere in
+ * the decision path). The fallback stays until the cascade beats the LLM
+ * path on the eval harness for 3 consecutive runs. Pure.
+ */
+export function readLlmDecisionFallback(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return parseEnvToggle(env["LLM_DECISION_FALLBACK"], true);
 }
 
 /** True when the intent-first ordering applies: Laya on + selection routing on. */

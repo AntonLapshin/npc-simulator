@@ -8,6 +8,7 @@ import type {
 } from "../types.js";
 import type { MovementOutcome } from "../engine/movementExecutor.js";
 import type { ManipulationOutcome } from "../engine/manipulationExecutor.js";
+import type { Intent } from "../decision/decisionTypes.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -16,6 +17,22 @@ export interface ProposalEngine {
 export interface SelectionEngine {
   select(world: World, actorId: string, suggestions: string[]): Promise<SelectionResult>;
 }
+
+/**
+ * Phase 5: selection engines that accept the turn's already-decided
+ * intent skip their own intent cascade (the orchestrator's intent-first
+ * step or the Laya proposal engine decided it). The parameter is
+ * optional — plain SelectionEngine implementations ignore the extra
+ * argument at runtime.
+ */
+export type SelectionEngineWithIntent = SelectionEngine & {
+  select(
+    world: World,
+    actorId: string,
+    suggestions: string[],
+    intent?: Intent,
+  ): Promise<SelectionResult>;
+};
 
 export type ConsequenceResolveOpts = {
   signal?: AbortSignal;

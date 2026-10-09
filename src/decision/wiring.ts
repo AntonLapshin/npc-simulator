@@ -1,7 +1,8 @@
 // Pure config reading + thin factory shells for the Laya decision layer.
 // Nothing here touches src/engine, src/llm, or src/config.
 
-import type { SelectionEngine } from "../intelligence/types.js";
+import type { ProposalEngine, SelectionEngine } from "../intelligence/types.js";
+import { LayaProposalEngine } from "./layaProposalEngine.js";
 import { LayaSelectionEngine } from "./layaSelectionEngine.js";
 import { LayaSemanticJudge } from "./layaSemanticJudge.js";
 import { LayaClient } from "./layaClient.js";
@@ -111,6 +112,21 @@ export function createLayaSelectionEngine(
   fallback: SelectionEngine,
 ): LayaSelectionEngine {
   return new LayaSelectionEngine(
+    {
+      client: deps.client,
+      confidenceThreshold: deps.confidenceThreshold ?? config.confidenceThreshold,
+    },
+    fallback,
+  );
+}
+
+/** Phase 5: thin shell — Laya proposal engine with an injected fallback. */
+export function createLayaProposalEngine(
+  deps: LayaEngineDeps,
+  config: LayaConfig,
+  fallback: ProposalEngine,
+): LayaProposalEngine {
+  return new LayaProposalEngine(
     {
       client: deps.client,
       confidenceThreshold: deps.confidenceThreshold ?? config.confidenceThreshold,
