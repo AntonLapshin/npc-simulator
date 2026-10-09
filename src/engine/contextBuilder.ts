@@ -20,6 +20,7 @@ import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { executedMovementFacts, type MovementOutcome } from "./movementExecutor.js";
 import { exactQuoteFacts } from "./speechExecutor.js";
 import { executedManipulationFacts, type ManipulationOutcome } from "./manipulationExecutor.js";
+import { describeClamp, type TurnClamp } from "../core/clamp.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -1148,6 +1149,11 @@ export function buildConsequenceContext(
   // honestly instead of emitting objectPatches/prop patches.
   // Undefined = unknown (older callers); null = no manipulation executed.
   engineManipulation?: ManipulationOutcome | null,
+  // PLAN_V2 Phase 3: the turn's attempted-vs-executed clamp record — the
+  // honest gap the render call narrates (a failed reach is a story beat,
+  // not an error to hide). Undefined = unknown (v1 / older callers — no
+  // block); null = computed, no gap.
+  clamp?: TurnClamp | null,
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action, cfg);
@@ -1173,6 +1179,9 @@ export function buildConsequenceContext(
     ...(engineManipulation !== undefined
       ? executedManipulationFacts(world, action.actorId, engineManipulation)
       : []),
+    // PLAN_V2 Phase 3: attempted-vs-executed — the engine's honest gap
+    // for this turn (only when a channel clamped something).
+    ...(clamp !== undefined && clamp !== null ? describeClamp(world, action.actorId, clamp) : []),
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "MOVEMENT IS ENGINE-EXECUTED: the EXECUTED MOVEMENT section above is what already happened this turn — narrate it honestly and never invent coordinates. Do not emit x/y for any actor (any coordinates you emit are ignored).",
