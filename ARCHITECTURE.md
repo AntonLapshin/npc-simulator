@@ -126,7 +126,11 @@ verb ontology, and engine-output invariants) under
 `src/engine/manipulationExecutor.ts` (turn pre-pass, in-loop refresh on
 the merged contact, `applyEngineManipulation`); the prop-stub repair
 (`propStubForGroundingErrors`, `repairMissingPropStub`) is deleted —
-subsumed by the executor.
+subsumed by the executor. Phase 5 adds `src/core/decision.ts` (target
+questions over the live roster/scene, target resolution, deterministic
+intent-candidate templates, probability ranking — the pure half of the
+Laya decision cascade) under `src/decision/` (proposal/selection engines,
+shared intent-cascade step).
 
 ## Turn pipeline
 
@@ -263,6 +267,71 @@ repair), zod-validates, runs engine-specific `extraCheck` (dedup, POV-swap
 detection, id validation against the real roster), and retries with an
 appended repair prompt. `response_format: {type: "json_object"}` is sent by
 default (set `LLM_JSON_MODE=0` to disable).
+
+## Decision layer (Phase 5 — Laya cascade as default)
+
+The two remaining LLM calls (proposal, selection) are replaced by the
+Laya decision cascade. A turn becomes: **cascade (seconds, local) + 1
+render call**. LLM proposal/selection remain as the fallback behind
+`LLM_DECISION_FALLBACK=1` (default ON during transition; the fallback is
+removed only after the cascade beats it on the eval harness for 3
+consecutive live runs).
+
+**Wiring.** `createLlmEngines` (`src/llm/index.ts`) now sources
+`LayaProposalEngine` / `LayaSelectionEngine` as the default proposal and
+selection engines whenever `LAYA_MODE≠off` (the new default is
+`LAYA_MODE=static`, `LAYA_SELECTION=1`, `LAYA_RENDERABILITY=1`,
+`LAYA_LOCOMOTION=1`; judge/triage/salience/planner/salvageSelect stay
+off). The fallback is the LLM engines when `LLM_DECISION_FALLBACK=1`,
+or the deterministic stubs (`DeterministicProposalEngine` /
+`DeterministicSelectionEngine`, fixed benign suggestions) when it is 0.
+Fail-open is preserved: locomotion veto never throws, the intent cascade
+and renderability screen catch Laya failures and return undefined, and
+every cascade step delegates to its injected fallback on low confidence
+or client failure.
+
+**The cascade** (`src/decision/layaProposalEngine.ts`):
+1. **Intent cascade** — the static `SELECTION_CASCADE` diagram (what kind
+   of action → target/addressee → manner), shared via
+   `src/decision/intentCascade.ts` with the intent-first wiring and the
+   selection engine (previously two copies in `layaTurn.ts` and
+   `layaSelectionEngine.ts`).
+2. **Dynamic target question** — built from the live roster/scene via
+   `src/core/decision.ts` (`buildTargetQuestion`), never hardcoded; the
+   winner resolves to an id via `resolveTargetId` (actors by name,
+   objects/landmarks to scene ids, nearest-wins on duplicates).
+3. **Candidate rendering** — deterministic templates
+   (`renderIntentCandidates`); no quotes are ever rendered (unquoted
+   speech is composed by the render call, per Phase 2).
+4. **Exact-intent choice** — one Laya choice over the rendered candidates;
+   the winner becomes the action text and the intent is attached to the
+   `ProposalResult` as fully typed (`{kind, targetKind, targetId,
+   manner?, quote?}`).
+
+**Typed intents → executors.** A fully-typed intent (kind + resolved
+`targetId`) is authoritative for the executors because it generated the
+action text — no translation layer, no text re-parsing:
+move → `movementExecutor` (destination straight from the intent),
+speak → `speechExecutor` (`intent.quote`, else the text parser),
+manipulation → `manipulationExecutor` (text-parsed; the candidate
+templates are written as inverses of the verb ontology, so the
+template → parse round-trip recovers the target deterministically).
+`turnOrchestrator` threads `proposal.intent ?? intentFirst` through
+selection (which skips its redundant cascade when it receives one) and
+`resolveRender`.
+
+**Salvage ranking.** The Phase 5 spec's "salvage ranking" referent was the
+patch-salvage machinery deleted in Phase 4; its living equivalent is the
+cascade's own ranked choice — the `candidate_fit` selection over
+suggestions and the probability-ordered exact-intent pick. Nothing was
+rebuilt.
+
+**Eval.** `scripts/eval-run-quality.ts` gains `--compare <cascadeSave>
+<cascadeLog> <llmSave> <llmLog> [tasks.json]`: side-by-side decision-cost
+(LLM proposal/selection invocations — the Laya engines log neither, so
+zero counts ARE the zero-call proof) and quality rows (fallback rate,
+tasks, memory precision, rejections, bans), with a verdict. Mock-harness
+wins are explicitly marked as not counting toward the live 3-win gate.
 
 ## Flaws
 

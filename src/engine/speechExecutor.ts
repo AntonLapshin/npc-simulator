@@ -9,6 +9,7 @@
 // in `src/core/speech.ts`, mirroring `movementExecutor.ts`.
 
 import type { Action, World } from "../types.js";
+import type { Intent } from "../decision/decisionTypes.js";
 import {
   extractExactQuote,
   quoteContained,
@@ -24,8 +25,13 @@ export { extractExactQuote, quoteContained, reinsertQuote };
  * facts. Null when the action carries no quoted speech — unquoted speech
  * (greetings, small talk the action didn't specify) is policed by the
  * echo validator + ECHO-BAN, not by this contract.
+ *
+ * Phase 5: a cascade intent carrying an explicit quote is authoritative
+ * (it generated the action text) — the quote flows straight to
+ * exactQuote with no text re-parsing.
  */
-export function planSpeech(action: Action): string | null {
+export function planSpeech(action: Action, intent?: Intent): string | null {
+  if (intent?.quote !== undefined) return intent.quote;
   return extractExactQuote(action.text);
 }
 

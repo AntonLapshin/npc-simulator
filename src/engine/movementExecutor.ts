@@ -13,6 +13,8 @@ import type {
   ActionSemantics,
   World,
 } from "../types.js";
+import type { Intent } from "../decision/decisionTypes.js";
+import { isFullyTypedIntent } from "../decision/decisionTypes.js";
 import {
   assertMovementInvariants,
   computeMovementOutcome,
@@ -37,7 +39,37 @@ export type PlannedMovement = Pick<
   "moves" | "destinationActorId" | "destinationObjectId" | "destinationObjectExplicit" | "contactActorId"
 >;
 
-export function planMovementSemantics(world: World, action: Action): PlannedMovement {
+export function planMovementSemantics(
+  world: World,
+  action: Action,
+  intent?: Intent,
+): PlannedMovement {
+  // Phase 5: a fully-typed cascade intent (kind "move" + resolved
+  // targetId from the Laya proposal engine) is authoritative — it
+  // generated the action text, so the destination comes straight from
+  // the intent with no text re-parsing (no translation layer). Any other
+  // intent (or none) falls through to the text parsers as before.
+  if (
+    isFullyTypedIntent(intent) &&
+    intent.kind === "move" &&
+    intent.targetId !== undefined
+  ) {
+    const targetId = intent.targetId;
+    const targetKind = intent.targetKind;
+    if (targetKind === "actor" && targetId !== action.actorId) {
+      return { moves: true, destinationActorId: targetId };
+    }
+    if (targetKind === "landmark" || targetKind === "object") {
+      return {
+        moves: true,
+        destinationObjectId: targetId,
+        destinationObjectExplicit: true,
+      };
+    }
+    // Fully-typed move with targetKind "none" (wander): locomotion with
+    // no destination — the step computation picks the greedy cell.
+    return { moves: true };
+  }
   const det = resolveDeterministicSemantics(world, action);
   const moves = hasDisplacementToken(action.text) && !isNonLocomotionSense(action.text);
   if (!moves) {

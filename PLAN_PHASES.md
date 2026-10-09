@@ -22,7 +22,7 @@ fixes.
 | 2. Engine-owned speech ✅ | ~3–4 | B1, quote-salvage path |
 | 3. Engine-owned objects ✅ | ~3–4 | prop-stub retries, phantom props, zero-patch turns |
 | 4. Render-only contract ✅ | **2–3** (proposal + selection + 1 render) | the patch-validation retry loop (the 70% cost center) |
-| 5. Laya cascade | **1–2** (cascade + 1 render) | proposal/selection LLM latency |
+| 5. Laya cascade ✅ | **1** (cascade + 1 render; local-only, no PR per 2026-10-09 directive) | proposal/selection LLM latency |
 | 6. Budgets + protocol | 1–2, enforced | silent 73-minute burns |
 
 ---

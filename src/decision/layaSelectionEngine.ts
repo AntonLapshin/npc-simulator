@@ -4,10 +4,9 @@
 
 import type { SelectionEngine } from "../intelligence/types.js";
 import type { SelectionResult, World } from "../types.js";
-import type { Intent, LayaAnswer } from "./decisionTypes.js";
+import type { Intent } from "./decisionTypes.js";
 import { buildIntentState } from "./decisionState.js";
-import { SELECTION_CASCADE } from "./diagrams.js";
-import { runDiagram } from "./diagramRunner.js";
+import { runStaticIntentCascade } from "./intentCascade.js";
 import { LayaClient } from "./layaClient.js";
 import { answerConfidence, argmaxOption } from "./utils/runnerUtils.js";
 
@@ -24,34 +23,8 @@ export type LayaSelectionEngineDeps = {
 
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.55;
 
-function intentFromCascade(decisions: Record<string, LayaAnswer>): Intent {
-  const kindRaw = decisions["intent_kind"];
-  const kind =
-    kindRaw?.type === "choice" &&
-    ["speak", "move", "interact", "gesture", "wait"].includes(kindRaw.winner)
-      ? (kindRaw.winner as Intent["kind"])
-      : "wait";
-  const intent: Intent = { kind };
-  const addressee = decisions["addressee"];
-  const destination = decisions["destination"];
-  const targetObject = decisions["target_object"];
-  if (kind === "speak" && addressee?.type === "choice") {
-    intent.targetKind = addressee.winner === "nobody in particular" ? "none" : "actor";
-  } else if (kind === "move" && destination?.type === "choice") {
-    intent.targetKind =
-      destination.winner === "wander aimlessly"
-        ? "none"
-        : destination.winner === "toward someone"
-          ? "actor"
-          : "landmark";
-  } else if (kind === "interact" && targetObject?.type === "choice") {
-    intent.targetKind = "object";
-    intent.manner = targetObject.winner;
-  }
-  const manner = decisions["manner"];
-  if (manner?.type === "choice" && !intent.manner) intent.manner = manner.winner;
-  return intent;
-}
+// Phase 5: the cascade-decision derivation is shared
+// (src/decision/intentCascade.ts) — the private copy is deleted.
 
 export class LayaSelectionEngine implements SelectionEngine {
   private readonly client: LayaClient;
@@ -66,22 +39,26 @@ export class LayaSelectionEngine implements SelectionEngine {
     this.buildState = deps.buildState ?? buildIntentState;
   }
 
+  /**
+   * Phase 5: when the caller already decided the turn's intent (the
+   * orchestrator's intent-first cascade, or the Laya proposal engine's
+   * fully-typed intent), pass it here to skip the redundant intent
+   * cascade — the candidate_fit choice is flavored by the decided intent
+   * instead. Omitted/undefined keeps the existing cascade behavior.
+   */
   async select(
     world: World,
     actorId: string,
     suggestions: string[],
+    intent?: Intent,
   ): Promise<SelectionResult> {
     const state = this.buildState(world, actorId);
 
-    // Step 1: intent cascade (batched DAG walk).
-    let intent: Intent = { kind: "wait" };
+    // Step 1: intent cascade (batched DAG walk) — skipped when the intent
+    // is already decided upstream.
+    let decided: Intent = { kind: "wait" };
     try {
-      const run = await runDiagram(
-        SELECTION_CASCADE,
-        state,
-        (s, q) => this.client.decide(s, q),
-      );
-      intent = intentFromCascade(run.decisions);
+      decided = intent ?? (await runStaticIntentCascade(this.client, state));
     } catch {
       return this.fallback.select(world, actorId, suggestions);
     }
@@ -94,7 +71,7 @@ export class LayaSelectionEngine implements SelectionEngine {
       const answers = await this.client.decide(state, {
         candidate_fit: {
           type: "choice",
-          instructions: `Which candidate action best fits ${intent.kind}${intent.manner ? ` (${intent.manner})` : ""}? Pick "none fit" only if every candidate is wrong for the actor right now.`,
+          instructions: `Which candidate action best fits ${decided.kind}${decided.manner ? ` (${decided.manner})` : ""}? Pick "none fit" only if every candidate is wrong for the actor right now.`,
           options,
         },
       });
@@ -110,12 +87,12 @@ export class LayaSelectionEngine implements SelectionEngine {
       const fb = await this.fallback.select(world, actorId, suggestions);
       return {
         action: fb.action,
-        reasoning: `laya: intent=${intent.kind} but candidate "${winner}" @${confidence.toFixed(2)} < threshold; chat fallback: ${fb.reasoning}`,
+        reasoning: `laya: intent=${decided.kind} but candidate "${winner}" @${confidence.toFixed(2)} < threshold; chat fallback: ${fb.reasoning}`,
       };
     }
     return {
       action: winner,
-      reasoning: `laya: intent=${intent.kind}${intent.targetKind ? ` target=${intent.targetKind}` : ""}${intent.manner ? ` manner=${intent.manner}` : ""} confidence=${confidence.toFixed(2)}`,
+      reasoning: `laya: intent=${decided.kind}${decided.targetKind ? ` target=${decided.targetKind}` : ""}${decided.manner ? ` manner=${decided.manner}` : ""} confidence=${confidence.toFixed(2)}`,
     };
   }
 }

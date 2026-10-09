@@ -2,6 +2,8 @@
 // Only physically necessary data is structured (coordinates, bounds,
 // rectangles, passability, vision/sound blocking, turn order, tick).
 
+import type { Intent } from "./decision/decisionTypes.js";
+
 export type SceneObject = {
   id: string;
   name: string;
@@ -175,6 +177,14 @@ export type Action = {
 export type ProposalResult = {
   suggestions: string[];
   reasoning: string;
+  /**
+   * Phase 5: the decision cascade's fully-typed intent (kind + resolved
+   * targetId), set by the Laya proposal engine. The orchestrator threads
+   * it to selection and the executors — typed intents map directly onto
+   * engine executors with no translation layer. Undefined on the
+   * LLM/chat proposal path.
+   */
+  intent?: Intent;
 };
 
 export type SelectionResult = {

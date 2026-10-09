@@ -106,7 +106,17 @@ export type DiagramEdge = z.infer<typeof DiagramEdgeSchema>;
 export type DecisionDiagram = z.infer<typeof DecisionDiagramSchema>;
 
 // ---------------------------------------------------------------------------
-// Intent (output of the selection cascade)
+// Intent (output of the decision cascade)
+//
+// Phase 5: typed intents map directly onto engine executors with no
+// translation layer —
+//   move     (+ targetId) -> movementExecutor destination
+//   speak    (+ quote)    -> speechExecutor exactQuote
+//   interact (+ targetId) -> manipulationExecutor object target
+//   gesture / wait        -> prose-only, no executor
+// A "fully-typed" intent (kind + resolved targetId) is authoritative for
+// the executors: it generated the action text, so the executors use its
+// fields instead of re-parsing the text.
 // ---------------------------------------------------------------------------
 
 export const IntentSchema = z.object({
@@ -114,6 +124,23 @@ export const IntentSchema = z.object({
   targetId: z.string().optional(),
   targetKind: z.enum(["actor", "object", "landmark", "none"]).optional(),
   manner: z.string().optional(),
+  /** Phase 5: engine-dictated exact words for speak intents (feeds exactQuote). */
+  quote: z.string().optional(),
 });
 
 export type Intent = z.infer<typeof IntentSchema>;
+
+/**
+ * Phase 5: true when the intent is fully typed — kind plus a resolved
+ * target id. Only the cascade's target-resolution step produces these, so
+ * executors may treat them as authoritative (no text re-parsing). Pure.
+ */
+export function isFullyTypedIntent(
+  intent: Intent | undefined,
+): intent is Intent {
+  return (
+    intent !== undefined &&
+    intent.targetId !== undefined &&
+    intent.targetId.length > 0
+  );
+}
