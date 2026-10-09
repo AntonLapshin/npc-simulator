@@ -61,7 +61,7 @@ import {
 import { recheckAcceptedProse, shouldAbortRetries } from "../../src/engine/turnSalvageGates.js";
 import { suggestionCore } from "../../src/engine/contextBuilder.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
-import { propStubForGroundingErrors } from "../../src/engine/validate/objects.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import type { Action, ConsequenceResult, World } from "../../src/types.js";
 
@@ -606,39 +606,36 @@ describe("exp-6 item 11: RULE-C early abort", () => {
   });
 });
 
-describe("exp-6 item 12: typing→laptop stub needs a nearby laptop", () => {
-  const stubErrors = (narrative: string) =>
-    propStubForGroundingErrors(
-      officeWorld(),
-      action("dana", "Work on the laptop."),
-      narrative,
-      [{ code: "object_grounding.sip_no_prop", message: "types with empty hands" }],
-    );
-
-  it("stubs laptop when one is nearby", () => {
-    // dana at (15,11); dana_laptop at (15,11).
-    expect(stubErrors("Dana types rapidly on the keyboard.")).toBe("laptop");
+describe("exp-6 item 12 (Phase 3): typing→laptop needs a nearby laptop", () => {
+  it("executor plans laptop when one is nearby", () => {
+    // dana at (15,11); dana_laptop at (15,11). The executor reads the
+    // ACTION text (ground truth) — the verb must be there, not just in
+    // the narrative.
+    const outcome = executeManipulation(officeWorld(), action("dana", "Dana types on the laptop."));
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.kind).toBe("pick-up");
+    expect(outcome!.plan.propName).toBe("laptop");
+    expect(outcome!.plan.objectId).toBe("dana_laptop");
   });
 
-  it("refuses to invent a laptop out of thin air", () => {
+  it("executor refuses to invent a laptop out of thin air", () => {
     const world = officeWorld();
     world.scene.objects = world.scene.objects.filter((o) => o.id !== "dana_laptop");
-    const out = propStubForGroundingErrors(
-      world,
-      action("dana", "Work on the laptop."),
-      "Dana types rapidly on the keyboard.",
-      [{ code: "object_grounding.sip_no_prop", message: "types with empty hands" }],
-    );
-    expect(out).toBeNull();
+    expect(executeManipulation(world, action("dana", "Work on the laptop."))).toBeNull();
   });
 
-  it("sip still stubs cup", () => {
-    const out = propStubForGroundingErrors(
-      officeWorld(),
-      action("anton", "Take a sip."),
-      "Anton takes a sip of coffee.",
-      [{ code: "object_grounding.sip_no_prop", message: "sips with empty hands" }],
-    );
-    expect(out).toBe("cup");
+  it("executor plans cup for sipping when a mug is near", () => {
+    const world = officeWorld();
+    world.scene.objects.push({
+      id: "anton_mug", name: "Anton's mug", description: "A mug.",
+      x: 3, y: 4, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
+    const outcome = executeManipulation(world, action("anton", "Take a sip."));
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.propName).toBe("cup");
+  });
+
+  it("executor plans nothing for sipping with no cup in reach (no thin-air props)", () => {
+    expect(executeManipulation(officeWorld(), action("anton", "Take a sip."))).toBeNull();
   });
 });
