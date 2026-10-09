@@ -209,6 +209,9 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       "\"reasoning\" is REQUIRED (never omit it).",
       "EFFECTS: \"moved\" true ONLY for the acting actor's own whole-body locomotion (a position change — never for looking, glancing, asking, sipping, reviewing, typing); \"spoke\" true when words are uttered; \"quotedSpeech\" copies action-text quotes character-for-character (never invent quotes). Set destination/addressee/contact ids to exact roster/landmark ids.",
       "MOVEMENT IS ENGINE-EXECUTED: do NOT emit x/y coordinates for any actor — the engine moves the acting actor from the action text (see EXECUTED MOVEMENT in the context) and any coordinates you emit are ignored. Narrate the executed movement honestly; never describe a walk the EXECUTED MOVEMENT section doesn't show.",
+      // Phase 2: engine-owned speech — the exact quote is dictated, not
+      // composed. The render call copies; it never invents dialogue.
+      "SPEECH IS ENGINE-OWNED: the action's quoted words are dictated by the engine (see EXACT QUOTE in the context) — the narrative MUST contain them character-for-character. Copy, never paraphrase, alter, or invent; never add greetings or substitute different dialogue.",
       "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose. Pick up/hold/open/boot sets prop and/or objectPatches. Omitting the verb from the narrative never excuses omitting the patch.",
       "IDENTITY: act out ONLY the acting actor's role — never another character's job, pronouns, or skills.",
       "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
@@ -273,11 +276,16 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "2.5 cells) to that person.",
     "\"addresseeActorId\" MUST be the exact roster id when the action speaks to, asks, or greets someone.",
     "\"spoke\" is true when the acting actor utters words; \"quotedSpeech\" lists the exact uttered segments",
-    "(empty array when nothing is said). Quote or closely paraphrase the FULL utterance — never truncate a",
-    "longer speech to a fragment and never invent different dialogue.",
-    "QUOTED-SPEECH COPY RULE: if the action text contains \"...\" segments, copy each one",
-    "character-for-character into \"quotedSpeech\" AND into the narrative. Never invent quotes,",
-    "never add greetings, never substitute different dialogue.",
+    "(empty array when nothing is said). Quote the FULL utterance verbatim — never paraphrase it, never",
+    "truncate a longer speech to a fragment, and never invent different dialogue.",
+    // Phase 2: the quote-handling section rewritten around exactQuote —
+    // the engine dictates the exact words (see EXACT QUOTE in the
+    // context); the render call copies them character-for-character.
+    "SPEECH IS ENGINE-OWNED: the action's quoted words are dictated by the engine (see EXACT QUOTE",
+    "in the context). The narrative MUST contain the exact quote character-for-character — copy it",
+    "verbatim: never paraphrase, alter, truncate, or substitute different dialogue, and never invent",
+    "other quoted dialogue. \"quotedSpeech\" lists the exact uttered segments (empty when nothing",
+    "is said).",
     "",
     "IDENTITY RULE: act out ONLY the acting actor's role, goal, and skills from the context. You are NOT any",
     "other listed character — a recruiter never sets up a development environment; a QA engineer never does",
@@ -312,8 +320,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "THOUGHTS POLICY: thoughts are private inner reactions, never spoken aloud and never",
     "narrated — be blunt, candid, profane/explicit when in-character.",
     "NARRATIVE RULE: describe ONLY the acting actor's directly observable behavior,",
-    "grounded strictly in the given action text. If the action is speech, preserve",
-    "its wording (quote or close paraphrase of the FULL utterance) — never invent different dialogue and",
+    "grounded strictly in the given action text. If the action is speech, quote its exact words",
+    "character-for-character (see EXACT QUOTE) — never paraphrase, never invent different dialogue, and",
     "never truncate a longer speech to a fragment.",
     // Exp-4 item 1 (S4/M1): third-person discipline for the canonical
     // narrative — first-person NPC prose ("I point…", "I gesture…") fails
@@ -329,8 +337,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     // Exp-2 item 3: canonical form for fully-spoken actions (pairs with the
     // echo-gate exemption for quoted-speech turns).
     FULLY_SPOKEN_ACTION_LINE,
-    "If the action text contains quoted/uttered words, the narrative MUST contain",
-    "those same words (same wording, not a different greeting or sentence).",
+    "If the action text contains quoted words, the narrative MUST contain the EXACT QUOTE",
+    "character-for-character (copy verbatim — same words, same order, same punctuation).",
     "Never invent new quoted dialogue that is not in the action text.",
     // Exp-6 item 1 (M1): the greeting-stub attractor.
     stubBanLine(exA?.name),
