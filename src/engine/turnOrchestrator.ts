@@ -3,11 +3,12 @@ import type {
   ConsequenceResult,
   EngineConfig,
   ProposalResult,
+  SelectionResult,
   World,
 } from "../types.js";
 import type { Intent } from "../decision/decisionTypes.js";
 import type { ChatComplete } from "../decision/questionPlanner.js";
-import { defaultConfig, isLayaIntentFirst } from "../config.js";
+import { defaultConfig, isLayaIntentFirst, readTurnLoopV2 } from "../config.js";
 import {
   layaWiringFromEnv,
   runIntentCascade,
@@ -18,6 +19,7 @@ import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
 import type {
   ConsequenceEngine,
   DelegatingEngine,
+  IntentEngine,
   ProposalEngine,
   SelectionEngine,
   SelectionEngineWithIntent,
@@ -39,7 +41,10 @@ import { quoteContained, reinsertQuote } from "../core/speech.js";
 import {
   budgetWarningMessage,
   DEFAULT_TURN_CALL_BUDGET,
+  DEFAULT_TURN_TIME_BUDGET_MS,
   evaluateBudget,
+  evaluateTurnTime,
+  turnTimeWarningMessage,
   type TurnOutcome,
   type TurnTelemetry,
 } from "../core/telemetry.js";
@@ -84,6 +89,13 @@ export type EngineDependencies = {
   proposalEngine: ProposalEngine;
   selectionEngine: SelectionEngine;
   consequenceEngine: ConsequenceEngine;
+  /**
+   * PLAN_V2 Phase 1: the intent-call engine for the TURN_LOOP=v2 path
+   * (single structured call replacing proposal+selection). Optional so
+   * existing callers keep compiling; the v2 path throws a clear error
+   * when it is missing. Wired by createLlmEngines (LLMIntentEngine).
+   */
+  intentEngine?: IntentEngine;
   logger: Logger;
   config?: EngineConfig;
   /** Resolve free-form user action text (UI layer). Required for user turns. */
@@ -688,6 +700,9 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   const config = depsConfig(deps);
   const logger = deps.logger;
   const actor = getCurrentActor(world);
+  // PLAN_V2 Phase 1: wall-clock start for the turn_time_exceeded
+  // telemetry gate (measured over the whole turn, telemetry only).
+  const turnWallStart = Date.now();
 
   // Phase 6: per-turn provider-call counter + stage timings. Telemetry
   // only — the counter never aborts or alters the turn.
@@ -792,6 +807,40 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       output: action,
     });
   } else {
+    // PLAN_V2 Phase 1: TURN_LOOP=v2 replaces proposal+selection with the
+    // single intent call. The shared screening below still runs — it
+    // operates on the synthesized `proposal`/`selection`, and with an
+    // empty option set it degrades to its deterministic fallbacks (the
+    // selection engine is never invoked on this path).
+    let proposal: ProposalResult;
+    let selection: SelectionResult;
+    if (readTurnLoopV2()) {
+      const intentEngine = turnDeps.intentEngine;
+      if (intentEngine === undefined) {
+        throw new Error(
+          "TURN_LOOP=v2 requires an IntentEngine on EngineDependencies " +
+          "(wire LLMIntentEngine via createLlmEngines, or inject one in tests)",
+        );
+      }
+      // The intent call occupies the proposal slot in the turn budget —
+      // it is the turn's decision-stage provider call.
+      const intentStart = Date.now();
+      callCounter.note("proposal", intentEngine);
+      const intentResult = await intentEngine.intent(world, actor.id);
+      proposalMs = Date.now() - intentStart;
+      report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: "intent engine done — action decided" });
+      report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `intent engine — ${actor.id} is deciding…` });
+      selection = {
+        action: intentResult.action,
+        reasoning: "v2 intent path: the intent call decides the action directly",
+      };
+      proposal = {
+        suggestions: [],
+        reasoning: "v2 intent path: proposal+selection replaced by the intent call",
+      };
+      selectionStart = Date.now();
+      report(turnDeps, { stage: "selection_done", actorId: actor.id, message: "intent engine done — action chosen" });
+    } else {
     // Phase 3 (intent-first, behind flags, default OFF): when the Laya
     // layer is on with selection routing, run the intent cascade first and
     // narrow the proposal prompt to the decided intent. Any cascade failure
@@ -808,7 +857,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // Phase 6: count + time the proposal invocation when provider-backed.
     const proposalStart = Date.now();
     callCounter.note("proposal", turnDeps.proposalEngine);
-    const proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
+    proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
     // Stage 3 C2/C3: a wrapping engine (Laya cascade) may have delegated
     // to its fallback internally — count that provider call and log why.
     surfaceDelegation("proposal", turnDeps.proposalEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
@@ -826,7 +875,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // screening, and the renderability re-pick below.
     selectionStart = Date.now();
     callCounter.note("selection", turnDeps.selectionEngine);
-    const selection = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
+    selection = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
       world,
       actor.id,
       proposal.suggestions,
@@ -835,6 +884,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // Stage 3 C2/C3: surface an internal fallback delegation, if any.
     surfaceDelegation("selection", turnDeps.selectionEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
     report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
+    } // PLAN_V2 Phase 1: end of the v1 proposal+selection block
     let actionText = stripCoordinateMentions(stripSelectionPrefix(selection.action));
     // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
     // on it. A POV-swapped pick ("Anton walks…" on Dana's turn) or a
@@ -1150,6 +1200,24 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     turnDeps.onTurnTelemetry?.(telemetry);
   } catch {
     // Telemetry hooks must never break the turn.
+  }
+
+  // PLAN_V2 Phase 1: wall-time budget — telemetry only, never an abort.
+  // A slow turn that avoids a fallback beats a fast fallback. Mirrors the
+  // `budget_exceeded` event above (module "turn", loud error line).
+  const timeBudgetMs = config.turnTimeBudgetMs ?? DEFAULT_TURN_TIME_BUDGET_MS;
+  const turnWallMs = Date.now() - turnWallStart;
+  if (evaluateTurnTime(turnWallMs, timeBudgetMs).exceeded) {
+    logger.log({
+      module: "turn",
+      event: "turn_time_exceeded",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { turnWallMs, timeBudgetMs },
+      error: turnTimeWarningMessage(action.actorId, turnWallMs, timeBudgetMs),
+    });
   }
 
   await autosave(nextWorld, turnDeps);
