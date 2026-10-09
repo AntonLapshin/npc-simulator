@@ -268,6 +268,15 @@ export type ConsequenceResult = {
    * the flag existed.
    */
   fallback?: boolean;
+  /**
+   * PLAN_V2 Phase 4 (v2 path only): true when the render was accepted
+   * despite prose-validation failures (one retry burned). A flawed
+   * paragraph beats a dead turn — the (not done) sentinel family stays
+   * dead, so the result is marked honest rather than silently accepted
+   * or rewritten. `isFallbackConsequence` ignores this flag: the turn
+   * was rendered, not fallen back.
+   */
+  narrateAcceptedDespiteViolations?: boolean;
 };
 
 /**
