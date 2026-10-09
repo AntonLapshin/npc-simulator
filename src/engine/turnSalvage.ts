@@ -6,8 +6,11 @@
 // degraded wording salvage (tier 2), and the "valid-JSON-at-all-costs"
 // format-collapse tier. Phase 1: movement is engine-owned, so salvage
 // candidates already carry the engine-computed position — there is no
-// movement-repair tier anymore. Pure logic except for the honest-history
-// note bookkeeping (see getHonestHistoryNote).
+// movement-repair tier anymore. Phase 3: manipulation is engine-owned too,
+// so salvage candidates already carry the engine-executed prop/object
+// patches — the prop-stub repair tiers are deleted with the repair path
+// they served. Pure logic except for the honest-history note bookkeeping
+// (see getHonestHistoryNote).
 
 import type {
   Action,
@@ -27,7 +30,6 @@ import {
   validateNarrativeActors,
   validateObserverSubject,
 } from "./validate/narrative.js";
-import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 import {
   hasSpeechToken,
@@ -266,60 +268,6 @@ export function sanitizeThoughts(
   return thoughts;
 }
 
-/** True when an object within interact radius matches the prop noun. */
-function propObjectNearby(world: World, actorId: string, nounRe: RegExp): boolean {
-  const actor = world.actors.find((a) => a.id === actorId);
-  if (!actor) return false;
-  return world.scene.objects.some((o) => {
-    if (!nounRe.test(o.id) && !nounRe.test(o.name)) return false;
-    const cx = o.x + o.w / 2;
-    const cy = o.y + o.h / 2;
-    return Math.hypot(actor.x - cx, actor.y - cy) <= OBJECT_INTERACT_RADIUS + 1e-9;
-  });
-}
-
-/**
- * Items C4/C11 (S6): deterministic prop stubs for the salvage path. Small
- * models narrate object use ("types on her laptop", "grabs the mug") but
- * never emit the prop patch, and the turn then spirals into retries.
- * When the ACTION text carries typing verbs or grab/take/hold + cup/mug,
- * stub the matching prop on the acting actor — but only when a matching
- * object is within OBJECT_INTERACT_RADIUS (4) cells (the arch-fixes
- * proximity rule): never invent a laptop out of thin air. Never overrides
- * an existing prop patch or an already-held prop. Returns a repaired
- * clone, or null when no stub applies.
- */
-function repairMissingPropStub(
-  world: World,
-  action: Action,
-  candidate: ConsequenceResult,
-): ConsequenceResult | null {
-  const existing = candidate.actorPatches.find((p) => p.actorId === action.actorId);
-  if (existing?.prop !== undefined) return null;
-  const actor = world.actors.find((a) => a.id === action.actorId);
-  if (!actor || (actor.prop ?? null) !== null) return null;
-  const text = action.text;
-  const wantsLaptop = /\btyp(e|es|ing|ed)\b/i.test(text);
-  const cupNoun = /\b(cup|mug)s?\b/i;
-  const grabVerb = /\b(grab|grabs|grabbing|take|takes|taking|took|hold|holds|holding|pick\s+up|picks?\s+up)\b/i;
-  const wantsCup = grabVerb.test(text) && cupNoun.test(text);
-  let stub: "laptop" | "cup" | null = null;
-  if (wantsLaptop && propObjectNearby(world, action.actorId, /laptop/i)) {
-    stub = "laptop";
-  } else if (wantsCup && propObjectNearby(world, action.actorId, /mug|cup/i)) {
-    stub = "cup";
-  }
-  if (stub === null) return null;
-  const repaired: ConsequenceResult = structuredClone(candidate);
-  const target = repaired.actorPatches.find((p) => p.actorId === action.actorId);
-  if (target) {
-    target.prop = stub;
-  } else {
-    repaired.actorPatches.push({ actorId: action.actorId, prop: stub });
-  }
-  return repaired;
-}
-
 /**
  * Exp-3 item 3 (S4/M4): deterministic quote reinsertion — Phase 2: now a
  * pure backstop. The 8B drops long quotes on every attempt (tick 19:
@@ -349,6 +297,9 @@ function repairDroppedQuotes(
   semantics: ActionSemantics,
   cfg: EngineConfig,
   logger?: Logger,
+  // Phase 3: the engine's manipulation outcome — revalidation runs the
+  // phantom-manipulation gate and the recipient turn-discipline exemption.
+  engineManipulation?: import("./manipulationExecutor.js").ManipulationOutcome | null,
 ): ConsequenceResult | null {
   const exactQuote = extractExactQuote(action.text);
   if (exactQuote === null) return null;
@@ -366,7 +317,7 @@ function repairDroppedQuotes(
     repaired.effects.spoke = true;
     repaired.effects.quotedSpeech = [exactQuote];
   }
-  const revalidation = validateConsequence(world, repaired, action, semantics, cfg);
+  const revalidation = validateConsequence(world, repaired, action, semantics, cfg, engineManipulation);
   if (!revalidation.valid) return null;
   if (recheckAcceptedProse(world, action, repaired).length > 0) return null;
   logger?.log({
@@ -388,6 +339,14 @@ export function trySalvageConsequence(
   semantics: ActionSemantics | undefined,
   logger?: Logger,
   cfg: EngineConfig = defaultConfig,
+  /**
+   * Phase 3: the engine's manipulation outcome for this turn. Salvage
+   * candidates already carry the engine-executed prop/object patches
+   * (merged in-loop before validation failed); the outcome lets
+   * revalidation run the phantom-manipulation gate and the recipient
+   * turn-discipline exemption against them.
+   */
+  engineManipulation?: import("./manipulationExecutor.js").ManipulationOutcome | null,
 ): { salvaged: ConsequenceResult; warnings: ValidationError[] } | null {
   const evaluate = (eligible: boolean, reason: string, blockers: ValidationError[] = []): null => {
     // Exp-4 item 8: every salvage entry evaluation is logged (eligible /
@@ -526,7 +485,7 @@ export function trySalvageConsequence(
   const accept = (
     c: ConsequenceResult,
   ): { salvaged: ConsequenceResult; warnings: ValidationError[] } | null => {
-    const revalidation = validateConsequence(world, c, action, semantics, cfg);
+    const revalidation = validateConsequence(world, c, action, semantics, cfg, engineManipulation);
     if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
       // Exp-2 item 5 (S2): final accept gate — the tick-10/11 narratives
       // passed the full suite outright, so the accepted narrative gets one
@@ -551,7 +510,7 @@ export function trySalvageConsequence(
       // (tick 19 died 3× on speech.dropped_words). The repair is marked
       // with a synthetic warning so history stays honest about the engine
       // intervention (the turn is valid, not model-clean).
-      const quoteRepaired = repairDroppedQuotes(world, action, c, semantics, cfg, logger);
+      const quoteRepaired = repairDroppedQuotes(world, action, c, semantics, cfg, logger, engineManipulation);
       if (quoteRepaired) {
         evaluate(true, "dropped quotes reinserted deterministically (speech nits repaired, not downgraded)");
         return {
@@ -585,13 +544,12 @@ export function trySalvageConsequence(
   // observer discipline stay hard.
   const tierBase = candidate;
   const withAddressee = repairMissingAddressee(world, action, tierBase, semantics, cfg);
-  const propBase = withAddressee ?? tierBase;
-  // Items C4/C11 (S6): deterministic prop stubs (typing→prop:laptop,
-  // grab+cup/mug→prop:cup) — repair the object-wording miss instead of
-  // merely downgrading it to a warning.
-  const withProp = repairMissingPropStub(world, action, propBase);
-  const tiered = withProp ?? propBase;
-  const revalidation = validateConsequence(world, tiered, action, semantics, cfg);
+  // Phase 3: the salvage prop stub is deleted — the engine executor
+  // already applied the manipulation in-loop (before validation), so
+  // salvage candidates carry the engine's prop/object patches and there
+  // is nothing left to stub. Wording misses downgrade to warnings below.
+  const tiered = withAddressee ?? tierBase;
+  const revalidation = validateConsequence(world, tiered, action, semantics, cfg, engineManipulation);
   // Exp-2 item 5 (S2): same final accept gate as accept() above — the
   // tier-2 downgrade must not launder a corrupt narrative either.
   const tierGateErrors = recheckAcceptedProse(world, action, tiered);
@@ -608,11 +566,9 @@ export function trySalvageConsequence(
   } else if (revalidation.valid || isSpeechOnlyFailure(revalidation.errors)) {
     evaluate(
       true,
-      withProp !== null
-        ? "movement kept + prop stub patched (speech nits downgraded to warnings)"
-        : withAddressee !== null
-          ? "movement kept + addressee reaction patched (speech nits downgraded to warnings)"
-          : "valid patches kept (speech nits downgraded to warnings)",
+      withAddressee !== null
+        ? "movement kept + addressee reaction patched (speech nits downgraded to warnings)"
+        : "valid patches kept (speech nits downgraded to warnings)",
     );
     return withHonestNote({
       salvaged: tiered,
