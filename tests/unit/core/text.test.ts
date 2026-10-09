@@ -9,6 +9,7 @@ import {
   hasSpeechToken,
   hasStationaryWorkToken,
   maskNonLocomotion,
+  maskQuotedSpans,
   maskResumedActivity,
   normalizeQuotes,
   parseActionQuotes,
@@ -159,5 +160,20 @@ describe("extractDirectionHint", () => {
 
   it("returns null when no direction is named", () => {
     expect(extractDirectionHint("Look around the room.")).toBeNull();
+  });
+});
+
+describe("maskQuotedSpans", () => {
+  it("masks double-quoted speech", () => {
+    expect(maskQuotedSpans('Anton says "I\'m going to get my laptop."')).toBe("Anton says  ");
+  });
+
+  it("masks single-quoted speech but keeps contractions", () => {
+    expect(maskQuotedSpans("Dana greets her: 'Good morning.'")).toBe("Dana greets her:  ");
+    expect(maskQuotedSpans("I'm walking to the door.")).toBe("I'm walking to the door.");
+  });
+
+  it("leaves unquoted prose untouched", () => {
+    expect(maskQuotedSpans("Anton walks to the door.")).toBe("Anton walks to the door.");
   });
 });

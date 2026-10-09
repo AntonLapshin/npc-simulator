@@ -49,6 +49,18 @@ export function singleQuotedSegments(text: string): string[] {
 }
 
 /**
+ * Phase 4: mask quoted speech spans (the character talking, not the
+ * narrator describing). Grounding validators (movement/pose/manipulation)
+ * must not read locomotion or object claims out of dialogue —
+ * "I'm going to get my laptop" inside quotes is speech, not a walk.
+ */
+export function maskQuotedSpans(text: string): string {
+  return text
+    .replace(/"[^"]*"/g, " ")
+    .replace(SINGLE_QUOTE_RE, "$1 ");
+}
+
+/**
  * F35: the single canonical "resumed activity" mask. Resuming a task is
  * not relocating ("return/back to typing/work/...")
  */
@@ -207,4 +219,23 @@ export function extractDirectionHint(text: string): DirectionHint | null {
   const m = /\b(north|south|east|west)\b/i.exec(text);
   if (!m) return null;
   return m[1]!.toLowerCase() as DirectionHint;
+}
+
+/**
+ * Phase 4: deterministic pose plan from the action text. The render
+ * contract is prose-only, so pose changes (sit down / stand up) are
+ * engine-executed like movement: an explicit sit/stand verb in the
+ * action sets the pose deterministically, and the render call narrates
+ * it from the executed facts. Null = no pose change (the actor keeps
+ * their current pose). Deliberately narrow — "standing beside it" is
+ * posture prose, not a pose change (mirrors NARRATIVE_POSE_CHANGE_RE's
+ * narrowness on the narrative side).
+ */
+export type PlannedPose = "sit" | "stand";
+
+export function planPose(text: string): PlannedPose | null {
+  const t = maskNonLocomotion(text);
+  if (/\b(sits?|sitting|sat|takes?\s+a\s+seat|seated)\b/i.test(t)) return "sit";
+  if (/\b(stands?|standing|stood|gets?\s+up|stand\s+up)\b/i.test(t)) return "stand";
+  return null;
 }

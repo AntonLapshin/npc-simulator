@@ -12,7 +12,7 @@ import {
   buildRosterDisciplineLine,
   rosterExampleActors,
 } from "../../src/llm/rosterDiscipline.js";
-import { consequenceSuffix, FULLY_SPOKEN_ACTION_LINE } from "../../src/llm/prompts.js";
+import { renderSuffix, FULLY_SPOKEN_ACTION_LINE } from "../../src/llm/prompts.js";
 import { LLMConsequenceEngine } from "../../src/llm/llmConsequenceEngine.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { createTestLogger } from "../../src/logging/logger.js";
@@ -44,34 +44,24 @@ describe("exp-2 item 1: roster discipline in the consequence prompt", () => {
     expect(line).toMatch(/INVALID/);
   });
 
-  it("positive examples use the real roster, never Anton/Tanya, for office.json ids", () => {
-    for (const mode of ["short", "full"] as const) {
-      const s = consequenceSuffix(mode, ["jeff", "ana", "dan"]);
-      // Exp-6 item 1 replaced the copyable "X greets the office." example
-      // with a quoted-speech example — still roster-parameterized.
-      expect(s).toContain('Jeff says, \\"Morning, everyone');
-      expect(s).toContain('"actorId": "jeff"');
-      expect(s).not.toContain("Anton greets the office");
-      expect(s).not.toContain("Anton walks toward Tanya");
-      expect(s).not.toContain("Anton says");
-    }
-    const full = consequenceSuffix("full", ["jeff", "ana", "dan"]);
-    expect(full).toContain("Jeff walks toward Ana");
-    expect(full).toContain('"destinationActorId": "ana"');
+  it("render suffix names the real roster, never Anton/Tanya, for office.json ids", () => {
+    const s = renderSuffix(["jeff", "ana", "dan"]);
+    // Phase 4: the render prompt carries the executed-facts contract plus
+    // the roster-parameterized discipline lines — never patch examples.
+    expect(s).toContain('"jeff", "ana", "dan"');
+    expect(s).toContain("Jeff");
+    expect(s).not.toContain("Anton greets the office");
+    expect(s).not.toContain("Anton walks toward Tanya");
+    expect(s).not.toContain("Anton says");
+    expect(s).not.toContain("actorPatches");
+    expect(s).toContain("FULLY-SPOKEN ACTION");
+    expect(s).toContain("ECHO-BAN");
+    expect(s).toContain("STUB-BAN");
   });
 
-  it("Anton/Tanya roster keeps the legacy examples (exp-6 speech shape)", () => {
-    const short = consequenceSuffix("short", ["anton", "tanya", "dana"]);
-    expect(short).toContain('Anton says, \\"Morning, everyone');
-    expect(short).toContain('"actorId": "anton"');
-    const full = consequenceSuffix("full", ["anton", "tanya", "dana"]);
-    expect(full).toContain("Anton walks toward Tanya");
-    expect(full).toContain('"destinationActorId": "tanya"');
-  });
-
-  it("empty roster keeps the legacy examples (exp-6 speech shape)", () => {
-    expect(consequenceSuffix("short")).toContain('Anton says, \\"Morning, everyone');
-    expect(consequenceSuffix("full")).toContain("Anton walks toward Tanya");
+  it("render suffix parameterizes the stub-ban by the roster actor name", () => {
+    expect(renderSuffix(["anton", "tanya", "dana"])).toContain('BAD: "Anton greets the office."');
+    expect(renderSuffix()).toContain('BAD: "Anton greets the office."');
   });
 });
 
@@ -94,17 +84,11 @@ describe("exp-2 item 3: fully-spoken canonical form", () => {
     expect(FULLY_SPOKEN_ACTION_LINE).toMatch(/non-speech frame/);
   });
 
-  it("both suffix modes carry the canonical line when roster ids are given", () => {
-    for (const mode of ["short", "full"] as const) {
-      const s = consequenceSuffix(mode, ["jeff", "ana", "dan"]);
+  it("the render suffix carries the canonical line with and without roster ids", () => {
+    for (const s of [renderSuffix(["jeff", "ana", "dan"]), renderSuffix()]) {
       expect(s).toContain("FULLY-SPOKEN ACTION");
       expect(s).toContain("quote it VERBATIM");
     }
-  });
-
-  it("the canonical line is present without roster ids too (speech turns happen everywhere)", () => {
-    expect(consequenceSuffix("short")).toContain("FULLY-SPOKEN ACTION");
-    expect(consequenceSuffix("full")).toContain("FULLY-SPOKEN ACTION");
   });
 });
 
@@ -170,9 +154,13 @@ describe("exp-2 item 4 (Phase 3): no prop hint in the consequence prompt", () =>
     const world = loadOfficeScenario();
     const action: Action = { actorId: "ana", text: "Ana keeps typing on her laptop." };
     const result = await engine.resolve(world, action);
-    // The model-emitted prop patch survives the raw engine resolve —
-    // stripping happens in the turn orchestrator's in-loop merge.
-    expect(result.actorPatches[0]).toMatchObject({ actorId: "ana", prop: "laptop" });
+    // Phase 4: old-schema keys are stripped by the schema and ignored —
+    // the render contract is prose-only.
+    expect(result).not.toHaveProperty("actorPatches");
+    expect(result).not.toHaveProperty("objectPatches");
+    expect(result).not.toHaveProperty("effects");
+    const repairs = logger.store.byEvent("consequence_lenient_repair");
+    expect(repairs.length).toBeGreaterThanOrEqual(1);
     const completed = logger.store.all().find((e) => e.event === "consequence_completed");
     expect(completed).toBeDefined();
     const prompt = String((completed as { prompt?: unknown }).prompt ?? "");
