@@ -88,7 +88,7 @@ function silentResult(narrative: string): ConsequenceResult {
 
 function renderFacts(): RenderFacts {
   return {
-    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 2, y: 2, engineManipulation: null,
   };
 }
