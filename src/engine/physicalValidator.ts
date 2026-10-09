@@ -23,10 +23,12 @@ import {
 import {
   validateActionVerbCoverage,
   validateExplanationCoverage,
+  validateManipulationGrounding,
   validateObjectGrounding,
   validateSitPoseSeating,
   OBJECT_INTERACT_RADIUS,
 } from "./validate/objects.js";
+import type { ManipulationOutcome } from "./manipulationExecutor.js";
 import {
   validateActingActorPresence,
   validateAddresseePatch,
@@ -68,6 +70,15 @@ export function validateConsequence(
   action?: Action,
   semantics?: ActionSemantics,
   cfg: EngineConfig = defaultConfig,
+  /**
+   * Phase 3: the engine's manipulation outcome for this turn (when the
+   * caller ran the executor). Lets the validator (a) exempt the engine's
+   * own hand-over recipient prop patch from observer turn-discipline —
+   * turn discipline polices the MODEL, not the engine — and (b) run the
+   * phantom-manipulation gate against the executed plan. Undefined =
+   * unknown (older callers): the gate fails open.
+   */
+  engineManipulation?: ManipulationOutcome | null,
 ): ValidationResult {
   const errors: ValidationError[] = [];
 
@@ -179,7 +190,23 @@ export function validateConsequence(
           message: `actor ${patch.actorId}: only the acting actor (${action.actorId}) may move; observers must not change position`,
         });
       }
-      if (patch.state !== undefined || patch.pose !== undefined || patch.prop !== undefined) {
+      // Phase 3: the engine's own hand-over recipient prop patch is not
+      // a model turn-discipline violation — turn discipline polices the
+      // MODEL, and the executor strips every model-emitted prop patch
+      // before the engine applies its own. Match the exact engine patch
+      // (recipient id + prop value) so a model patch can't ride along.
+      const isEngineRecipientProp =
+        patch.prop !== undefined &&
+        engineManipulation?.plan.kind === "hand-over" &&
+        engineManipulation.plan.targetActorId === patch.actorId &&
+        engineManipulation.actorProps.some(
+          (ap) => ap.actorId === patch.actorId && ap.prop === patch.prop,
+        );
+      if (
+        patch.state !== undefined ||
+        patch.pose !== undefined ||
+        (patch.prop !== undefined && !isEngineRecipientProp)
+      ) {
         errors.push({
           code: "turn_discipline.observer_state_change",
           message: `actor ${patch.actorId}: only the acting actor (${action.actorId}) may change state/pose/prop; observers may only update thoughts/emotion/memories/beliefs/relationships`,
@@ -347,6 +374,12 @@ export function validateConsequence(
     // claims.
     errors.push(...validateThoughtGrounding(world, action, normalized));
     errors.push(...validateObjectGrounding(world, normalized, action));
+    // Phase 3: engine-owned manipulation — the phantom-manipulation
+    // gate: prose describing a pick-up/put-down/hand-over the engine did
+    // not execute is fiction.
+    errors.push(
+      ...validateManipulationGrounding(world, action, normalized, engineManipulation),
+    );
     // Exp-3 item 8 (S6): pose:sit must be backed by a chair; state labels
     // must be grammatical and point at the right landmark.
     errors.push(...validateSitPoseSeating(world, normalized, action));
@@ -402,6 +435,7 @@ export {
 export {
   validateActionVerbCoverage,
   validateExplanationCoverage,
+  validateManipulationGrounding,
   validateObjectGrounding,
   validateSitPoseSeating,
 } from "./validate/objects.js";

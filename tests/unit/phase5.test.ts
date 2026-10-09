@@ -98,7 +98,8 @@ describe("phase5 slim objective snapshot", () => {
     expect(ctx).toContain("OBJECT IDS");
     // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
     expect(ctx).toContain("EXACT QUOTE RULE");
-    expect(ctx).toContain("omitting the verb from the narrative never excuses omitting the patch");
+    // Phase 3: the patch demand is replaced by the engine-ownership rule.
+    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
     expect(ctx).toContain("at most 6 cells");
     expect(ctx).toContain("All actor positions");
   });

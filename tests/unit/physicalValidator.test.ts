@@ -441,7 +441,7 @@ describe("physicalValidator", () => {
     ).toEqual({ valid: true, errors: [] });
   });
 
-  it("rejects sipping/typing grounding with nothing held and no patch", () => {
+  it("sipping/typing no longer demands a model patch (Phase 3: engine-owned)", () => {
     const world = makeTinyWorld();
     expect(world.actors.find((a) => a.id === "u")!.prop).toBeNull();
     const result: ConsequenceResult = {
@@ -450,13 +450,16 @@ describe("physicalValidator", () => {
       objectPatches: [],
       reasoning: "r",
     };
+    // No cup in this world: the engine plans nothing, and sipping is not
+    // a transfer event — no patch is demanded from the model anymore.
     const v = validateConsequence(
       world,
       result,
       { actorId: "u", text: "Take a swig of coffee." },
       stillSemantics(),
+      undefined,
+      null,
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/sipping\/drinking\/typing|prop/);
+    expect(v.valid).toBe(true);
   });
 });

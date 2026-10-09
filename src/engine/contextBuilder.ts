@@ -4,14 +4,12 @@ import { defaultConfig } from "../config.js";
 import { sanitizeDisplayText } from "../util/sanitize.js";
 import { distance } from "./geometry.js";
 import {
-  findManipulatedObjects,
   mentionsObjectVariant,
   objectMentionVariants,
   resolveDestinationActorId,
   resolveDestinationObjectId,
   resolveMentionedActorId,
 } from "./deterministicSemantics.js";
-import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
 import {
   getVisibleActors,
   getAudibleActors,
@@ -21,6 +19,7 @@ import {
 import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { executedMovementFacts, type MovementOutcome } from "./movementExecutor.js";
 import { exactQuoteFacts } from "./speechExecutor.js";
+import { executedManipulationFacts, type ManipulationOutcome } from "./manipulationExecutor.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -761,82 +760,12 @@ export function buildObjectIdCatalog(world: World): string {
   );
 }
 
-/**
- * Exp-6 item 8 (object interaction), strengthened per Q7: affordance nudge.
- * Zero object touches across 70+ turns in four experiments is structural:
- * the engine punishes missing object/prop patches after the fact but never
- * *demands* them up front. Two tiers:
- * - STRONG: the action carries a manipulation verb or manipulates an
- *   object in a grab clause ("open the laptop") — the consequence is
- *   INCOMPLETE without the patch, stated as a hard requirement.
- * - SOFT: the action merely names a manipulable object (walk to the coffee
- *   machine) — one eliciting line so the consequence considers using it
- *   instead of narrating around it.
- * Both tiers name exact object ids, the required patch shape, and the
- * physical-reach rule (F4: within OBJECT_INTERACT_RADIUS cells). Building
- * fabric (walls/windows/doors/signs) is never manipulable.
- * Returns undefined when the action names nothing manipulable.
- */
-const MANIPULATION_VERBS =
-  "pour|pours|pouring|brew|brews|brewing|open|opens|opening|pick|picks|picking|grab|grabs|grabbing|" +
-  "hold|holds|holding|carry|carries|carrying|sip|sips|sipping|drink|drinks|drinking|fill|fills|filling|" +
-  "set\\s+up|boot|boots|booting|move|moves|moving|hand|hands|handing|pass|passes|passing|give|gives|giving|" +
-  "sit|sits|sitting|sat|stand|stands|standing|stood";
-
-const NON_MANIPULABLE_RE = /wall|window|door|sign/i;
-
-/** Manipulable objects the action text names (by id/name), even without a manipulation verb. */
-function findNamedManipulableObjects(
-  world: World,
-  actionText: string,
-): { id: string; name: string }[] {
-  const out: { id: string; name: string }[] = [];
-  for (const o of world.scene.objects) {
-    if (NON_MANIPULABLE_RE.test(`${o.id} ${o.name}`)) continue;
-    if (objectMentionVariants(o).some((v) => mentionsObjectVariant(actionText, v))) {
-      out.push({ id: o.id, name: o.name });
-    }
-  }
-  return out;
-}
-
-export function buildObjectAffordanceNudge(world: World, action: Action): string | undefined {
-  const verbHit = new RegExp(`\\b(?:${MANIPULATION_VERBS})\\b`, "i").test(action.text);
-  // Objects the action text manipulates in a grab/manipulation clause
-  // ("open the laptop" → anton_laptop; "walk to the desk to set up the
-  // laptop" → the laptop, not the desk). Building fabric is not
-  // manipulable.
-  const manipulated = findManipulatedObjects(world, action.text).filter(
-    (o) => !NON_MANIPULABLE_RE.test(`${o.id} ${o.name}`),
-  );
-  if (verbHit || manipulated.length > 0) {
-    const target =
-      manipulated.length > 0
-        ? manipulated.map((o) => `"${o.id}" (${o.name})`).join(", ")
-        : "the named object (resolve its exact id from OBJECT IDS above)";
-    const patchFor =
-      manipulated.length > 0
-        ? manipulated.map((o) => `"${o.id}"`).join(", ")
-        : "the object";
-    return (
-      `OBJECT AFFORDANCE: the action manipulates ${target} — the consequence is INCOMPLETE without its patch: ` +
-      `set 'prop' (cup|laptop|null) and/or an objectPatch for ${patchFor} reflecting the change (new description, position, or passable/blocksVision/blocksSound flags). ` +
-      `PHYSICAL REACH: moving/resizing/toggling an object requires the acting actor within ${OBJECT_INTERACT_RADIUS} cells of it — walk up first, then manipulate. ` +
-      `A verb like pour/open/pick up/hold/sit with no backing patch fails validation — emit the patch, do not just narrate the verb.`
-    );
-  }
-  // Q7 soft tier: the action names a manipulable object without a
-  // manipulation verb ("walk to the coffee machine", "stand by the desk").
-  // Elicit the interaction instead of letting the turn narrate past it.
-  const named = findNamedManipulableObjects(world, action.text);
-  if (named.length === 0) return undefined;
-  const target = named.map((o) => `"${o.id}" (${o.name})`).join(", ");
-  return (
-    `OBJECT AFFORDANCE: the action names ${target}. If the actor uses, touches, or changes it in any way, ` +
-    `that MUST be backed by an objectPatch for its exact id (or 'prop' for a held item) — narrating the use without the patch fails validation. ` +
-    `Manipulation requires being within ${OBJECT_INTERACT_RADIUS} cells of the object.`
-  );
-}
+// Phase 3: the object-affordance nudge (Exp-6 item 8 / Q7) is deleted.
+// It demanded object/prop patches from the model up front — a dead
+// instruction now that manipulation is engine-owned (the engine plans the
+// manipulation from the action text and applies it before validation, and
+// every model-emitted object/prop patch is stripped). The EXECUTED
+// MANIPULATION facts in the consequence context carry what happened.
 
 // Proposal and Selection contexts contain ONLY what the current actor
 // perceives, remembers, believes, and knows — never another actor's
@@ -1184,12 +1113,14 @@ export function buildConsequenceContext(
   // character-for-character instead of inventing dialogue.
   // Undefined = unknown (older callers); null = no quoted speech.
   exactQuote?: string | null,
+  // Phase 3: the engine already executed this turn's manipulation — the
+  // facts below tell the render call what happened so it narrates
+  // honestly instead of emitting objectPatches/prop patches.
+  // Undefined = unknown (older callers); null = no manipulation executed.
+  engineManipulation?: ManipulationOutcome | null,
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action, cfg);
-  // Exp-6 item 8: demand the object/prop patch up front when the action
-  // names a manipulable object — don't just punish its absence later.
-  const affordanceNudge = buildObjectAffordanceNudge(world, action);
   const lines = [
     "Objective Snapshot (slim — nearby actors/objects + named targets; far state omitted for budget)",
     "",
@@ -1207,6 +1138,11 @@ export function buildConsequenceContext(
     // Phase 2: engine-owned speech — the render call copies the
     // engine-dictated exact quote verbatim; it never invents dialogue.
     ...(exactQuote !== undefined ? exactQuoteFacts(world, action.actorId, exactQuote) : []),
+    // Phase 3: engine-owned manipulation — the render call narrates the
+    // already-executed manipulation; it never emits objectPatches/props.
+    ...(engineManipulation !== undefined
+      ? executedManipulationFacts(world, action.actorId, engineManipulation)
+      : []),
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "MOVEMENT IS ENGINE-EXECUTED: the EXECUTED MOVEMENT section above is what already happened this turn — narrate it honestly and never invent coordinates. Do not emit x/y for any actor (any coordinates you emit are ignored).",
@@ -1218,10 +1154,8 @@ export function buildConsequenceContext(
     "ROSTER RULE: " + buildRosterAnchor(world),
     buildRelationshipRefresh(world, action.actorId),
     "PRONOUN RULE: preserve every actor's pronouns exactly as used in their persona and the world above — never flip he/him to she/her or vice versa. If the scenario says Dana is he/him, every verb and pronoun for Dana stays he/him.",
-    "POSE/PROP/OBJECT RULE: when the action observably changes the body or the world, say so in patches — sitting/standing/kneeling sets 'pose'; picking up/holding/carrying a cup/laptop sets 'prop' (null when put down); pouring coffee, opening a laptop, moving a bag, or changing furniture sets 'objectPatches'. Sitting at a desk without a pose patch, or pouring coffee without an object patch, is an incomplete consequence. Handshake/hug/hand-over sets contactActorId and ends adjacent; omitting the verb from the narrative never excuses omitting the patch.",
-    // Exp-6 item 8: demand the object/prop patch up front when the action
-    // names a manipulable object — don't just punish its absence later.
-    ...(affordanceNudge ? [affordanceNudge] : []),
+    "POSE RULE: when the action observably changes the body, say so in patches — sitting/standing/kneeling sets 'pose'. Sitting at a desk without a pose patch is an incomplete consequence.",
+    "OBJECT MANIPULATION IS ENGINE-EXECUTED: pick-up, put-down, and hand-over are executed by the engine (see EXECUTED MANIPULATION above) — narrate the executed facts honestly. Never emit objectPatches and never set 'prop' on any actor: any objectPatches or prop you emit are ignored. Describing a pick-up/put-down/hand-over the engine did not execute fails validation. Handshake/hug/hand-over sets contactActorId and ends adjacent; omitting the verb from the narrative never excuses inventing a manipulation.",
     "",
     `Perceiving actors (MUST each get an actorPatch with a fresh 'thoughts' reaction, even if nothing else changes): ${
       perceivers.length > 0 ? perceivers.map((a) => `${a.name} (${a.id})`).join(" | ") : "(acting actor only)"

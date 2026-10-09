@@ -11,7 +11,8 @@ import { isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
 import { applyConsequence } from "../../src/engine/patchApplier.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { KNOWN_WORLD_VERSIONS, normalizeHistoryEntry, NOT_DONE_SENTINEL } from "../../src/types.js";
-import { buildObjectAffordanceNudge, historyVisibleTo } from "../../src/engine/contextBuilder.js";
+import { buildConsequenceContext, historyVisibleTo } from "../../src/engine/contextBuilder.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { accumulateTurnUsage } from "../../src/engine/turnOrchestrator.js";
 import { Logger } from "../../src/logging/logger.js";
 import { hist, makeTinyWorld, errorText } from "../helpers.js";
@@ -261,33 +262,34 @@ describe("Q1: history records the narrative", () => {
   });
 });
 
-describe("Q7: strengthened object-affordance nudge", () => {
-  it("emits a STRONG nudge for manipulation verbs, citing the reach rule", () => {
+describe("Q7 (Phase 3): engine-owned manipulation replaces the affordance nudge", () => {
+  it("consequence context carries EXECUTED MANIPULATION facts for a pick-up", () => {
     const world = makeTinyWorld();
     world.scene.objects.push({
       id: "mug", name: "Mug", description: "A mug.",
       x: 1, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
     });
-    const nudge = buildObjectAffordanceNudge(world, { actorId: "u", text: "Pick up the mug." });
-    expect(nudge).toBeDefined();
-    expect(nudge!).toContain("INCOMPLETE without its patch");
-    expect(nudge!).toContain(`${OBJECT_INTERACT_RADIUS} cells`);
+    const action = { actorId: "u", text: "Pick up the mug." };
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, outcome);
+    expect(ctx).toContain("EXECUTED MANIPULATION");
+    expect(ctx).toContain("now holds the cup");
+    expect(ctx).toContain("Do NOT emit objectPatches");
   });
 
-  it("emits a SOFT eliciting nudge for merely-named manipulable objects", () => {
+  it("consequence context states no manipulation for a non-manipulation action", () => {
     const world = makeTinyWorld();
-    world.scene.objects.push({
-      id: "coffee_machine", name: "Coffee machine", description: "Coffee.",
-      x: 1, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
-    });
-    const nudge = buildObjectAffordanceNudge(world, { actorId: "u", text: "Walk to the coffee machine." });
-    expect(nudge).toBeDefined();
-    expect(nudge!).toContain("coffee_machine");
+    const action = { actorId: "u", text: "Wave hello." };
+    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, null);
+    expect(ctx).toContain("EXECUTED MANIPULATION: none");
   });
 
-  it("stays silent when no manipulable object is named", () => {
+  it("consequence context carries the engine-ownership rule instead of patch demands", () => {
     const world = makeTinyWorld();
-    expect(buildObjectAffordanceNudge(world, { actorId: "u", text: "Wave hello." })).toBeUndefined();
+    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Wave hello." });
+    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
+    expect(ctx).not.toContain("INCOMPLETE without its patch");
   });
 });
 

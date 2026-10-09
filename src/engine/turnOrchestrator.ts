@@ -42,10 +42,13 @@ import {
   applyEngineSpeech,
   planSpeech,
 } from "./speechExecutor.js";
+import {
+  applyEngineManipulation,
+  executeManipulation,
+  type ManipulationOutcome,
+} from "./manipulationExecutor.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
-import { propStubForGroundingErrors } from "./validate/objects.js";
-import { buildObjectAffordanceNudge } from "./contextBuilder.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { buildRosterRetryLine, type TurnEngines } from "../llm/index.js";
 import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
@@ -209,23 +212,6 @@ export function accumulateTurnUsage(
 }
 
 /**
- * F2: error codes that mean "a missing object/prop/pose patch" — gates the
- * object-affordance retry hint (previously a prose regex over messages).
- */
-const OBJECT_PATCH_ERROR_CODES = new Set([
-  "object_grounding.sit_no_pose",
-  "object_grounding.brew_no_patch",
-  "object_grounding.pickup_no_patch",
-  "object_grounding.open_no_patch",
-  "object_grounding.sip_no_prop",
-  "object_grounding.hold_no_prop",
-  "action.pour_no_patch",
-  "action.pickup_no_patch",
-  "action.sit_no_pose",
-  "action.stand_no_pose",
-]);
-
-/**
  * LLMs sometimes echo the candidate list numbering ("3. Call out ...",
  * "2) Nod ...") into the chosen action. That prefix is presentation, not
  * part of the action — strip it so it never reaches consequences,
@@ -343,11 +329,6 @@ export async function resolveWithValidation(
   let turnRawAttempts: string[] = [];
   let consecutiveParseFailures = 0;
 
-  // Exp-6 item 8: demand the object/prop patch up front in retry feedback
-  // when the action manipulates an object (also present in the initial
-  // consequence context via buildConsequenceContext).
-  const affordanceNudge = buildObjectAffordanceNudge(world, action);
-
   // Exp-2-E item (b): per-turn cache for the Laya locomotion veto. The
   // action text is constant across attempts, so the noul is asked at most
   // once per turn. undefined = not asked yet; true = veto moves.
@@ -395,6 +376,28 @@ export async function resolveWithValidation(
     });
   }
 
+  // Phase 3: engine-owned objects/props. Deterministic pre-pass from the
+  // action text alone (no model output): the engine — never the model —
+  // decides the turn's pick-up/put-down/hand-over. Computed once per
+  // turn, before the first consequence call, so the render input carries
+  // the executed manipulation as facts to narrate. Per attempt below,
+  // the plan is refreshed only when the merged semantics resolve a
+  // contact the deterministic text resolution couldn't see — never
+  // partially (a hand-over whose recipient fails the guards is dropped
+  // outright, not half-executed).
+  let engineManipulation: ManipulationOutcome | null = executeManipulation(world, action);
+  if (engineManipulation !== null) {
+    logger.log({
+      module: "objects",
+      event: "manipulation_planned",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { engineManipulation },
+    });
+  }
+
   // Exp-7: the outer attempt cap is consequenceMaxAttempts (default 2),
   // not maxRetries+1. Retries don't steer the model (exp-7 B2) — the
   // in-loop deterministic repairs below run on every attempt, and salvage
@@ -423,6 +426,10 @@ export async function resolveWithValidation(
             // Phase 2: the render call carries the engine-dictated exact
             // quote — it never invents dialogue.
             exactQuote,
+            // Phase 3: the render call narrates the already-executed
+            // manipulation (facts in its input) — it never emits
+            // objectPatches or prop patches.
+            engineManipulation,
           }),
         timeLeft(),
       );
@@ -648,6 +655,76 @@ export async function resolveWithValidation(
       );
       if (speech.reinserted) result = speech.result;
     }
+    // Phase 3: engine-owned manipulation — refresh + merge. The pre-pass
+    // plan stands unless the merged semantics (judge/effects) resolve a
+    // contact the deterministic text resolution couldn't see (a pronoun
+    // recipient, an effects-declared contactActorId) or a different one.
+    // A newly-resolved contact that fails the guards (too far,
+    // recipient's hands full) drops the plan outright — the engine never
+    // hands an item to nobody, and never executes a transfer halfway. An
+    // undefined merged contact keeps the text-mention pre-pass plan.
+    // Model-emitted objectPatches and prop patches are stripped (ignored,
+    // logged at debug — the phantom-prop shape); the engine outcome is
+    // applied deterministically.
+    {
+      const contactId =
+        semantics?.contactActorId !== undefined && semantics.contactActorId !== action.actorId
+          ? semantics.contactActorId
+          : undefined;
+      const planContact = engineManipulation?.plan.targetActorId;
+      if (semantics === undefined) {
+        // Fail-open: no semantics resolved — keep the deterministic
+        // pre-pass outcome (the text-derived signal is the best available).
+      } else if (contactId !== undefined && contactId !== planContact) {
+        // The merged semantics resolved a contact the deterministic text
+        // resolution couldn't see (a pronoun recipient, an
+        // effects-declared contactActorId) — or a different one. Re-plan
+        // against it; a hand-over whose new contact fails the guards
+        // (too far, recipient's hands full) is dropped outright — the
+        // engine never hands an item to nobody, and never executes a
+        // transfer halfway. An undefined merged contact keeps the
+        // text-mention pre-pass plan: the judge not resolving contact is
+        // not the contact disappearing.
+        const refreshed = executeManipulation(world, action, contactId);
+        if (refreshed !== null) {
+          logger.log({
+            module: "objects",
+            event: "manipulation_refreshed",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action, semantics },
+            output: { refreshed },
+          });
+          engineManipulation = refreshed;
+        } else {
+          logger.log({
+            module: "objects",
+            event: "manipulation_dropped",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action, semantics },
+            output: { reason: "newly-resolved contact fails the hand-over guards (too far or recipient's hands full)" },
+          });
+          engineManipulation = null;
+        }
+      }
+      result = applyEngineManipulation(result, engineManipulation, (ignored) => {
+        logger.log({
+          module: "objects",
+          event: "model_object_patch_ignored",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action },
+          output: {
+            ...ignored,
+            note: "model-emitted object/prop patches are engine-owned — ignored (debug)",
+          },
+        });
+      });
+    }
     // Exp-4 item 6 (S4): deterministic doubled-prefix repair — "Dana:
     // Dana: …" collapses to "Dana: …" instead of tripping the voice gate
     // every attempt. First-person prose is NOT auto-rewritten (too risky);
@@ -668,7 +745,7 @@ export async function resolveWithValidation(
         result.narrative = collapsed;
       }
     }
-    const validation = validateConsequence(world, result, action, semantics);
+    const validation = validateConsequence(world, result, action, semantics, config, engineManipulation);
     // Exp-2 item 5 (S2): final accept gate. The tick-10/11 corrupt
     // narratives passed validateConsequence outright (wrong-subject prose;
     // stay-action teleport via self-declared effects.moved), so the
@@ -727,55 +804,10 @@ export async function resolveWithValidation(
       attempt,
     });
 
-    // Exp-4 item 10 (S6): deterministic prop-stub repair. When the ONLY
-    // failures are prop-mappable grounding misses (the model narrated sip/
-    // type/open/pick-up/pour but forgot the prop patch), set the prop
-    // deterministically instead of burning retries teaching the
-    // convention. Accepts only when the stubbed payload passes the full
-    // gate; otherwise the turn retries/salvages normally.
-    const stubProp = propStubForGroundingErrors(
-      world,
-      action,
-      result.narrative,
-      errors,
-    );
-    if (stubProp !== null) {
-      const stubbed: ConsequenceResult = structuredClone(result);
-      const existing = stubbed.actorPatches.find(
-        (p) => p.actorId === action.actorId,
-      );
-      if (existing) {
-        existing.prop = stubProp;
-      } else {
-        stubbed.actorPatches.push({ actorId: action.actorId, prop: stubProp });
-      }
-      const revalidation = validateConsequence(world, stubbed, action, semantics);
-      // Exp-2 item 5 (S2): final accept gate on the stubbed payload too.
-      if (
-        revalidation.valid &&
-        recheckAcceptedProse(world, action, stubbed).length === 0
-      ) {
-        logger.log({
-          module: "validator",
-          event: "validation_passed",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, result: stubbed, attempt, semanticsSource, semantics },
-          output: { ...revalidation, repaired: true, propStub: stubProp },
-        });
-        logger.log({
-          module: "turn",
-          event: "object_prop_stub_applied",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, result, attempt },
-          output: { prop: stubProp, repaired: stubbed },
-        });
-        return stubbed;
-      }
-    }
+    // Phase 3: the prop-stub repair is deleted — the executor subsumes it.
+    // Manipulation is planned deterministically at turn start and merged
+    // into every attempt BEFORE validation (see the Phase 3 merge above),
+    // so there is no forgotten prop patch left to repair after a failure.
 
     // Phase 4 "retry only prose": when the patches are valid and only the
     // narrative prose fails (speech nit, possibly plus droppable
@@ -793,15 +825,11 @@ export async function resolveWithValidation(
         "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
     }
 
-    // Exp-6 item 8: when the failure is a missing object/prop/pose patch
-    // for a manipulated object, demand that patch explicitly (naming the
-    // object) instead of only punishing its absence after the fact.
-    // F2: gated on error codes, not message prose.
-    const objectAffordanceHint =
-      affordanceNudge !== undefined &&
-      errors.some((e) => OBJECT_PATCH_ERROR_CODES.has(e.code))
-        ? affordanceNudge
-        : undefined;
+    // Phase 3: the object-affordance retry hint is deleted — object/prop
+    // patches are engine-owned now, so demanding them from the model is a
+    // dead instruction. The retry feedback keeps the prose-only hint
+    // above; the EXECUTED MANIPULATION facts in the context tell the
+    // model what actually happened.
 
     // Item C1: repeat the actual roster ids in the retry feedback when the
     // failure names unknown actors — retrieval beats recall for small models.
@@ -828,7 +856,7 @@ export async function resolveWithValidation(
     // deterministic "most severe error first, one line" directive instead
     // of the raw multi-gate dump (which pushed small models
     // off-distribution); the targeted hints below stay as-is.
-    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
+    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt >= maxAttempts) break;
     // Exp-3 item 9 (S7, RULE-C): abort the retry loop early when the last
     // two attempts both failed to STRICTLY improve on the best-so-far
@@ -1005,6 +1033,7 @@ export async function resolveWithValidation(
       candidate.semantics,
       logger,
       config,
+      engineManipulation,
     );
     if (salvage) {
       logger.log({

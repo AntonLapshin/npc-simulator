@@ -12,7 +12,6 @@ import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
-import { buildPropHint } from "../engine/textHints.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, CONSEQUENCE_OUTPUT_SCHEMA, consequenceSuffix } from "./prompts.js";
@@ -86,26 +85,27 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       feedback ? "full" : "short",
       world.actors.map((a) => a.id),
     );
-    // Exp-2 item 4: prop auto-hint — when the action text carries
-    // prop-bearing activity (typing→laptop, sipping→cup), name the exact
-    // roster object ids up front so the model emits the patch convention
-    // instead of inventing holder ids. Inserted before the protected
-    // instruction tail (suffix), which stays last for F33 truncation
-    // safety. Deterministic per action, so retries repeat it harmlessly.
-    const propHint = buildPropHint(action.text, world, action.actorId);
     // Phase 1: the render input carries the already-executed movement as
     // facts — the model narrates what happened, never emits coordinates.
     // Phase 2: the render input carries the engine-dictated exact quote —
     // the model copies it verbatim, never invents dialogue.
-    const context = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement, opts?.exactQuote);
+    // Phase 3: the render input carries the already-executed manipulation
+    // as facts — the model narrates what happened, never emits
+    // objectPatches or prop patches.
+    const context = buildConsequenceContext(
+      world,
+      action,
+      feedback,
+      undefined,
+      opts?.engineMovement,
+      opts?.exactQuote,
+      opts?.engineManipulation,
+    );
     // Exp-6 item 2: user-turn directive leads the prompt (before the
     // world dump) so the writer treats the player's words as sacred.
     const userTurnPrefix =
       opts?.isUserTurn === true ? `${LLMConsequenceEngine.USER_TURN_DIRECTIVE}\n\n` : "";
-    const userPrompt =
-      propHint !== undefined
-        ? `${userTurnPrefix}${context}\n\n${propHint}\n\n${suffix}`
-        : `${userTurnPrefix}${context}\n\n${suffix}`;
+    const userPrompt = `${userTurnPrefix}${context}\n\n${suffix}`;
 
     const result = await completeJson({
       logger: this.logger,

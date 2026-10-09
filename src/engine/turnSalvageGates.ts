@@ -291,8 +291,9 @@ export function countHardErrors(errors: ValidationError[]): number {
  * Exp-5 item 1: tier-2 (degraded) salvage eligibility. Tier 1 accepts fully
  * valid turns or speech-only misses. Tier 2 additionally downgrades
  * speech + object/prop/pose WORDING misses to warnings — dropped quotes,
- * lost questions, silent-behavior swaps, hollow explanations, and
- * pour/brew/open/pick-up/sip/hold/sit wording without a backing patch —
+ * lost questions, silent-behavior swaps, hollow explanations, sit/stand
+ * wording, and phantom-manipulation prose (Phase 3: the engine owns the
+ * patches, so only the wording can miss) —
  * so a turn with good clampable movement still advances position +
  * thoughts instead of freezing whole. Staying HARD (never salvaged):
  * physics (bounds/blocked/path), movement direction + real progress,
@@ -306,13 +307,10 @@ export const TIER2_CODES = new Set([
   ...SPEECH_ONLY_CODES,
   "speech.topic_dropped",
   "object_grounding.sit_no_pose",
-  "object_grounding.brew_no_patch",
-  "object_grounding.pickup_no_patch",
-  "object_grounding.open_no_patch",
-  "object_grounding.sip_no_prop",
-  "object_grounding.hold_no_prop",
-  "action.pour_no_patch",
-  "action.pickup_no_patch",
+  // Phase 3: the old patch-demand codes are deleted (object/prop patches
+  // are engine-owned); the phantom-manipulation wording miss downgrades
+  // like the other wording misses.
+  "object.phantom_manipulation",
   "action.sit_no_pose",
   "action.stand_no_pose",
   // Exp-3 item 10 (S8): ungrounded thoughts are content misses, not world

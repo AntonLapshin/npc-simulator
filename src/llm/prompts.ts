@@ -212,15 +212,14 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       // Phase 2: engine-owned speech — the exact quote is dictated, not
       // composed. The render call copies; it never invents dialogue.
       "SPEECH IS ENGINE-OWNED: the action's quoted words are dictated by the engine (see EXACT QUOTE in the context) — the narrative MUST contain them character-for-character. Copy, never paraphrase, alter, or invent; never add greetings or substitute different dialogue.",
-      "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose. Pick up/hold/open/boot sets prop and/or objectPatches. Omitting the verb from the narrative never excuses omitting the patch.",
+      "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose.",
+      // Phase 3: object/prop patches are engine-owned — the model narrates
+      // the EXECUTED MANIPULATION facts, never emits patches.
+      "MANIPULATION IS ENGINE-OWNED: pick-up/put-down/hand-over are executed by the engine (see EXECUTED MANIPULATION in the context) — narrate the executed facts honestly. Never emit objectPatches and never set 'prop' on any actor (any you emit are ignored). Describing a manipulation the engine did not execute fails validation.",
       "IDENTITY: act out ONLY the acting actor's role — never another character's job, pronouns, or skills.",
       "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
       ...(rosterIds.length > 0 ? [buildRosterDisciplineLine(rosterIds)] : []),
-      // Item C4: prop auto-hints — small models never invent the prop
-      // convention unaided (S6: zero applied object/prop patches in 21
-      // turns), so the mapping is stated as examples up front.
-      "PROP AUTO-HINTS: typing/working on a computer means the actor holds it — set prop:\"laptop\" (never narrate typing with empty hands); picking up, holding, or drinking from a cup/mug — set prop:\"cup\". The prop lives on the acting actor's patch.",
-      "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
+      "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose; observers only get thoughts/emotion/goal/memory patches. Narrative describes ONLY the acting actor, preserving speech wording.",
       // Exp-4 item 1 (S4/M1): third-person discipline for the canonical
       // narrative — first-person NPC prose ("I point…", "I gesture…")
       // fails validation, so say it up front with the negative example.
@@ -296,26 +295,30 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "else (no extra names, no interviewer, no newcomers). Treat listed colleagues as known hired coworkers,",
     "never as strangers, candidates, or applicants.",
     ...(rosterIds.length > 0 ? [buildRosterDisciplineLine(rosterIds)] : []),
-    // Item C4: prop auto-hints (see the short mode above for rationale).
-    "PROP AUTO-HINTS: typing/working on a computer → prop:\"laptop\"; picking up/holding/drinking from a cup or mug → prop:\"cup\". Set the prop on the acting actor's patch — narrating the use without the prop patch is incomplete.",
+    // Phase 3: object/prop patches are engine-owned — the PROP AUTO-HINTS
+    // (item C4) told the model to emit prop patches; that instruction is
+    // dead now. The engine plans the manipulation from the action text.
     "OBJECT IDS: use the exact ids from the OBJECT IDS line in the context (mugs are `*_mug`, papers are",
     "`*_papers`, desks are `*_desk`) — never write 'coffee mug', 'paper', or any other invented id.",
-    "Using any other id fails validation.",
+    "This applies to destinationObjectId/addresseeActorId/contactActorId declarations. Using any other id fails validation.",
     "",
-    "POSE/PROP/OBJECT RULE: sitting/standing/kneeling sets pose; picking up/holding/carrying a cup/laptop",
-    "sets prop (null when put down); pouring, opening, moving, or changing anything in the world sets",
-    "objectPatches. Minimalism does NOT excuse dropping these — an action that sits, holds, pours, or opens",
-    "without the matching patch is incomplete. Handshake/hug/hand-over sets contactActorId and ends",
-    "adjacent; sit/stand sets pose; pick up/hold/open/boot sets prop and/or objectPatches.",
-    "Omitting the verb from the narrative does not excuse omitting the patch.",
+    "POSE RULE: sitting/standing/kneeling sets pose — an action that sits,",
+    "stands, or kneels without the matching pose patch is incomplete.",
+    "MANIPULATION IS ENGINE-OWNED: pick-up/put-down/hand-over are executed",
+    "by the engine from the action text (see EXECUTED MANIPULATION in the",
+    "context) — narrate the executed facts honestly and never invent other",
+    "manipulations. Never emit objectPatches and never set 'prop' on any",
+    "actor: any objectPatches or prop you emit are ignored. Describing a",
+    "pick-up/put-down/hand-over the engine did not execute fails validation.",
+    "Handshake/hug/hand-over sets contactActorId and ends adjacent.",
     "",
     "The full actorPatch fields are: actorId (required), x, y, state,",
     "emotion, goal, thoughts (one-time private inner reaction, never spoken aloud, never narrated — rewrite it for every perceiving actor; be blunt, candid, profane/explicit when in-character),",
     "pose (stand|sit|kneel|doggy|prone, e.g. sitting down or standing up),",
-    "prop (cup|laptop|null, e.g. picking up a mug),",
     "memoriesAppend, beliefsAppend, relationshipsAppend.",
-    "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose/prop.",
-    "Observers must not move (no x/y), must not change state/pose/prop, and must not",
+    "('prop' is engine-owned — never set it; neither are x/y or objectPatches.)",
+    "TURN DISCIPLINE: only the acting actor may speak/move/change state/pose.",
+    "Observers must not move (no x/y), must not change state/pose, and must not",
     "speak in the narrative — they only update thoughts/emotion/goal/memory/belief/relationship.",
     "THOUGHTS POLICY: thoughts are private inner reactions, never spoken aloud and never",
     "narrated — be blunt, candid, profane/explicit when in-character.",
@@ -353,10 +356,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "PATCH MINIMALISM: include actorPatches for the acting actor plus EVERY perceiving observer listed in",
     "the context (each with a fresh 'thoughts' reaction) — especially anyone spoken to. An event with no",
     "observer patch means that observer recorded no reaction, which is invalid for a direct addressee.",
-    "Include objectPatches ONLY for objects the action observably changes —",
-    "never re-emit unchanged walls/furniture. Keep every string short.",
-    "The full objectPatch fields are: objectId (required), description,",
-    "x, y, w, h, passable, blocksVision, blocksSound.",
+    "Never emit objectPatches: object manipulation is engine-executed (see above) —",
+    "any objectPatches you emit are ignored. Keep every string short.",
     // Exp-6 item 8: never name the pipeline in prose.
     "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning — describe events, not pipeline stages.",
     "Return JSON only, matching the schema above.",

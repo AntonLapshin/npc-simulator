@@ -16,6 +16,7 @@ import {
 import { isSpeechOnlyFailure, resolveWithValidation, summarizeTurnOutcomes, trySalvageConsequence } from "../../src/engine/turnOrchestrator.js";
 import { suggestSimilarIds } from "../../src/engine/physicalValidator.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld, errorText } from "../helpers.js";
 import {
@@ -224,21 +225,32 @@ describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
     expect(errorText(v.errors)).toMatch(/sit/);
   });
 
-  it("fails pour-dodged-by-silence via action-side object coverage (tick 9)", () => {
+  it("pour action is engine-executed: narrative silence about the transfer passes (tick 9, Phase 3)", () => {
     const world = officeWorld();
-    world.actors.find((a) => a.id === "u")!.x = 5;
-    world.actors.find((a) => a.id === "u")!.y = 0;
+    const u = world.actors.find((a) => a.id === "u")!;
+    u.x = 3; u.y = 0; // within reach of the coffee machine at (0,0)
+    const mug = world.scene.objects.find((o) => o.id === "anton_mug")!;
+    mug.x = 3; mug.y = 1; // and of the mug
+    const action = { actorId: "u", text: "Walk to the coffee machine and pour a coffee." };
+    // Phase 3: the engine plans the cup pick-up from the action text —
+    // the model emits no patch and the narrative need not name it
+    // (one-directional grounding).
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.kind).toBe("pick-up");
+    expect(outcome!.plan.propName).toBe("cup");
     const v = validateConsequence(
       world,
       {
         ...baseResult("Anton approaches the coffee machine, standing beside it."),
         actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
       },
-      { actorId: "u", text: "Walk to the coffee machine and pour a coffee." },
+      action,
       { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
+      undefined,
+      outcome,
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/pour\/brew\/open/);
+    expect(v.valid).toBe(true);
   });
 
   it("fails flipped ask-to-thanks via action-side question coverage (tick 16)", () => {
@@ -587,7 +599,8 @@ describe("exp3-9/10/11/12/13 prompting", () => {
     expect(ctx).toContain("anton_mug");
     // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
     expect(ctx).toContain("EXACT QUOTE RULE");
-    expect(ctx).toContain("omitting the verb from the narrative never excuses omitting the patch");
+    // Phase 3: the patch demand is replaced by the engine-ownership rule.
+    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
     expect(ctx).toContain("at most 6 cells");
   });
 
@@ -845,31 +858,44 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
     expect(v).toEqual({ valid: true, errors: [] });
   });
 
-  it("fails pick up/hold with no backing patch, passes with a prop patch", () => {
+  it("pick up/hold needs no model patch (Phase 3: engine-owned); phantom prose fails", () => {
     const world = officeWorld();
+    const u = world.actors.find((a) => a.id === "u")!;
+    u.x = 4; u.y = 3; // next to anton_mug at (4,4)
     for (const text of ["Pick up the mug from the desk.", "Hold the cup while waiting."]) {
-      const dropped = validateConsequence(
+      const action = { actorId: "u", text };
+      const outcome = executeManipulation(world, action);
+      expect(outcome, text).not.toBeNull();
+      // The engine executed the pick-up; the model emits no patch and the
+      // narrative need not describe the transfer (one-directional grounding).
+      const v = validateConsequence(
         world,
         {
           ...baseResult("Anton stands by the desk."),
           actorPatches: [{ actorId: "u", thoughts: "Coffee." }],
         },
-        { actorId: "u", text },
+        action,
         stillSemantics(),
+        undefined,
+        outcome,
       );
-      expect(dropped.valid, text).toBe(false);
-      expect(errorText(dropped.errors), text).toMatch(/pick up\/hold/);
+      expect(v.valid, text).toBe(true);
     }
-    const held = validateConsequence(
+    // Phantom prose: the narrative describes a pick-up the engine did not
+    // execute (the action implies no manipulation at all).
+    const phantom = validateConsequence(
       world,
       {
-        ...baseResult("Anton holds the cup."),
-        actorPatches: [{ actorId: "u", prop: "cup", thoughts: "Warm." }],
+        ...baseResult("Anton picks up the mug and waves it around."),
+        actorPatches: [{ actorId: "u", thoughts: "Coffee." }],
       },
-      { actorId: "u", text: "Hold the cup while waiting." },
+      { actorId: "u", text: "Anton stands by the desk." },
       stillSemantics(),
+      undefined,
+      null,
     );
-    expect(held).toEqual({ valid: true, errors: [] });
+    expect(phantom.valid).toBe(false);
+    expect(errorText(phantom.errors)).toMatch(/object\.phantom_manipulation/);
   });
 
   it("fails far handshakes even without a declared contact id, passes adjacent ones (tick 12)", () => {
@@ -908,30 +934,21 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
     expect(near).toEqual({ valid: true, errors: [] });
   });
 
-  it("surfaces fuzzy id suggestions in retry feedback so the retry can succeed (ticks 10/11)", async () => {
-    const logger = new Logger({ sessionId: "exp3-phase3-retry", writeToFile: false });
+  it("model-emitted objectPatches are stripped and ignored (Phase 3: engine-owned)", async () => {
+    const logger = new Logger({ sessionId: "exp3-phase3-strip", writeToFile: false });
     const world = officeWorld();
-    const seenFeedback: (string | undefined)[] = [];
-    const attempts: ConsequenceResult[] = [
-      {
-        narrative: "Anton sets down the mug.",
-        actorPatches: [{ actorId: "u", thoughts: "Done." }],
-        objectPatches: [{ objectId: "coffee mug", description: "Used." }],
-        reasoning: "r",
-      },
-      {
-        narrative: "Anton sets down the mug.",
-        actorPatches: [{ actorId: "u", thoughts: "Done." }],
-        objectPatches: [{ objectId: "anton_mug", description: "Used." }],
-        reasoning: "r",
-      },
-    ];
     const deps = makeTestDeps(logger, {
       consequenceEngine: {
-        resolve: async (_w: World, _a: { actorId: string; text: string }, feedback?: string) => {
-          seenFeedback.push(feedback);
-          return structuredClone(attempts[seenFeedback.length - 1]!);
-        },
+        resolve: async () =>
+          structuredClone({
+            narrative: "Anton sets down the mug.",
+            actorPatches: [{ actorId: "u", thoughts: "Done." }],
+            // An invented object id in a model objectPatch: stripped before
+            // validation — there is no "did you mean" retry anymore, the
+            // engine owns objects outright.
+            objectPatches: [{ objectId: "coffee mug", description: "Used." }],
+            reasoning: "r",
+          }),
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 1, autosaveEnabled: false },
     });
@@ -940,12 +957,358 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
       { actorId: "u", text: "Set down the coffee mug." },
       deps,
     );
-    expect(out.narrative).not.toBe("Nothing changes.");
-    expect(out.objectPatches).toEqual([{ objectId: "anton_mug", description: "Used." }]);
-    // The retry saw the validator's "did you mean" hint, not a bare unknown-id.
-    expect(seenFeedback[1]).toMatch(/did you mean/);
+    // The invented id never reaches the world: every model objectPatch is
+    // stripped (logged at debug), only engine object moves survive.
+    expect(out.objectPatches.map((x) => x.objectId)).not.toContain("coffee mug");
+    // The unexecutable put-down (u holds nothing) is phantom-manipulation
+    // wording — tier-2 salvaged, not a fallback.
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
+});
+
+describe("exp3-9/10/11/12/13 prompting", () => {
+  it("consequence context carries the object-ID catalog and copy rule", () => {
+    const world = officeWorld();
+    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Pour a coffee." });
+    expect(ctx).toContain("OBJECT IDS");
+    expect(ctx).toContain("anton_mug");
+    // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
+    expect(ctx).toContain("EXACT QUOTE RULE");
+    // Phase 3: the patch demand is replaced by the engine-ownership rule.
+    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
+    expect(ctx).toContain("at most 6 cells");
+  });
+
+  it("relationship refresh names known colleagues, never strangers", () => {
+    const world = officeWorld();
+    const line = buildRelationshipRefresh(world, "n");
+    expect(line).toContain("KNOWN COLLEAGUES");
+    expect(line).toContain("Anton (u,");
+    expect(line).toMatch(/never strangers/);
+    // Private goals stay out of the shared line.
+    world.actors.find((a) => a.id === "u")!.goal = "SECRET-PLAN-999";
+    expect(buildRelationshipRefresh(world, "n")).not.toContain("SECRET-PLAN-999");
+  });
+
+  it("object catalog groups mugs/papers/desks with exact ids", () => {
+    const world = officeWorld();
+    const catalog = buildObjectIdCatalog(world);
+    expect(catalog).toContain("`anton_mug`");
+    expect(catalog).toContain("`anton_desk`");
+    expect(catalog).toMatch(/never invent/);
+  });
+
+  it("short suffix keeps the core, full suffix keeps everything", () => {
+    const short = consequenceSuffix("short");
+    const full = consequenceSuffix("full");
+    expect(consequenceSuffix()).toBe(full);
+    for (const needle of ["contactActorId", "quotedSpeech", "TURN DISCIPLINE", "ROSTER", "ENGINE-EXECUTED", "do NOT emit x/y coordinates"]) {
+      expect(short).toContain(needle);
+    }
+    expect(full.length).toBeGreaterThan(short.length);
+    // Phase 2: the quote-handling section is rewritten around exactQuote.
+    expect(full).toContain("SPEECH IS ENGINE-OWNED");
+    expect(full).toContain("OBJECT IDS");
+  });
+
+  it("proposal/selection contexts carry the relationship refresh", () => {
+    const world = officeWorld();
+    expect(buildProposalContext(world, "u")).toContain("KNOWN COLLEAGUES");
+    expect(buildSelectionContext(world, "u", ["Wave."])).toContain("KNOWN COLLEAGUES");
+  });
+});
+
+describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
+  function tanyaWorld(): World {
+    const world = makeTinyWorld();
+    world.actors.find((a) => a.id === "n")!.name = "Tanya";
+    return world;
+  }
+
+  it("deterministic destination prefers the goal over the origin", () => {
+    const world = tanyaWorld();
+    expect(resolveDestinationActorId(world, "u", "Walk from Tanya to the door.")).toBeUndefined();
+    world.actors.push({
+      id: "d", name: "Dana", persona: "p", x: 0, y: 0,
+      state: "s", emotion: "c", goal: "g", thoughts: "t", memories: [], beliefs: [], relationships: [],
+    });
+    // Last movement mention wins: Dana is the goal, Tanya the origin.
+    expect(resolveDestinationActorId(world, "u", "Walk from Tanya to Dana.")).toBe("d");
+    // A greeting addressee is never a destination (tick 6).
+    expect(resolveDestinationActorId(world, "u", "Thanks, Tanya! Walk to my desk.")).toBeUndefined();
+    expect(resolveDestinationActorId(world, "u", "Come closer to Tanya.")).toBe("n");
+  });
+
+  it("drops a greeting addressee promoted to destination, keeps the addressee (tick 6)", async () => {
+    const world = tanyaWorld();
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: 'Walk to my desk and sit down. "Thanks, Tanya! Is this my spot?"' };
+    const quote = "Thanks, Tanya! Is this my spot?";
+    const judge = {
+      async classify(): Promise<ActionSemantics> {
+        return {
+          moves: true, destinationActorId: "n", speaks: true,
+          quotedSpeech: [quote], addresseeActorId: "n",
+        };
+      },
+    };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        ...baseResult("U walks."),
+        actorPatches: [],
+        effects: { moved: true, spoke: true, quotedSpeech: [quote] },
+      },
+      judge, logger,
+    );
+    // Tanya is mentioned only as an addressee — never a movement requirement.
+    expect(resolved.semantics!.destinationActorId).toBeUndefined();
+    expect(resolved.semantics!.addresseeActorId).toBe("n");
+    expect(resolved.semantics!.quotedSpeech).toEqual([quote]);
+    expect(resolved.disagreements!.join(" ")).toMatch(/not named as a movement target/);
+  });
+
+  it("drops an unmentioned roster destination so good movement still validates (tick 9)", async () => {
+    const world = officeWorld();
+    world.actors.find((a) => a.id === "u")!.x = 3;
+    world.actors.find((a) => a.id === "u")!.y = 3;
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: "Walk over to the coffee machine for a break." };
+    const judge = {
+      async classify(): Promise<ActionSemantics> {
+        return {
+          moves: true, destinationActorId: "n", speaks: false,
+          quotedSpeech: ["Excuse me, do you have a minute?"],
+        };
+      },
+    };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        ...baseResult("Anton approaches the coffee machine, standing beside it."),
+        actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
+        objectPatches: [],
+        reasoning: "r",
+        effects: { moved: true, spoke: false },
+      },
+      judge, logger,
+    );
+    // No Tanya in the action: the invented destination and quote are dropped.
+    expect(resolved.semantics!.destinationActorId).toBeUndefined();
+    expect(resolved.semantics!.quotedSpeech).toEqual([]);
+    expect(resolved.disagreements!.length).toBeGreaterThan(0);
+    // ...and the valid walk validates on its own movement, not the invention.
+    const v = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton approaches the coffee machine, standing beside it."),
+        actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
+        objectPatches: [],
+        reasoning: "r",
+        effects: { moved: true, spoke: false },
+      },
+      action,
+      resolved.semantics!,
+    );
+    expect(v).toEqual({ valid: true, errors: [] });
+  });
+
+  it("tick-3 paraphrase fails direct validation under the Phase-2 verbatim contract", async () => {
+    // Phase 2: "strict quote grounding" now means character-for-character —
+    // a paraphrase no longer passes validateConsequence directly. In the
+    // turn loop the deterministic backstop (applyEngineSpeech) appends the
+    // exact quote before validation, so end-to-end turns still pass; the
+    // gate here is the backstop for paths that bypass it.
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    const action = { actorId: "u", text: 'Walk to N and ask "could you show me where my desk is?"' };
+    const resolved = await resolveActionSemantics(
+      world, action,
+      {
+        narrative: "U asks N for directions to his desk.",
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
+          { actorId: "n", thoughts: "Helpful." },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+        effects: {
+          moved: true, spoke: true,
+          quotedSpeech: ["could you show me where my desk is?"],
+          destinationActorId: "n", addresseeActorId: "n",
+        },
+      },
+      new MockSemanticJudge(), logger,
+    );
+    expect(resolved.disagreements).toEqual([]);
+    const v = validateConsequence(
+      world,
+      {
+        narrative: "U asks N for directions to his desk.",
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
+          { actorId: "n", thoughts: "Helpful." },
+        ],
+        objectPatches: [],
+        reasoning: "r",
+        effects: {
+          moved: true, spoke: true,
+          quotedSpeech: ["could you show me where my desk is?"],
+          destinationActorId: "n", addresseeActorId: "n",
+        },
+      },
+      action,
+      resolved.semantics!,
+    );
+    expect(v.valid).toBe(false);
+    expect(v.errors.map((e) => e.code)).toContain("speech.exact_quote_missing");
+  });
+
+  it("logs judge_vs_effects_disagreement on every resolution, even on agreement", async () => {
+    const world = makeTinyWorld();
+    const logger = createTestLogger();
+    const resolved = await resolveActionSemantics(
+      world,
+      { actorId: "u", text: "Wave." },
+      { narrative: "U waves.", actorPatches: [], objectPatches: [], reasoning: "r" },
+      new MockSemanticJudge(), logger,
+    );
+    expect(resolved.disagreements).toEqual([]);
+    const events = logger.store.byEvent("judge_vs_effects_disagreement");
+    expect(events).toHaveLength(1);
+    expect((events[0]!.output as { agreement: boolean }).agreement).toBe(true);
+    // Deterministic layer resolves no quotes/destinations for a bare wave.
+    expect(resolveDeterministicSemantics(world, { actorId: "u", text: "Wave." })).toEqual({
+      quotedSpeech: [],
+    });
+  });
+});
+
+describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
+  it("fails speech dropped without a trace, passes preserved thanks (tick 18)", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Thank N for the welcome and head to the desk." };
+    const dropped = validateConsequence(
+      world,
+      {
+        ...baseResult("U looks around the office."),
+        actorPatches: [{ actorId: "u", thoughts: "Nice place." }],
+      },
+      action,
+      stillSemantics(),
+    );
+    expect(dropped.valid).toBe(false);
+    expect(errorText(dropped.errors)).toMatch(/renders no speech/);
+
+    const kept = validateConsequence(
+      world,
+      {
+        ...baseResult("U thanks N for the welcome."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Grateful." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      action,
+      stillSemantics(),
+    );
+    expect(kept).toEqual({ valid: true, errors: [] });
+  });
+
+  it("greet/welcome may be rendered non-verbally (golden-path guard)", () => {
+    const world = makeTinyWorld();
+    world.actors.find((a) => a.id === "n")!.name = "Jeff";
+    const v = validateConsequence(
+      world,
+      {
+        ...baseResult("U walks toward Jeff and stops near him."),
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Friendly." },
+          { actorId: "n", thoughts: "Welcoming." },
+        ],
+      },
+      { actorId: "u", text: "Walk over to Jeff and welcome him." },
+      { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
+    );
+    expect(v).toEqual({ valid: true, errors: [] });
+  });
+
+  it("pick up/hold needs no model patch (Phase 3: engine-owned); phantom prose fails", () => {
+    const world = officeWorld();
+    const u = world.actors.find((a) => a.id === "u")!;
+    u.x = 4; u.y = 3; // next to anton_mug at (4,4)
+    for (const text of ["Pick up the mug from the desk.", "Hold the cup while waiting."]) {
+      const action = { actorId: "u", text };
+      const outcome = executeManipulation(world, action);
+      expect(outcome, text).not.toBeNull();
+      // The engine executed the pick-up; the model emits no patch and the
+      // narrative need not describe the transfer (one-directional grounding).
+      const v = validateConsequence(
+        world,
+        {
+          ...baseResult("Anton stands by the desk."),
+          actorPatches: [{ actorId: "u", thoughts: "Coffee." }],
+        },
+        action,
+        stillSemantics(),
+        undefined,
+        outcome,
+      );
+      expect(v.valid, text).toBe(true);
+    }
+    // Phantom prose: the narrative describes a pick-up the engine did not
+    // execute (the action implies no manipulation at all).
+    const phantom = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton picks up the mug and waves it around."),
+        actorPatches: [{ actorId: "u", thoughts: "Coffee." }],
+      },
+      { actorId: "u", text: "Anton stands by the desk." },
+      stillSemantics(),
+      undefined,
+      null,
+    );
+    expect(phantom.valid).toBe(false);
+    expect(errorText(phantom.errors)).toMatch(/object\.phantom_manipulation/);
+  });
+
+  it("fails far handshakes even without a declared contact id, passes adjacent ones (tick 12)", () => {
+    const world = officeWorld();
+    // u (Anton) at (1,1), n (Nadia) at (4,4): 4.2 cells apart — no contact declared.
+    const far = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton shakes Nadia's hand."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Firm grip." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      { actorId: "u", text: "Shake Nadia's hand warmly." },
+      stillSemantics(),
+    );
+    expect(far.valid).toBe(false);
+    expect(errorText(far.errors)).toMatch(/adjacent/);
+
+    // Adjacent: Nadia one cell away, handshake narrated — passes.
+    world.actors.find((a) => a.id === "n")!.x = 2;
+    world.actors.find((a) => a.id === "n")!.y = 1;
+    const near = validateConsequence(
+      world,
+      {
+        ...baseResult("Anton shakes Nadia's hand."),
+        actorPatches: [
+          { actorId: "u", thoughts: "Firm grip." },
+          { actorId: "n", thoughts: "Welcome!" },
+        ],
+      },
+      { actorId: "u", text: "Shake Nadia's hand warmly." },
+      stillSemantics(),
+    );
+    expect(near).toEqual({ valid: true, errors: [] });
+  });
+
 });
 
 describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
@@ -1263,27 +1626,30 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(out!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBeUndefined();
   });
 
-  it("tier-2 salvages movement when object wording fails, still refuses contact gaps", () => {
+  it("tier-2 salvages movement when phantom-manipulation wording fails, still refuses contact gaps", () => {
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
     world.actors.find((a) => a.id === "u")!.y = 3;
-    // Pour verb dropped with no backing patch (tick-9 verb-drop shape).
-    // Exp-5 item 1: tier-2 salvage advances the movement with the pour
+    // Phantom transfer prose with no executed manipulation (tick-9 shape).
+    // Exp-5 item 1: tier-2 salvage advances the movement with the wording
     // miss logged as a warning instead of freezing the whole turn.
-    const pour = trySalvageConsequence(
+    const phantom = trySalvageConsequence(
       world,
-      { actorId: "u", text: "Walk to the coffee machine and pour a coffee." },
+      { actorId: "u", text: "Walk to the coffee machine." },
       {
-        narrative: "Anton approaches the coffee machine, standing beside it.",
+        narrative: "Anton picks up the mug and pours coffee.",
         actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Coffee time." }],
         objectPatches: [],
         reasoning: "r",
       },
       { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
+      undefined,
+      undefined,
+      null,
     );
-    expect(pour).not.toBeNull();
-    expect(pour!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBe(1);
-    expect(errorText(pour!.warnings)).toMatch(/pour\/brew\/open/);
+    expect(phantom).not.toBeNull();
+    expect(phantom!.salvaged.actorPatches.find((p) => p.actorId === "u")!.x).toBe(1);
+    expect(errorText(phantom!.warnings)).toMatch(/object\.phantom_manipulation/);
 
     // Far handshake with no adjacency (tick-12 shape): u (1,1), n (4,4).
     const contact = trySalvageConsequence(

@@ -9,9 +9,8 @@ import {
   resolveDestinationObjectId,
 } from "../../src/engine/deterministicSemantics.js";
 import { isQuoteGroundedInAction } from "../../src/engine/actionSemantics.js";
-import {
-  buildObjectAffordanceNudge,
-} from "../../src/engine/contextBuilder.js";
+import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import {
   getHonestHistoryNote,
   resolveWithValidation,
@@ -604,21 +603,25 @@ describe("exp6-8 pipeline naming ban + object affordance nudge", () => {
     expect(found.map((o) => o.id)).not.toContain("anton_desk");
   });
 
-  it("buildObjectAffordanceNudge demands the exact patch for a named object", () => {
+  it("consequence context carries EXECUTED MANIPULATION facts (Phase 3 replaces the nudge)", () => {
     const world = antonWorld();
-    const nudge = buildObjectAffordanceNudge(world, {
-      actorId: "anton",
-      text: "Open the laptop and start typing.",
-    });
-    expect(nudge).toContain("anton_laptop");
-    expect(nudge).toMatch(/INCOMPLETE without its patch/);
+    // anton starts at (14,3), far from his laptop at (4,8) — walk him over.
+    const anton = world.actors.find((a) => a.id === "anton")!;
+    anton.x = 4; anton.y = 7;
+    const action = { actorId: "anton", text: "Open the laptop and start typing." };
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, outcome);
+    expect(ctx).toContain("EXECUTED MANIPULATION");
+    expect(ctx).toContain("now holds the laptop");
+    expect(ctx).not.toMatch(/INCOMPLETE without its patch/);
   });
 
-  it("buildObjectAffordanceNudge stays silent for non-manipulation actions", () => {
+  it("consequence context states no manipulation for non-manipulation actions", () => {
     const world = antonWorld();
-    expect(
-      buildObjectAffordanceNudge(world, { actorId: "anton", text: "Walk to the door." }),
-    ).toBeUndefined();
+    const action = { actorId: "anton", text: "Walk to the door." };
+    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, null);
+    expect(ctx).toContain("EXECUTED MANIPULATION: none");
   });
 
   it("tryCloseTruncatedJson is exported for the salvage tier", () => {

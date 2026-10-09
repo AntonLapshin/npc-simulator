@@ -365,20 +365,21 @@ describe("exp4-8 salvage entry logging (whole run)", () => {
       semantics, logger,
     );
     expect(ok).not.toBeNull();
-    // Exp-5 item 1: the pour miss no longer refuses — tier-2 salvage
-    // advances the movement with the pour miss logged as a warning.
+    // Phase 3: phantom-manipulation prose no longer refuses — tier-2
+    // salvage advances the movement with the wording miss logged as a
+    // warning.
     const tier2 = trySalvageConsequence(
       world,
-      { actorId: "anton", text: "Walk to the coffee machine and pour a coffee." },
+      { actorId: "anton", text: "Walk to the coffee machine." },
       {
-        narrative: "Anton approaches the coffee machine, standing beside it.",
+        narrative: "Anton picks up the mug and pours coffee.",
         actorPatches: [{ actorId: "anton", x: 3, y: 2, thoughts: "Coffee." }],
         objectPatches: [], reasoning: "r",
       },
-      semantics, logger,
+      semantics, logger, undefined, null,
     );
     expect(tier2).not.toBeNull();
-    expect(errorText(tier2!.warnings)).toMatch(/pour\/brew\/open/);
+    expect(errorText(tier2!.warnings)).toMatch(/object\.phantom_manipulation/);
     // Refuse: far contact with no adjacency (adjacency stays hard).
     const no = trySalvageConsequence(
       world,

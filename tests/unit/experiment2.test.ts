@@ -10,6 +10,7 @@ import {
   extractPronouns,
 } from "../../src/engine/contextBuilder.js";
 import { resolveActionSemantics } from "../../src/engine/actionSemantics.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { consequenceResultSchema } from "../../src/schemas.js";
 import { mockClassifyAction } from "../../src/mocks/mockSemanticJudge.js";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
@@ -302,29 +303,30 @@ describe("exp2-7 object grounding (30/30 empty objectPatches)", () => {
     });
   });
 
-  it("requires an object/prop patch for pouring", () => {
+  it("pouring is engine-executed: the cup pick-up needs no model patch (Phase 3)", () => {
     const world = officeWorld();
+    world.scene.objects.push({
+      id: "u_mug", name: "U's mug", description: "A mug.",
+      x: 1, y: 1, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
     const action = { actorId: "u", text: "Pour a coffee." };
-    const dry: ConsequenceResult = {
-      ...baseResult("U pours a coffee and remarks on the taste."),
-      actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Good." }],
-    };
-    const v = validateConsequence(world, dry, action, stillSemantics());
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/brewing\/pouring/);
-
+    // u at (1,1): next to the coffee machine (0,0) and the mug — the
+    // engine plans the cup pick-up itself.
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.kind).toBe("pick-up");
+    expect(outcome!.plan.propName).toBe("cup");
     const poured: ConsequenceResult = {
       ...baseResult("U pours a coffee and remarks on the taste."),
       actorPatches: [
-        { actorId: "u", x: 1, y: 1, prop: "cup", thoughts: "Good." },
+        { actorId: "u", x: 1, y: 1, thoughts: "Good." },
         { actorId: "n", thoughts: "Coffee smells nice." },
       ],
-      objectPatches: [{ objectId: "coffee_machine", description: "Recently used." }],
+      objectPatches: [],
     };
-    expect(validateConsequence(world, poured, action, stillSemantics())).toEqual({
-      valid: true,
-      errors: [],
-    });
+    expect(
+      validateConsequence(world, poured, action, stillSemantics(), undefined, outcome),
+    ).toEqual({ valid: true, errors: [] });
   });
 
   it("lets resumed typing pass without a fresh patch", () => {
