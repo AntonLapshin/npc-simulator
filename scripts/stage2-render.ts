@@ -22,8 +22,7 @@ import { NOT_DONE_SENTINEL, type Action, type ConsequenceResult, type World } fr
 import type { ConsequenceEngine, ConsequenceResolveOpts } from "../src/intelligence/types.js";
 import { loadScenario } from "../src/engine/scenarioLoader.js";
 import { runTurn, type EngineDependencies } from "../src/engine/turnOrchestrator.js";
-import { MockProposalEngine } from "../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../src/mocks/mockIntentEngine.js";
 import { Logger } from "../src/logging/logger.js";
 import { defaultConfig } from "../src/config.js";
 
@@ -87,11 +86,8 @@ async function runCase(label: string, action: string, attempts: Prose[]): Promis
   const tick = world.tick;
   const render = new ScriptedRender(attempts);
   const deps: EngineDependencies = {
-    proposalEngine: new MockProposalEngine(logger, {
-      [`anton@tick${tick}`]: { suggestions: [action], reasoning: "stage2 battery" },
-    }),
-    selectionEngine: new MockSelectionEngine(logger, {
-      [`anton@tick${tick}`]: { action, reasoning: "stage2 battery" },
+    intentEngine: new MockIntentEngine(logger, {
+      [`anton@tick${tick}`]: { action, quote: "" },
     }),
     consequenceEngine: render,
     logger,

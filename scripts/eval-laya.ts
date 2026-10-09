@@ -1,6 +1,7 @@
-// Phase 0 quality gate: run scripts/eval-datasets/laya-eval.json against a
-// real LayaClient (or --stub for CI plumbing), reporting per-group accuracy,
-// ECE (10 bins) over all noul questions, and latency.
+// PLAN_V2 Phase 6: judge-set quality gate — run scripts/eval-datasets/laya-eval.json
+// (judge group only; the selection/triage groups measured the deleted
+// decision cascade) against a real LayaClient (or --stub for CI plumbing),
+// reporting accuracy, ECE (10 bins) over the noul questions, and latency.
 //
 // Usage:
 //   tsx scripts/eval-laya.ts [--stub] [--gate] [--url http://127.0.0.1:8000]
@@ -15,13 +16,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LayaAnswer, LayaQuestion } from "../src/decision/decisionTypes.js";
 import { buildJudgeState } from "../src/decision/decisionState.js";
-import {
-  buildJudgeQuestions,
-  OBSERVER_TRIAGE_QUESTION,
-  SALIENCE_QUESTION,
-} from "../src/decision/diagrams.js";
+import { buildJudgeQuestions } from "../src/decision/judgeQuestions.js";
 import { LayaClient } from "../src/decision/layaClient.js";
-import { argmaxOption } from "../src/decision/utils/runnerUtils.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -29,7 +25,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 // Dataset types
 // ---------------------------------------------------------------------------
 
-type SelectionCase = { id: string; state: string; candidates: string[]; expected: string };
 type JudgeExpected = {
   moves: boolean; speaks: boolean;
   addressee: string | null; destination: string | null; contact: string | null;
@@ -38,10 +33,9 @@ type JudgeCase = {
   id: string; actionText: string; roster: string[]; landmarks: string[];
   expected: JudgeExpected;
 };
-type TriageCase = { id: string; event: string; expectedReact: boolean; expectedSalience: number };
 type Dataset = {
   version: number;
-  groups: { selection: SelectionCase[]; judge: JudgeCase[]; triage: TriageCase[] };
+  groups: { judge: JudgeCase[] };
 };
 
 // ---------------------------------------------------------------------------
@@ -76,14 +70,6 @@ function stubChoice(winner: string, options: string[]): LayaAnswer {
 
 function stubNoul(expected: boolean): LayaAnswer {
   return { type: "noul", pTrue: expected ? 0.95 : 0.05 };
-}
-
-function stubScore(levelIndex: number, levels: string[]): LayaAnswer {
-  const distribution: Record<string, number> = {};
-  for (let i = 0; i < levels.length; i++) {
-    distribution[String(i)] = i === levelIndex ? 0.9 : 0.1 / Math.max(1, levels.length - 1);
-  }
-  return { type: "score", expected: levelIndex, distribution };
 }
 
 // ---------------------------------------------------------------------------
@@ -142,38 +128,24 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: number }>
   return { value, ms: Date.now() - t0 };
 }
 
+/** Argmax over a choice answer's probability map (was in deleted runnerUtils). */
+function argmaxOption(
+  probabilities: Record<string, number> | undefined,
+  options: string[],
+): string | undefined {
+  if (!probabilities) return undefined;
+  let best: string | undefined;
+  let bestP = -Infinity;
+  for (const o of options) {
+    const p = probabilities[o] ?? -Infinity;
+    if (p > bestP) { bestP = p; best = o; }
+  }
+  return best;
+}
+
 function choiceWinner(answer: LayaAnswer | undefined, options: string[]): string | undefined {
   if (!answer || answer.type !== "choice") return undefined;
   return argmaxOption(answer.probabilities, options);
-}
-
-async function runSelection(
-  cases: SelectionCase[],
-  decider: Decider,
-  stub: boolean,
-): Promise<GroupResult> {
-  let correct = 0;
-  let errors = 0;
-  for (const c of cases) {
-    const d: Decider = stub ? makeStubDecider({ pick: stubChoice(c.expected, c.candidates) }) : decider;
-    const questions = {
-      pick: {
-        type: "choice" as const,
-        instructions: "Which candidate action best fits what the actor should do next?",
-        options: c.candidates,
-      },
-    };
-    try {
-      const { value: answers, ms } = await timed(() => d.decide(c.state, questions));
-      latencies.push(ms);
-      const winner = choiceWinner(answers["pick"], c.candidates);
-      if (winner === c.expected) correct++;
-    } catch {
-      errors++;
-    }
-  }
-  const total = cases.length;
-  return { name: "selection", accuracy: correct / total, correct, total, errors, detail: {} };
 }
 
 const NOBODY = "nobody in particular";
@@ -240,67 +212,12 @@ async function runJudge(
   return { name: "judge", accuracy: correct / total, correct, total, errors, detail };
 }
 
-async function runTriage(
-  cases: TriageCase[],
-  decider: Decider,
-  stub: boolean,
-): Promise<GroupResult> {
-  let reactCorrect = 0;
-  let salienceExact = 0;
-  let salienceNear = 0;
-  let errors = 0;
-  for (const c of cases) {
-    const questions = { triage: OBSERVER_TRIAGE_QUESTION, salience: SALIENCE_QUESTION };
-    let d: Decider = decider;
-    if (stub) {
-      d = makeStubDecider({
-        triage: stubNoul(c.expectedReact),
-        salience: stubScore(c.expectedSalience - 1, ["1", "2", "3", "4", "5"]),
-      });
-    }
-    try {
-      const { value: answers, ms } = await timed(() =>
-        d.decide(`Event: ${c.event}`, questions),
-      );
-      latencies.push(ms);
-      const triage = answers["triage"];
-      const salience = answers["salience"];
-      if (triage?.type === "noul") {
-        noulPairs.push({ p: triage.pTrue, label: c.expectedReact });
-        if ((triage.pTrue >= 0.5) === c.expectedReact) reactCorrect++;
-      }
-      if (salience?.type === "score") {
-        const pred = Math.min(5, Math.max(1, Math.round(salience.expected) + 1));
-        if (pred === c.expectedSalience) salienceExact++;
-        if (Math.abs(pred - c.expectedSalience) <= 1) salienceNear++;
-      }
-    } catch {
-      errors++;
-    }
-  }
-  const total = cases.length;
-  return {
-    name: "triage",
-    accuracy: reactCorrect / total,
-    correct: reactCorrect,
-    total,
-    errors,
-    detail: {
-      "salience:exact": salienceExact / total,
-      "salience:within1": salienceNear / total,
-    },
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 const GATE_THRESHOLDS: Record<string, number> = {
-  selection: 0.7,
   judge: 0.6,
-  triage: 0.7,
-  "triage:salience:exact": 0.5,
 };
 
 function parseArgs(): { stub: boolean; gate: boolean; url: string; dataset: string } {
@@ -324,13 +241,9 @@ async function main(): Promise<void> {
   const decider: Decider = client;
 
   console.log(`laya eval: ${stub ? "STUB decider" : `live ${url}`} | dataset ${dataset}`);
-  console.log(`cases: selection=${data.groups.selection.length} judge=${data.groups.judge.length} triage=${data.groups.triage.length}`);
+  console.log(`cases: judge=${data.groups.judge.length}`);
 
-  const results = [
-    await runSelection(data.groups.selection, decider, stub),
-    await runJudge(data.groups.judge, decider, stub),
-    await runTriage(data.groups.triage, decider, stub),
-  ];
+  const results = [await runJudge(data.groups.judge, decider, stub)];
 
   const ece = computeEce(noulPairs, 10);
   const lat = latencyStats(latencies);

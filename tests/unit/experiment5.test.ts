@@ -16,9 +16,7 @@ import { isPartialHistoryEntry } from "../../src/engine/patchApplier.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import {
   detectIdentityLeak,
-  getOpenQuestions,
   getRecentOwnActions,
-  validateSelectionForActor,
 } from "../../src/engine/contextBuilder.js";
 import { Logger, createTestLogger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld, hist, errorText, triedHist } from "../helpers.js";
@@ -183,52 +181,6 @@ describe("exp5-8 explanation pressure (ticks 14/20)", () => {
 
 
 
-describe("exp5-5/7 selection guard (ticks 4/7/13/16/19/20)", () => {
-  it("validateSelectionForActor flags POV swaps and repeats, passes clean picks", () => {
-    const world = antonWorldWithProps();
-    expect(validateSelectionForActor(world, "dana", "Anton walks over and introduces himself.")).toMatch(
-      /identity leak/,
-    );
-    expect(
-      validateSelectionForActor(world, "dana", "Anton plans to shadow Dana today."),
-    ).toMatch(/identity leak/);
-    world.history.push(hist(world, "Tanya: Shake Anton's hand warmly."));
-    expect(
-      validateSelectionForActor(world, "tanya", "Stand up and shake Anton's hand."),
-    ).toMatch(/repetition/);
-    expect(
-      validateSelectionForActor(world, "tanya", "Walk to the coffee machine and pour a coffee."),
-    ).toBeUndefined();
-  });
-
-  it("runTurn substitutes a clean candidate instead of burning consequence attempts", async () => {
-    const logger = new Logger({ sessionId: "exp5-guard", writeToFile: false });
-    const world = makeTinyWorld();
-    world.userActorId = "u";
-    world.turnIndex = 1; // N's turn
-    world.history.push(hist(world, "N: Shake U's hand warmly."));
-    const { MockProposalEngine } = await import("../../src/mocks/mockProposalEngine.js");
-    const { MockSelectionEngine } = await import("../../src/mocks/mockSelectionEngine.js");
-    const { MockConsequenceEngine } = await import("../../src/mocks/mockConsequenceEngine.js");
-    const deps = makeTestDeps(logger, {
-      proposalEngine: new MockProposalEngine(logger, {
-        [`n@tick0`]: {
-          suggestions: ["Stand up and shake U's hand.", "Stay at the desk and continue working."],
-          reasoning: "scripted",
-        },
-      }),
-      selectionEngine: new MockSelectionEngine(logger, {
-        [`n@tick0`]: { action: "Stand up and shake U's hand.", reasoning: "scripted repeat" },
-      }),
-      consequenceEngine: new MockConsequenceEngine(logger),
-    });
-    const next = await runTurn(world, deps);
-    expect(logger.store.byEvent("selection_rejected")).toHaveLength(1);
-    expect(logger.store.byEvent("selection_substituted")).toHaveLength(1);
-    expect(next.history.at(-1)!.text).toContain("Stay at the desk and continue working.");
-  });
-});
-
 describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
   function fallenWorld(): World {
     const world = makeTinyWorld();
@@ -254,10 +206,12 @@ describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
 
   it("resolveRender applies liveness instead of a 4th fallback (NPC only)", async () => {
     const logger = new Logger({ sessionId: "exp5-liveness", writeToFile: false });
-    // Unrepairable: unknown actor in a person-context position, both attempts.
-    const bad: ConsequenceResult = { narrative: "N waves at Liam.", reasoning: "bad" };
+    // PLAN_V2 Phase 4: prose violations are accepted-and-marked; liveness
+    // is only reachable when the narrate engine itself throws.
     const deps = makeTestDeps(logger, {
-      consequenceEngine: { resolve: async () => structuredClone(bad) } as never,
+      consequenceEngine: {
+        resolve: async () => { throw new Error("provider down"); },
+      } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
     const out = await resolveRender(fallenWorld(), { actorId: "n", text: "Wait quietly." }, deps);
@@ -275,9 +229,10 @@ describe("exp5-6 NPC liveness floor (Tanya 7 / Dana 7 fallbacks)", () => {
       triedHist(world, "U tried: Walk over."),
       triedHist(world, "U tried: Walk over."),
     );
-    const bad: ConsequenceResult = { narrative: "U waves at Liam.", reasoning: "bad" };
     const deps = makeTestDeps(logger, {
-      consequenceEngine: { resolve: async () => structuredClone(bad) } as never,
+      consequenceEngine: {
+        resolve: async () => { throw new Error("provider down"); },
+      } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
     const out = await resolveRender(
