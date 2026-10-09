@@ -53,6 +53,12 @@ import {
 } from "../core/telemetry.js";
 import { ProviderCallCounter } from "./turnTelemetry.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
+import {
+  directorConfigFor,
+  evaluateDirectorStaleness,
+  worldStateSignature,
+} from "../core/director.js";
+import type { DirectorEvent } from "../types.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { type TurnEngines } from "../llm/index.js";
@@ -768,6 +774,27 @@ async function autosave(world: World, deps: EngineDependencies): Promise<void> {
 }
 
 /**
+ * PLAN_V2 Phase 5 (the director): record an injected incident as a world
+ * fact in history. Perceived by every actor (it's a world fact, not a
+ * private observation), so it reaches every prompt and the picture data.
+ * It is NOT an action — no actionText — so the staleness core scan and
+ * the repetition screens skip it.
+ */
+function appendDirectorIncident(
+  world: World,
+  event: DirectorEvent,
+  config: EngineConfig,
+): void {
+  world.history.push({
+    text: event.text,
+    perceivers: world.actors.map((a) => a.id),
+  });
+  if (world.history.length > config.maxHistoryEntries) {
+    world.history.splice(0, world.history.length - config.maxHistoryEntries);
+  }
+}
+
+/**
  * Run a single immediate turn for the current actor and return the next world.
  * User actors: no proposal/selection — the user decides freely via
  * getUserAction (called with no suggestions). NPC actors: propose + select.
@@ -899,11 +926,27 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           "(wire LLMIntentEngine via createLlmEngines, or inject one in tests)",
         );
       }
+      // PLAN_V2 Phase 5 (the director): the previous turn may have
+      // injected an incident — carry it into this turn's intent prompt as
+      // a world fact, exactly once. The shallow copy keeps the caller's
+      // world untouched; the snapshot drops the pending flag so no later
+      // turn re-shows it. (User turns have no intent call — the incident
+      // stays pending until the next NPC turn. It's already in history,
+      // so the human sees it regardless.)
+      const directorIncident = world.directorPendingIncident;
+      if (directorIncident !== undefined) {
+        delete turnSnapshot.directorPendingIncident;
+      }
       // The intent call occupies the proposal slot in the turn budget —
       // it is the turn's decision-stage provider call.
       const intentStart = Date.now();
       callCounter.note("proposal", intentEngine);
-      const intentResult = await intentEngine.intent(world, actor.id);
+      const intentResult = await intentEngine.intent(
+        directorIncident !== undefined
+          ? { ...world, directorPendingIncident: directorIncident }
+          : world,
+        actor.id,
+      );
       proposalMs = Date.now() - intentStart;
       report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: "intent engine done — action decided" });
       report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `intent engine — ${actor.id} is deciding…` });
@@ -1185,6 +1228,13 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // or a laptop setup happened.
   // F18: applyRenderResult mutates the turn-start snapshot in place —
   // no second clone.
+  // PLAN_V2 Phase 5 (the director): capture the engine-owned world-state
+  // signature BEFORE applyRenderResult mutates the snapshot in place —
+  // the end-of-turn staleness check compares the post-turn world against
+  // this. V2-only (null on v1 — v1 turns never touch director state).
+  const directorSignatureBefore = readTurnLoopV2()
+    ? worldStateSignature(turnSnapshot)
+    : null;
   const patched = applyRenderResult(world, action, render, executed, config, {
     fallback: isFallbackConsequence(render),
     honestHistoryNote: getHonestHistoryNote(render),
@@ -1215,6 +1265,71 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   patched.tick += 1;
   patched.turnIndex = (patched.turnIndex + 1) % patched.order.length;
   const nextWorld = patched;
+
+  // PLAN_V2 Phase 5 (the director): deterministic staleness trigger,
+  // v2 path only (v1 is frozen pending the Phase 6 cutover). A turn is
+  // stale when its verb|noun action core is not new vs the recent window
+  // AND the engine-owned world state didn't change. The counter persists
+  // on the world; when it hits the threshold the next unconsumed event is
+  // consumed, recorded in history, and parked as pending for the next NPC
+  // turn's intent prompt (see the intent-call site above).
+  if (directorSignatureBefore !== null) {
+    const stalenessConfig = directorConfigFor(nextWorld);
+    if (stalenessConfig !== null) {
+      // The just-completed turn's entry is history's tail; scan the
+      // threshold entries before it for their action cores. Entries
+      // without a recorded action (director incidents, legacy saves)
+      // carry no core and are skipped.
+      const priorCores: string[] = [];
+      for (const e of nextWorld.history
+        .slice(0, -1)
+        .slice(-stalenessConfig.threshold)) {
+        if (e.actionText !== undefined) {
+          priorCores.push(suggestionCore(nextWorld, e.actionText));
+        }
+      }
+      const { stalenessCount, inject } = evaluateDirectorStaleness({
+        actionCore: suggestionCore(nextWorld, action.text),
+        priorCores,
+        worldChanged:
+          worldStateSignature(nextWorld) !== directorSignatureBefore,
+        stalenessCount: nextWorld.directorStalenessCount ?? 0,
+        consumedIds: nextWorld.directorEventsConsumed ?? [],
+        config: stalenessConfig,
+      });
+      nextWorld.directorStalenessCount = stalenessCount;
+      if (inject !== undefined) {
+        // The trigger fired: consume the event, record it as a world
+        // fact in history (so the picture shows it), and park it as
+        // pending for the next NPC turn's intent prompt. The LLM never
+        // decides *whether* drama happens; it only narrates it well.
+        // Pending is persisted — a save between turns keeps it.
+        nextWorld.directorEventsConsumed = [
+          ...(nextWorld.directorEventsConsumed ?? []),
+          inject.id,
+        ];
+        nextWorld.directorPendingIncident = inject;
+        appendDirectorIncident(nextWorld, inject, config);
+        logger.log({
+          module: "director",
+          event: "director_event_injected",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: {
+            stalenessThreshold: stalenessConfig.threshold,
+          },
+          output: {
+            eventId: inject.id,
+            text: inject.text,
+            remaining:
+              stalenessConfig.events.length -
+              nextWorld.directorEventsConsumed.length,
+          },
+        });
+      }
+    }
+  }
 
   // F31: accumulate this turn's LLM usage totals (per-call usage is logged
   // by the engines) and include them on the turn-completed record.
