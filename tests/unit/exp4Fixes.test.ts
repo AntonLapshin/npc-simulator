@@ -33,10 +33,8 @@ import {
   detectVoiceViolation,
   validateNarrativeVoice,
 } from "../../src/engine/validate/narrative.js";
-import {
-  propStubForGroundingErrors,
-  validateObjectGrounding,
-} from "../../src/engine/validate/objects.js";
+import { validateObjectGrounding } from "../../src/engine/validate/objects.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
 import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
 import { LIVENESS_HISTORY_MARKER } from "../../src/engine/patchApplier.js";
@@ -237,125 +235,67 @@ describe("exp4 item 8 (S5): pose-aware state labels", () => {
   });
 });
 
-describe("exp4 item 10 (S6): deterministic prop stubs + pour distance", () => {
-  const stubErrors = (codes: string[]): ValidationError[] =>
-    codes.map((code) => ({ code, message: "m" }));
-
-  it("sipping with nothing held stubs prop:cup", () => {
+describe("exp4 item 10 (S6, Phase 3): engine-executed props + pour distance", () => {
+  it("executor plans prop:cup for sipping with nothing held", () => {
     const world = officeWorld();
+    world.scene.objects.push({
+      id: "anton_mug", name: "Anton's mug", description: "A mug.",
+      x: 16, y: 3, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
     const action: Action = { actorId: "anton", text: "Take a sip of coffee." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton sips his coffee.",
-        stubErrors(["object_grounding.sip_no_prop"]),
-      ),
-    ).toBe("cup");
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.kind).toBe("pick-up");
+    expect(outcome!.plan.propName).toBe("cup");
   });
 
-  it("typing with nothing held stubs prop:laptop", () => {
+  it("executor plans prop:laptop for typing near a laptop", () => {
     const world = officeWorld();
-    // Exp-6 item 12: the stub needs a real laptop nearby — place one on
-    // the desk next to Anton before typing.
+    // Exp-6 item 12: the executor needs a real laptop nearby — place one
+    // on the desk next to Anton before typing.
     world.scene.objects.push({
       id: "anton_laptop", name: "Anton's laptop", description: "A laptop.",
-      x: 16, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
-    } as never);
-    const action: Action = { actorId: "anton", text: "Type up the onboarding notes." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton types on his laptop.",
-        stubErrors(["object_grounding.sip_no_prop"]),
-      ),
-    ).toBe("laptop");
+      x: 16, y: 3, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
+    const action: Action = { actorId: "anton", text: "Type up the report." };
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.propName).toBe("laptop");
   });
 
-  it("typing with no laptop nearby stubs nothing (exp-6 item 12)", () => {
-    const world = officeWorld(); // no laptop object anywhere near Anton
-    const action: Action = { actorId: "anton", text: "Type up the onboarding notes." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton types on his laptop.",
-        stubErrors(["object_grounding.sip_no_prop"]),
-      ),
-    ).toBeNull();
-  });
-
-  it("opening the laptop stubs prop:laptop", () => {
+  it("executor plans prop:cup for pour/brew next to a machine", () => {
     const world = officeWorld();
+    const dana = world.actors.find((a) => a.id === "dana")!;
+    dana.x = 2; dana.y = 2; // next to the coffee machine at (2,1)
     world.scene.objects.push({
-      id: "anton_laptop", name: "Anton's laptop", description: "A laptop.",
-      x: 16, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
-    } as never);
-    const action: Action = { actorId: "anton", text: "Open the laptop." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton opens his laptop.",
-        stubErrors(["action.pour_no_patch"]),
-      ),
-    ).toBe("laptop");
+      id: "dana_mug", name: "Dana's mug", description: "A mug.",
+      x: 2, y: 3, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
+    const action: Action = { actorId: "dana", text: "Pour a coffee." };
+    const outcome = executeManipulation(world, action);
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.propName).toBe("cup");
   });
 
-  it("pouring next to the machine stubs prop:cup", () => {
+  it("executor plans nothing for pour/brew far from any machine", () => {
+    const world = officeWorld(); // dana at (15,11), machine at (2,1)
+    const action: Action = { actorId: "dana", text: "Pour a coffee." };
+    expect(executeManipulation(world, action)).toBeNull();
+  });
+
+  it("executor refuses two manipulation kinds in one action (single-manipulation contract)", () => {
     const world = officeWorld();
-    const anton = world.actors.find((a) => a.id === "anton")!;
-    anton.x = 2; anton.y = 2; // next to the coffee machine at (2,1)
-    const action: Action = { actorId: "anton", text: "Pour a coffee." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton pours coffee from the machine.",
-        stubErrors(["object_grounding.brew_no_patch"]),
-      ),
-    ).toBe("cup");
+    // "pick up" + "hand over" are contradictory end states — the engine
+    // executes exactly one manipulation per turn, so this plans nothing.
+    const mixed: Action = { actorId: "anton", text: "Pick up the mug and hand it to Dana." };
+    expect(executeManipulation(world, mixed)).toBeNull();
   });
 
-  it("pouring from across the room is not stubbed (genuinely unrenderable)", () => {
-    const world = officeWorld(); // anton at (16,2), machine at (2,1)
-    const action: Action = { actorId: "anton", text: "Pour a coffee." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton pours coffee from the machine.",
-        stubErrors(["object_grounding.brew_no_patch"]),
-      ),
-    ).toBeNull();
-  });
-
-  it("non-prop errors disqualify the stub", () => {
-    const world = officeWorld();
-    const action: Action = { actorId: "anton", text: "Take a sip." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton sips his coffee.",
-        stubErrors(["object_grounding.sip_no_prop", "movement.no_position_change"]),
-      ),
-    ).toBeNull();
-  });
-
-  it("already holding something disqualifies the stub", () => {
+  it("already holding something disqualifies pick-up", () => {
     const world = officeWorld();
     world.actors.find((a) => a.id === "anton")!.prop = "cup";
     const action: Action = { actorId: "anton", text: "Take a sip." };
-    expect(
-      propStubForGroundingErrors(
-        world,
-        action,
-        "Anton sips his coffee.",
-        stubErrors(["object_grounding.sip_no_prop"]),
-      ),
-    ).toBeNull();
+    expect(executeManipulation(world, action)).toBeNull();
   });
 
   it("pour_too_far fires when brewing/pouring far from any machine (tick-29 repro)", () => {

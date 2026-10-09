@@ -19,6 +19,7 @@ import {
   applyConsequence,
   isPartialHistoryEntry,
 } from "../../src/engine/patchApplier.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import {
   detectIdentityLeak,
   getOpenQuestions,
@@ -92,24 +93,36 @@ describe("exp5-3 ranked destination resolution (ticks 3/15/18/19)", () => {
 });
 
 describe("exp5-4 triple-verb semantics (tick 15)", () => {
-  it("bare 'open laptop' without a patch fails like 'open my laptop' (no prose luck)", () => {
+  it("bare 'open laptop' plans like 'open my laptop' (no prose luck, Phase 3)", () => {
     const world = makeTinyWorld();
+    world.scene.objects.push({
+      id: "u_laptop", name: "U's laptop", description: "A laptop.",
+      x: 1, y: 2, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
+    });
     for (const text of [
       "Sit down and open laptop to set up.",
       "Sit down and open my laptop to set up.",
     ]) {
+      // Phase 3: the engine plans the laptop pick-up from either phrasing
+      // (the determiner never mattered to the planner) — no model patch
+      // demanded, no prose luck.
+      const action = { actorId: "u", text };
+      const outcome = executeManipulation(world, action);
+      expect(outcome, text).not.toBeNull();
+      expect(outcome!.plan.kind, text).toBe("pick-up");
+      expect(outcome!.plan.propName, text).toBe("laptop");
       const v = validateConsequence(
         world,
         {
           ...baseResult("U sits down at the desk."),
           actorPatches: [{ actorId: "u", pose: "sit", thoughts: "Settling in." }],
         },
-        { actorId: "u", text },
+        action,
         { moves: false, speaks: false, quotedSpeech: [] },
+        undefined,
+        outcome,
       );
-      expect(v.valid, text).toBe(false);
-      expect(errorText(v.errors)).toMatch(/pour\/brew\/open/);
-      expect(errorText(v.errors)).toMatch(/sit now/);
+      expect(v.valid, text).toBe(true);
     }
   });
 
@@ -194,7 +207,7 @@ describe("exp5-1 tier-2 salvage (ticks 6/9/12/18)", () => {
     expect(
       isTier2Salvageable([
         { code: "speech.dropped_words", message: "narrative drops the acting actor's exact words" },
-        { code: "action.pour_no_patch", message: "action says to pour/brew/open but no objectPatch/prop patch backs it" },
+        { code: "object.phantom_manipulation", message: "narrative describes pick-up but the engine executed no manipulation" },
       ]),
     ).toBe(true);
     expect(
