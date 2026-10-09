@@ -18,7 +18,7 @@ fixes.
 | Phase | Model calls/turn (typical) | What dies |
 |---|---|---|
 | now (PR #6) | ~4–6 (proposal + selection + 1–2 consequence + retries) | — |
-| 1. Engine-owned movement | ~3–5 | B3, B6, movement retries |
+| 1. Engine-owned movement ✅ | ~3–5 | B3, B6, movement retries |
 | 2. Engine-owned speech | ~3–4 | B1, quote-salvage path |
 | 3. Engine-owned objects | ~3–4 | prop-stub retries, zero-patch turns |
 | 4. Render-only contract | **2–3** (proposal + selection + 1 render) | the patch-validation retry loop (the 70% cost center) |
