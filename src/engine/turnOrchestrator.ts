@@ -35,6 +35,14 @@ import {
 } from "./manipulationExecutor.js";
 import { planPose } from "../core/text.js";
 import { quoteContained, reinsertQuote } from "../core/speech.js";
+import {
+  budgetWarningMessage,
+  DEFAULT_TURN_CALL_BUDGET,
+  evaluateBudget,
+  type TurnOutcome,
+  type TurnTelemetry,
+} from "../core/telemetry.js";
+import { ProviderCallCounter } from "./turnTelemetry.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
@@ -108,6 +116,12 @@ export type EngineDependencies = {
    * by createLlmEngines when the Laya layer is on (undefined otherwise).
    */
   plannerChatComplete?: ChatComplete;
+  /**
+   * Phase 6: per-turn economics telemetry hook. Called once per turn with
+   * the timing/call breakdown (the --auto UI uses it for the running
+   * table). Optional — unset in tests and non-UI callers.
+   */
+  onTurnTelemetry?: (telemetry: TurnTelemetry) => void;
 };
 
 /**
@@ -262,8 +276,14 @@ export async function resolveRender(
   world: World,
   action: Action,
   deps: EngineDependencies,
-  opts: { allowLiveness?: boolean; intent?: Intent } = {},
-): Promise<{ render: ConsequenceResult; executed: ExecutedTurn; liveness: boolean }> {
+  opts: { allowLiveness?: boolean; intent?: Intent; callCounter?: ProviderCallCounter } = {},
+): Promise<{
+  render: ConsequenceResult;
+  executed: ExecutedTurn;
+  liveness: boolean;
+  /** Phase 6: deterministic engine-execution ms vs pure render-call ms. */
+  timings: { executeMs: number; renderMs: number };
+}> {
   const config = depsConfig(deps);
   const logger = deps.logger;
   const actor = world.actors.find((a) => a.id === action.actorId);
@@ -289,6 +309,10 @@ export async function resolveRender(
   // text, so the executors use its fields instead of re-parsing the text
   // (no translation layer). On the LLM/chat path the intent is undefined
   // and the text parsers run as before.
+  // Phase 6: the deterministic pre-pass is timed separately from the
+  // render calls — engine execution is microseconds, provider calls are
+  // the cost.
+  const executeStart = Date.now();
   let plannedMovement = planMovementSemantics(world, action, opts.intent);
   // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1, off
   // by default). Laya only ever VETOES a planned move — when it is
@@ -350,6 +374,7 @@ export async function resolveRender(
     });
   }
   const enginePose = planPose(action.text);
+  const executeMs = Date.now() - executeStart;
 
   const executed: ExecutedTurn = {
     movement: engineMovement,
@@ -377,6 +402,9 @@ export async function resolveRender(
 
   // ---- Render (LLM): prose in, prose out. Max 2 attempts — the second
   // only for prose issues (the deterministic repairs below burn none).
+  // Phase 6: pure render-call ms accumulate here (attempts included —
+  // every resolve() is a provider call on a provider-backed engine).
+  let renderCallMs = 0;
   for (let attempt = 1; attempt <= RENDER_MAX_ATTEMPTS; attempt++) {
     if (timeLeft() <= 0) {
       deadlineExceeded = true;
@@ -389,17 +417,25 @@ export async function resolveRender(
       // cancelled on timeout.
       // Exp-6 item 2: flag user turns so the engine leads with the
       // user-turn directive (the player's words are ground truth).
-      render = await withTurnDeadline(
-        (signal) =>
-          deps.consequenceEngine.resolve(world, action, feedback, {
-            signal,
-            isUserTurn: !deps.forceAllNpc && action.actorId === world.userActorId,
-            engineMovement,
-            exactQuote,
-            engineManipulation,
-          }),
-        timeLeft(),
-      );
+      // Phase 6: count the invocation when the engine is provider-backed.
+      opts.callCounter?.note("render", deps.consequenceEngine);
+      const callStart = Date.now();
+      try {
+        render = await withTurnDeadline(
+          (signal) =>
+            deps.consequenceEngine.resolve(world, action, feedback, {
+              signal,
+              isUserTurn: !deps.forceAllNpc && action.actorId === world.userActorId,
+              engineMovement,
+              exactQuote,
+              engineManipulation,
+            }),
+          timeLeft(),
+        );
+      } finally {
+        // A throwing call still burned provider time — count it.
+        renderCallMs += Date.now() - callStart;
+      }
     } catch (err) {
       if (timeLeft() <= 0 || errorMessage(err) === "turn deadline exceeded") {
         deadlineExceeded = true;
@@ -475,7 +511,7 @@ export async function resolveRender(
         actorId: action.actorId,
         input: { action, render, attempt },
       });
-      return { render, executed, liveness: false };
+      return { render, executed, liveness: false, timings: { executeMs, renderMs: renderCallMs } };
     }
 
     logger.log({
@@ -539,7 +575,7 @@ export async function resolveRender(
         input: { action, priorFallbacks },
         output: { liveness },
       });
-      return { render: liveness, executed: emptyExecuted, liveness: true };
+      return { render: liveness, executed: emptyExecuted, liveness: true, timings: { executeMs, renderMs: renderCallMs } };
     }
   }
 
@@ -557,7 +593,7 @@ export async function resolveRender(
   // the flag first (narrative equality stays as backward compat).
   const fallbackResult = structuredClone(FALLBACK_CONSEQUENCE);
   fallbackResult.fallback = true;
-  return { render: fallbackResult, executed: emptyExecuted, liveness: false };
+  return { render: fallbackResult, executed: emptyExecuted, liveness: false, timings: { executeMs, renderMs: renderCallMs } };
 }
 
 async function autosave(world: World, deps: EngineDependencies): Promise<void> {
@@ -592,6 +628,13 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   const config = depsConfig(deps);
   const logger = deps.logger;
   const actor = getCurrentActor(world);
+
+  // Phase 6: per-turn provider-call counter + stage timings. Telemetry
+  // only — the counter never aborts or alters the turn.
+  const callCounter = new ProviderCallCounter();
+  let proposalMs = 0;
+  let selectionStart = 0;
+  let selectionBlockMs = 0;
 
   // Item C2: per-turn engine routing — user turns run proposal+consequence
   // on the capable (hard) tier when the engines provide it; NPC turns keep
@@ -702,7 +745,11 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
         chatComplete: turnDeps.laya.plannerChatComplete,
       }, logger);
     }
+    // Phase 6: count + time the proposal invocation when provider-backed.
+    const proposalStart = Date.now();
+    callCounter.note("proposal", turnDeps.proposalEngine);
     const proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
+    proposalMs = Date.now() - proposalStart;
     report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
     report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
     // Phase 5: the Laya proposal engine returns its fully-typed intent
@@ -711,6 +758,11 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // it generated the action text). On the LLM path proposal.intent is
     // undefined and the intent-first intent (if any) is advisory only.
     decidedIntent = proposal.intent ?? intent;
+    // Phase 6: count + time the selection invocation(s) when
+    // provider-backed. The selectionExecuteMs bucket covers selection,
+    // screening, and the renderability re-pick below.
+    selectionStart = Date.now();
+    callCounter.note("selection", turnDeps.selectionEngine);
     const selection = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
       world,
       actor.id,
@@ -827,6 +879,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           (s) => stripSelectionPrefix(s) !== actionText,
         );
         if (filtered.length > 0) {
+          // Phase 6: the re-pick is a second selection provider call.
+          callCounter.note("selection", turnDeps.selectionEngine);
           const repick = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
             world,
             actor.id,
@@ -856,6 +910,9 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       }
     }
   }
+  // Phase 6: close the selection bucket (selection + screening +
+  // renderability re-pick, if any).
+  selectionBlockMs = Date.now() - selectionStart;
 
   logger.log({
     module: "turn",
@@ -870,14 +927,20 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // Phase 4: turn = proposal → selection → execute (engine) → render
   // (LLM). The engine already executed movement/quote/manipulation/pose;
   // the render call narrates the executed facts as prose.
-  const { render, executed, liveness } = await resolveRender(world, action, turnDeps, {
+  const { render, executed, liveness, timings } = await resolveRender(world, action, turnDeps, {
     // Exp-5 item 6: the liveness floor rewrites failed turns — never the
     // user's own action text. In autonomous mode every actor is an NPC, so
     // the floor applies to all of them.
     allowLiveness: turnDeps.forceAllNpc === true || action.actorId !== world.userActorId,
     // Phase 5: the cascade's fully-typed intent threads to the executors.
     intent: decidedIntent,
+    // Phase 6: the turn's provider-call counter (render invocations).
+    callCounter,
   });
+  // Phase 6: the "selection+execute" bucket — selection block plus the
+  // deterministic engine execution inside resolveRender.
+  const selectionExecuteMs = selectionBlockMs + timings.executeMs;
+  const renderMs = timings.renderMs;
   report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "render validated" });
 
   // Exp-4 item 6: mark fallback history as un-applied so proposals ground
@@ -939,6 +1002,60 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // error until it does.
     ...(turnUsage.totalTokens > 0 ? { turnUsage } : {}),
   });
+
+  // Phase 6: turn economics. The budget check is a loud warning, never a
+  // hard abort — a turn that needs 5 calls to avoid a fallback is better
+  // than a fallback. The turn_telemetry event carries the per-stage
+  // breakdown; `npm run report:turns` regenerates the findings table from
+  // any run's log.
+  const providerCalls = callCounter.total();
+  const budget = config.turnCallBudget ?? DEFAULT_TURN_CALL_BUDGET;
+  const { exceeded: budgetExceeded } = evaluateBudget(providerCalls, budget);
+  const calls = callCounter.breakdown();
+  if (budgetExceeded) {
+    logger.log({
+      module: "turn",
+      event: "budget_exceeded",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { providerCalls, budget, calls, proposalMs, selectionExecuteMs, renderMs },
+      error: budgetWarningMessage(action.actorId, providerCalls, budget, calls),
+    });
+  }
+  const outcome: TurnOutcome = liveness
+    ? "liveness"
+    : isFallbackConsequence(render)
+      ? "fallback"
+      : "clean";
+  const telemetry: TurnTelemetry = {
+    tick: world.tick,
+    turnIndex: world.turnIndex,
+    actorId: action.actorId,
+    proposalMs,
+    selectionExecuteMs,
+    renderMs,
+    totalMs: proposalMs + selectionExecuteMs + renderMs,
+    calls,
+    providerCalls,
+    budget,
+    budgetExceeded,
+    outcome,
+  };
+  logger.log({
+    module: "turn",
+    event: "turn_telemetry",
+    tick: world.tick,
+    turnIndex: world.turnIndex,
+    actorId: action.actorId,
+    output: telemetry,
+  });
+  try {
+    turnDeps.onTurnTelemetry?.(telemetry);
+  } catch {
+    // Telemetry hooks must never break the turn.
+  }
 
   await autosave(nextWorld, turnDeps);
   report(turnDeps, { stage: "turn_completed", actorId: action.actorId, message: "turn completed" });
