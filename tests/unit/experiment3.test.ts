@@ -15,7 +15,7 @@ import {
 } from "../../src/engine/deterministicSemantics.js";
 import { isSpeechOnlyFailure, resolveWithValidation, summarizeTurnOutcomes, trySalvageConsequence } from "../../src/engine/turnOrchestrator.js";
 import { suggestSimilarIds } from "../../src/engine/physicalValidator.js";
-import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
+import { computeMovementOutcome } from "../../src/core/movement.js";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld, errorText } from "../helpers.js";
 import {
@@ -366,7 +366,7 @@ describe("exp3-4 displacement cap + real progress (ticks 8/15/20)", () => {
     desk.y = 15;
     world.actors.find((a) => a.id === "u")!.x = 0;
     world.actors.find((a) => a.id === "u")!.y = 0;
-    const target = suggestMoveTarget(world, "u", undefined, "anton_desk");
+    const target = computeMovementOutcome(world, "u", { destinationObjectId: "anton_desk" });
     expect(target).not.toBeNull();
     const v = validateConsequence(
       world,
@@ -380,13 +380,13 @@ describe("exp3-4 displacement cap + real progress (ticks 8/15/20)", () => {
     expect(v).toEqual({ valid: true, errors: [] });
   });
 
-  it("suggestMoveTarget never suggests teleports", () => {
+  it("computeMovementOutcome never suggests teleports", () => {
     const world = makeTinyWorld();
     world.scene.width = 30;
     world.scene.height = 30;
-    const s = suggestMoveTarget(world, "u", "n");
-    expect(s).not.toBeNull();
-    expect(Math.hypot(s!.x - 1, s!.y - 1)).toBeLessThanOrEqual(6 + 1e-9);
+    const o = computeMovementOutcome(world, "u", { destinationActorId: "n" });
+    expect(o).not.toBeNull();
+    expect(Math.hypot(o!.x - 1, o!.y - 1)).toBeLessThanOrEqual(6 + 1e-9);
   });
 });
 
@@ -512,7 +512,7 @@ describe("exp3-6 partial-apply / salvage (ticks 3/9)", () => {
     expect(isSpeechOnlyFailure([])).toBe(false);
   });
 
-  it("resolveWithValidation salvages instead of falling back (tick-9 shape)", async () => {
+  it("resolveWithValidation applies engine movement; valid observer patches survive (tick-9 shape)", async () => {
     const logger = new Logger({ sessionId: "exp3-salvage", writeToFile: false });
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
@@ -537,7 +537,16 @@ describe("exp3-6 partial-apply / salvage (ticks 3/9)", () => {
       deps,
     );
     expect(out.narrative).not.toBe("Nothing changes.");
-    expect(out.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
+    // Phase 1: the model's (1,1) is ignored; the engine computes the step
+    // toward the coffee machine deterministically. The turn validates on
+    // the first attempt — no salvage needed.
+    const expected = computeMovementOutcome(world, "u", { destinationObjectId: "coffee_machine" }, null)!;
+    const moved = out.actorPatches.find((p) => p.actorId === "u")!;
+    expect(moved.x).toBe(expected.x);
+    expect(moved.y).toBe(expected.y);
+    expect(moved.thoughts).toBe("Coffee time.");
+    // "jeff" is not in this world's roster — the unknown-actor patch fails
+    // the attempt and salvage strips it, keeping the engine movement.
     expect(out.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
     expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
@@ -578,7 +587,7 @@ describe("exp3-9/10/11/12/13 prompting", () => {
     const short = consequenceSuffix("short");
     const full = consequenceSuffix("full");
     expect(consequenceSuffix()).toBe(full);
-    for (const needle of ["contactActorId", "quotedSpeech", "TURN DISCIPLINE", "ROSTER", "6 cells"]) {
+    for (const needle of ["contactActorId", "quotedSpeech", "TURN DISCIPLINE", "ROSTER", "ENGINE-EXECUTED", "do NOT emit x/y coordinates"]) {
       expect(short).toContain(needle);
     }
     expect(full.length).toBeGreaterThan(short.length);
@@ -1044,7 +1053,10 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
     expect(errorText(flung.errors)).toMatch(/stay in place/);
   });
 
-  it("rejects token shuffles toward distant actors (tick-15 actor variant)", () => {
+  it("the engine makes real progress toward distant actors (tick-15 actor variant)", () => {
+    // Phase 1: the validator no longer rejects token shuffles — they are
+    // impossible by construction. The engine always steps to the closest
+    // legal cell within the cap, which IS the real-progress rule.
     const world = makeTinyWorld();
     world.scene.width = 20;
     world.scene.height = 20;
@@ -1056,28 +1068,22 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
     const semantics: ActionSemantics = {
       moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [],
     };
-    const shuffle = validateConsequence(
-      world,
-      {
-        ...baseResult("U steps toward N."),
-        actorPatches: [{ actorId: "u", x: 1, y: 0, thoughts: "Going." }],
-      },
-      action,
-      semantics,
-    );
-    expect(shuffle.valid).toBe(false);
-    expect(errorText(shuffle.errors)).toMatch(/real progress/);
-
-    const stride = validateConsequence(
+    const o = computeMovementOutcome(world, "u", { destinationActorId: "n" });
+    expect(o).not.toBeNull();
+    // A 21-cell walk spends (nearly) the full 6-cell allowance — no shuffle.
+    const oldDist = Math.hypot(15, 15);
+    expect(oldDist - Math.hypot(o!.x - 15, o!.y - 15)).toBeGreaterThan(5);
+    // And the validator accepts the engine's output without a progress gate.
+    const v = validateConsequence(
       world,
       {
         ...baseResult("U strides toward N."),
-        actorPatches: [{ actorId: "u", x: 4, y: 4, thoughts: "Going." }],
+        actorPatches: [{ actorId: "u", x: o!.x, y: o!.y, thoughts: "Going." }],
       },
       action,
       semantics,
     );
-    expect(stride).toEqual({ valid: true, errors: [] });
+    expect(v).toEqual({ valid: true, errors: [] });
   });
 
   it("glance turns resolve without forced movement end to end (tick-20 shape)", async () => {
@@ -1099,10 +1105,12 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
     });
     const out = await resolveWithValidation(world, action, deps);
     expect(out.narrative).not.toBe("Nothing changes.");
-    expect(logger.store.byEvent("movement_repaired")).toHaveLength(0);
+    // Phase 1: no repair machinery — a glance plans no movement at all.
+    expect(logger.store.byEvent("movement_planned")).toHaveLength(0);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
 
-    // A stubborn teleporter on the same glance action fails instead of passing.
+    // A stubborn teleporter on the same glance action: the coordinates are
+    // stripped and ignored — the turn still resolves as a clean glance.
     const teleporting = {
       narrative: "U glances over notes.",
       actorPatches: [{ actorId: "u", x: 14, y: 14, thoughts: "Zone." }],
@@ -1114,7 +1122,9 @@ describe("phase2 movement speed + progress semantics (ticks 8/15/20)", () => {
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
     const out2 = await resolveWithValidation(world, action, deps2);
-    expect(out2.narrative).toBe("Nothing changes.");
+    expect(out2.narrative).toBe("U glances over notes.");
+    expect(logger.store.byEvent("model_coordinates_ignored")).toHaveLength(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 });
 
@@ -1173,28 +1183,31 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(out!.salvaged.narrative).toContain("is this my spot?");
   });
 
-  it("repairs missing movement in salvage when locomotion is implied", () => {
+  it("salvage keeps the engine-merged movement (no fabrication needed)", () => {
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
     world.actors.find((a) => a.id === "u")!.y = 3;
     const action = { actorId: "u", text: "Walk to the coffee machine." };
+    const semantics = { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] };
+    // Phase 1: the orchestrator merges the engine-computed position before
+    // salvage runs, so salvage keeps it — the old movement-repair tier is
+    // deleted and salvage never fabricates coordinates.
+    const engine = computeMovementOutcome(world, "u", { destinationObjectId: "coffee_machine" }, null)!;
     const out = trySalvageConsequence(
       world,
       action,
       {
-        // Narrates the walk but omits the x/y patch (weak-LLM shape).
         narrative: "Anton walks to the coffee machine.",
-        actorPatches: [{ actorId: "u", thoughts: "Going." }],
+        actorPatches: [{ actorId: "u", x: engine.x, y: engine.y, thoughts: "Going." }],
         objectPatches: [],
         reasoning: "r",
       },
-      { moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [] },
+      semantics,
     );
     expect(out).not.toBeNull();
     const moved = out!.salvaged.actorPatches.find((p) => p.actorId === "u")!;
-    expect(moved.x).toBeDefined();
-    expect(moved.y).toBeDefined();
-    expect([moved.x, moved.y]).not.toEqual([3, 3]);
+    expect(moved.x).toBe(engine.x);
+    expect(moved.y).toBe(engine.y);
   });
 
   it("does not repair glance turns: no locomotion, no movement", () => {
@@ -1256,41 +1269,45 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(contact).toBeNull();
   });
 
-  it("resolveWithValidation guides prose-only retry, then salvages (tick-9 end to end)", async () => {
+  it("resolveWithValidation guides prose-only retry, then accepts (tick-9 end to end)", async () => {
     const logger = new Logger({ sessionId: "exp3-phase4-retry", writeToFile: false });
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
     world.actors.find((a) => a.id === "u")!.y = 3;
+    const action = { actorId: "u", text: 'Walk to the coffee machine and ask "is this my spot?"' };
     const seenFeedback: (string | undefined)[] = [];
-    const bad: ConsequenceResult = {
-      narrative: "Anton approaches the coffee machine, standing beside it.",
-      actorPatches: [
-        { actorId: "u", x: 1, y: 1, thoughts: "Coffee time." },
-        { actorId: "jeff", thoughts: "Hello." },
-      ],
+    const base = {
+      narrative: "",
+      actorPatches: [{ actorId: "u", thoughts: "Coffee time." }],
       objectPatches: [],
       reasoning: "r",
-      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: false },
+      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: true, quotedSpeech: ["is this my spot?"] },
     };
     const deps = makeTestDeps(logger, {
       consequenceEngine: {
         resolve: async (_w: World, _a: { actorId: string; text: string }, feedback?: string) => {
           seenFeedback.push(feedback);
-          return structuredClone(bad);
+          // First attempt drops the action's quote; the retry restores it.
+          // Both attempts omit x/y — the engine moves regardless.
+          return structuredClone({
+            ...base,
+            narrative:
+              seenFeedback.length === 1
+                ? "Anton walks toward the coffee machine."
+                : 'Anton walks toward the coffee machine. "Is this my spot?"',
+          });
         },
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 1, autosaveEnabled: false },
     });
-    const out = await resolveWithValidation(
-      world,
-      { actorId: "u", text: "Walk to the coffee machine." },
-      deps,
-    );
-    // Degraded-but-advancing instead of "Nothing changes.": movement kept.
-    expect(out.narrative).not.toBe("Nothing changes.");
-    expect(out.actorPatches.some((p) => p.actorId === "u" && p.x === 1 && p.y === 1)).toBe(true);
-    expect(out.actorPatches.some((p) => p.actorId === "jeff")).toBe(false);
-    expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
+    const out = await resolveWithValidation(world, action, deps);
+    expect(out.narrative).toMatch(/is this my spot/i);
+    // Engine movement applied on the accepted attempt (model emits no x/y).
+    const expected = computeMovementOutcome(world, "u", { destinationObjectId: "coffee_machine" }, null)!;
+    const moved = out.actorPatches.find((p) => p.actorId === "u")!;
+    expect(moved.x).toBe(expected.x);
+    expect(moved.y).toBe(expected.y);
+    expect(logger.store.byEvent("retry_started")).toHaveLength(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
     // The retry was told to keep patches and fix prose only.
     expect(seenFeedback[1]).toMatch(/keep the remaining valid patches|keep every actorPatch/);
@@ -1305,19 +1322,17 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     });
     await resolveWithValidation(makeTinyWorld(), { actorId: "u", text: "Wave." }, cleanDeps);
 
-    // Salvaged turn: valid movement + stray patch, speech-clean.
+    // Salvaged turn: the narrative drops the action's quote (speech nit);
+    // salvage reinserts it deterministically.
     const salvagedWorld = officeWorld();
     salvagedWorld.actors.find((a) => a.id === "u")!.x = 3;
     salvagedWorld.actors.find((a) => a.id === "u")!.y = 3;
     const salvaged: ConsequenceResult = {
-      narrative: "Anton approaches the coffee machine, standing beside it.",
-      actorPatches: [
-        { actorId: "u", x: 1, y: 1, thoughts: "Coffee time." },
-        { actorId: "jeff", thoughts: "Hello." },
-      ],
+      narrative: "Anton walks toward the coffee machine.",
+      actorPatches: [{ actorId: "u", thoughts: "Coffee time." }],
       objectPatches: [],
       reasoning: "r",
-      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: false },
+      effects: { moved: true, destinationObjectId: "coffee_machine", spoke: true, quotedSpeech: ["is this my spot?"] },
     };
     const salvagedDeps = makeTestDeps(logger, {
       consequenceEngine: { resolve: async () => structuredClone(salvaged) } as never,
@@ -1325,23 +1340,33 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     });
     await resolveWithValidation(
       salvagedWorld,
-      { actorId: "u", text: "Walk to the coffee machine." },
+      { actorId: "u", text: 'Walk to the coffee machine and ask "is this my spot?"' },
       salvagedDeps,
     );
 
-    // Fallback turn: unrepairable physics (out of bounds, no locomotion).
+    // Fallback turn: a handshake across the room — the engine closes what
+    // it can in one turn, but contact adjacency is unreachable and salvage
+    // cannot fix a hard contact gap.
+    const farWorld = makeTinyWorld();
+    farWorld.scene.width = 20;
+    farWorld.scene.height = 20;
+    farWorld.actors.find((a) => a.id === "u")!.x = 0;
+    farWorld.actors.find((a) => a.id === "u")!.y = 0;
+    farWorld.actors.find((a) => a.id === "n")!.name = "Nadia";
+    farWorld.actors.find((a) => a.id === "n")!.x = 15;
+    farWorld.actors.find((a) => a.id === "n")!.y = 15;
     const fallbackDeps = makeTestDeps(logger, {
       consequenceEngine: {
         resolve: async () => ({
-          narrative: "Teleport!",
-          actorPatches: [{ actorId: "u", x: 999, y: 999 }],
+          narrative: "U shakes Nadia's hand.",
+          actorPatches: [{ actorId: "u", thoughts: "A long-distance handshake." }],
           objectPatches: [],
           reasoning: "bad",
         }),
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
-    const fell = await resolveWithValidation(makeTinyWorld(), { actorId: "u", text: "Wave." }, fallbackDeps);
+    const fell = await resolveWithValidation(farWorld, { actorId: "u", text: "Shake Nadia's hand." }, fallbackDeps);
     expect(fell.narrative).toBe("Nothing changes.");
 
     const summary = summarizeTurnOutcomes(logger.store.all());
