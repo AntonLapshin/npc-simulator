@@ -266,6 +266,10 @@ export const SPEECH_ONLY_CODES = new Set([
   "speech.invented_dialogue",
   "speech.question_dropped",
   "speech.no_speech_rendered",
+  // Phase 2: the exact-quote containment gate is a speech-rendering nit
+  // like the rest — the in-loop backstop normally repairs it before it
+  // can fail, so reaching salvage with it is downgradable noise.
+  "speech.exact_quote_missing",
 ]);
 
 /** True when every validation error is a speech-rendering nit (dropped/invented wording, lost question, silent-behavior swap). */

@@ -1,7 +1,16 @@
 // Speech and narrative-prose validation checks (extracted from physicalValidator.ts).
 
 import type { Action, ActionSemantics, ValidationError } from "../../types.js";
-import { maskResumedActivity, normalizeQuotes, singleQuotedSegments } from "../deterministicSemantics.js";
+import { maskResumedActivity, normalizeQuotes } from "../deterministicSemantics.js";
+// Phase 2 (renderer architecture): quote parsing lives in the pure core
+// (src/core/text.ts). The local implementation was byte-identical to
+// parseActionQuotes (same normalize → double-quote {2,} scan →
+// apostrophe-aware single-quote scan), so the core parser is used under
+// the old name — existing import paths keep working.
+import { parseActionQuotes as quotedSegments } from "../../core/text.js";
+import { extractExactQuote, quoteContained } from "../../core/speech.js";
+
+export { extractExactQuote, quoteContained, quotedSegments };
 
 /**
  * F35: the canonical "resumed activity" mask lives in
@@ -76,23 +85,9 @@ export function quotedSpeechEchoedVerbatim(actionText: string, narrative: string
   return actionQuotes.some((q) => narrNorm.has(normLower(q)));
 }
 
-/** Double- and single-quoted segments (content length >= 2). */
-export function quotedSegments(text: string): string[] {
-  // Exp-6 item 2: normalize curly quotes first so curly-quoted narrative
-  // segments ("...") are extracted and compare equal to straight-quoted
-  // action text (and vice versa).
-  const normalized = normalizeQuotes(text);
-  const out: string[] = [];
-  const doubleRe = /"([^"]{2,})"/g;
-  let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
-  // Exp-3 item 6 (S3): single-quote extraction is apostrophe-aware and
-  // sees comma/colon-led dialogue (shared with parseActionQuotes) — the
-  // tick-20 invented quote ('Good morning, Tanya. I'm Dana, the new
-  // hire.') was invisible to the invented_dialogue gate before this.
-  out.push(...singleQuotedSegments(normalized));
-  return out;
-}
+/** Double- and single-quoted segments (content length >= 2) — the pure
+ * core parser, kept under this name so the validator modules that import
+ * it don't change. */
 
 export function normLower(s: string): string {
   // Exp-6 item 2: quote-canonicalized so word comparisons never trip on
@@ -187,6 +182,34 @@ export function maskReportedSpeech(text: string): string {
 export function hasOwnUtterance(text: string): boolean {
   if (quotedSegments(text).length > 0) return true;
   return new RegExp(`\\b(?:${OWN_UTTERANCE_VERBS})\\b`, "i").test(maskReportedSpeech(text));
+}
+
+/**
+ * Phase 2 (renderer architecture): the exact-quote gate. The engine owns
+ * speech now — the action text's first quoted segment is ground truth
+ * (extractExactQuote, the same extraction the turn pre-pass uses) and the
+ * narrative must contain it character-for-character (quote-style
+ * canonicalized). Paraphrase is no longer acceptable on quoted turns: the
+ * in-loop deterministic backstop (applyEngineSpeech) repairs the
+ * narrative before this gate runs, so a failure here means a path that
+ * bypassed the backstop (salvage, liveness, or a direct validation call)
+ * produced non-verbatim prose — a B1-shaped invented/paraphrased dialogue
+ * that must never become canonical history.
+ */
+export function validateExactQuote(
+  exactQuote: string | null,
+  narrative: string,
+): ValidationError[] {
+  if (exactQuote === null) return [];
+  if (quoteContained(exactQuote, narrative)) return [];
+  return [
+    {
+      code: "speech.exact_quote_missing",
+      message:
+        `narrative MUST contain the action's exact quote character-for-character ("${exactQuote.slice(0, 80)}"): ` +
+        `copy the engine-dictated words verbatim — never paraphrase, alter, truncate, or substitute different dialogue`,
+    },
+  ];
 }
 
 /** Action implies speech even without quotes — judged by Decision AI, never regex. */

@@ -38,6 +38,10 @@ import {
   planMovementSemantics,
   type MovementOutcome,
 } from "./movementExecutor.js";
+import {
+  applyEngineSpeech,
+  planSpeech,
+} from "./speechExecutor.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { propStubForGroundingErrors } from "./validate/objects.js";
@@ -372,6 +376,25 @@ export async function resolveWithValidation(
     });
   }
 
+  // Phase 2: engine-owned speech. Deterministic pre-pass from the action
+  // text alone (no model output, no judge): the exact quote is ground
+  // truth for the turn — the render call cannot invent dialogue because
+  // the engine dictates the words. Computed once per turn, before the
+  // first consequence call, so the render input carries the verbatim
+  // contract (mirrors the movement pre-pass above).
+  const exactQuote = planSpeech(action);
+  if (exactQuote !== null) {
+    logger.log({
+      module: "speech",
+      event: "speech_planned",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: { exactQuote },
+    });
+  }
+
   // Exp-7: the outer attempt cap is consequenceMaxAttempts (default 2),
   // not maxRetries+1. Retries don't steer the model (exp-7 B2) — the
   // in-loop deterministic repairs below run on every attempt, and salvage
@@ -397,6 +420,9 @@ export async function resolveWithValidation(
             // Phase 1: the render call narrates the already-executed
             // movement (facts in its input) — it never emits coordinates.
             engineMovement,
+            // Phase 2: the render call carries the engine-dictated exact
+            // quote — it never invents dialogue.
+            exactQuote,
           }),
         timeLeft(),
       );
@@ -593,6 +619,34 @@ export async function resolveWithValidation(
           });
         },
       );
+    }
+    // Phase 2: engine-owned speech — deterministic quote backstop. The
+    // render output must carry the exact quote verbatim; any deviation
+    // (dropped, paraphrased, altered — the B1 shape) is repaired
+    // deterministically here, before validation, burning no LLM retry.
+    // The speech.exact_quote_missing validator gate stays as the backstop
+    // for paths that bypass this (salvage, liveness).
+    {
+      const speech = applyEngineSpeech(
+        result,
+        action.actorId,
+        exactQuote,
+        world,
+        ({ before, after }) => {
+          logger.log({
+            module: "speech",
+            event: "speech_quote_reinserted",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action, before },
+            output: { after },
+            error:
+              "narrative failed to carry the engine-dictated exact quote verbatim — reinserted deterministically",
+          });
+        },
+      );
+      if (speech.reinserted) result = speech.result;
     }
     // Exp-4 item 6 (S4): deterministic doubled-prefix repair — "Dana:
     // Dana: …" collapses to "Dana: …" instead of tripping the voice gate
