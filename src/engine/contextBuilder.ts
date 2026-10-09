@@ -19,6 +19,7 @@ import {
   getActorById,
 } from "./perceptionHelpers.js";
 import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
+import { executedMovementFacts, type MovementOutcome } from "./movementExecutor.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -1173,6 +1174,10 @@ export function buildConsequenceContext(
   action: Action,
   feedback?: string,
   cfg: EngineConfig = defaultConfig,
+  // Phase 1: the engine already executed this turn's movement — the facts
+  // below tell the render call what happened so it narrates honestly.
+  // Undefined = unknown (older callers); null = no movement executed.
+  engineMovement?: MovementOutcome | null,
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action, cfg);
@@ -1190,11 +1195,13 @@ export function buildConsequenceContext(
     `Action text: ${action.text}`,
     "",
     `Acting actor position: ${actor ? `${actor.name} (${actor.id}) at (${actor.x}, ${actor.y})` : "(unknown)"}`,
+    // Phase 1: engine-owned movement — the render call narrates the
+    // already-executed movement; it never emits coordinates.
+    ...(engineMovement !== undefined ? executedMovementFacts(world, action.actorId, engineMovement) : []),
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
-    "If the action says to move toward/close to/next to/beside someone, the new x,y MUST be strictly closer to that actor than the current position (Euclidean distance). Example: an actor at (1,10) moving toward someone at (8,8) could go to (5,8) — never inside a desk rect, stand NEXT to it.",
-    "Same rule for NAMED LANDMARKS: if the action names a desk, the coffee machine, the door, or any object above ('my desk', 'west-side desk', 'NW-corner coffee machine'), the new x,y MUST be strictly closer to that object's rectangle than the current position. Never teleport across the room to an unrelated area; never move AWAY from the named target.",
-    "A single turn covers at most 6 cells — a cross-room walk takes several turns of real progress each time, never one teleport and never a token shuffle toward a distant target.",
+    "MOVEMENT IS ENGINE-EXECUTED: the EXECUTED MOVEMENT section above is what already happened this turn — narrate it honestly and never invent coordinates. Do not emit x/y for any actor (any coordinates you emit are ignored).",
+    "A single turn covers at most 6 cells of engine movement — a cross-room walk takes several turns, never one teleport.",
     buildObjectIdCatalog(world),
     "QUOTED-SPEECH COPY RULE: if the action text contains \"...\" segments, copy each one character-for-character into effects.quotedSpeech AND into the narrative. Never invent quotes, never add greetings, never substitute different dialogue.",
     "PHYSICAL CONTACT RULE: if the action shakes hands, hugs, high-fives, pats, kisses, or hands/passes/gives something to someone, the acting actor MUST end ADJACENT to that person (within 2.5 cells Euclidean). A handshake across the room is invalid — walk over first, then touch.",
@@ -1226,7 +1233,7 @@ export function buildConsequenceContext(
     "Do not move actors outside the scene.",
     "Do not move actors into non-passable objects.",
     "MOVEMENT RULE: declare what the action does in \"effects\" (\"moved\" true ONLY for the acting actor's own whole-body locomotion — a position change).",
-    "Emit x and y for the acting actor IFF \"moved\" is true, with a NEW position reflecting that movement; if it names another actor, the new position MUST be strictly closer to that actor and \"destinationActorId\" MUST carry that actor's exact id.",
+    "Never emit x/y coordinates for any actor: the engine executes movement (see EXECUTED MOVEMENT above) and any coordinates you emit are ignored.",
     "\"spoke\" is true when the acting actor utters words; \"quotedSpeech\" lists the exact uttered segments (empty when nothing is said).",
     "In-place gestures (turn/look/shake or nod the head, wave/raise a hand, reach for an object, sip/drink) and someone ELSE's motion in a subordinate clause ('as he enters') are NOT locomotion — no x/y change needed. Resuming a task ('return/returning/back to typing/staring/work/task/focus') is NOT locomotion either — only 'return to <place>' counts. Never place an actor INSIDE a desk/table rect; stand NEXT to it.",
   ];

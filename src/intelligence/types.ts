@@ -6,6 +6,7 @@ import type {
   SelectionResult,
   World,
 } from "../types.js";
+import type { MovementOutcome } from "../engine/movementExecutor.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -14,6 +15,17 @@ export interface ProposalEngine {
 export interface SelectionEngine {
   select(world: World, actorId: string, suggestions: string[]): Promise<SelectionResult>;
 }
+
+export type ConsequenceResolveOpts = {
+  signal?: AbortSignal;
+  isUserTurn?: boolean;
+  /**
+   * Phase 1: engine-executed movement for this turn (computed by the turn
+   * orchestrator before the render call). Engines surface it to the model
+   * as facts to narrate; the model never emits coordinates.
+   */
+  engineMovement?: MovementOutcome | null;
+};
 
 export interface ConsequenceEngine {
   /**
@@ -26,12 +38,15 @@ export interface ConsequenceEngine {
    * human player (ground truth, not a suggestion). Engines that honor it
    * lead with a directive to preserve the user's words verbatim; engines
    * that ignore it still satisfy the interface.
+   *
+   * Phase 1: `opts.engineMovement` carries the already-executed movement
+   * for the render call to narrate.
    */
   resolve(
     world: World,
     action: Action,
     feedback?: string,
-    opts?: { signal?: AbortSignal; isUserTurn?: boolean },
+    opts?: ConsequenceResolveOpts,
   ): Promise<ConsequenceResult>;
 }
 

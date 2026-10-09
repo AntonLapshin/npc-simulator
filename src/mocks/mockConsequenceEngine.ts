@@ -1,4 +1,4 @@
-import type { ConsequenceEngine } from "../intelligence/types.js";
+import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
 import { mockClassifyAction } from "./mockSemanticJudge.js";
@@ -22,9 +22,16 @@ export class MockConsequenceEngine implements ConsequenceEngine {
     private readonly script: MockConsequenceScript = {},
   ) {}
 
-  async resolve(world: World, action: Action, feedback?: string): Promise<ConsequenceResult> {
+  async resolve(
+    world: World,
+    action: Action,
+    feedback?: string,
+    opts?: ConsequenceResolveOpts,
+  ): Promise<ConsequenceResult> {
     const startedAt = Date.now();
-    const prompt = buildConsequenceContext(world, action, feedback);
+    // Phase 1: like the real engine, the mock's context carries the
+    // already-executed movement as facts to narrate.
+    const prompt = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement);
     this.logger.log({
       module: "consequence",
       event: "consequence_started",
