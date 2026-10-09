@@ -71,6 +71,15 @@ export type Actor = {
   color?: string;
   pose?: ActorPose;
   prop?: ActorProp;
+  /**
+   * Stage-1 A3: the scene object backing the held prop (engine-owned,
+   * like `prop`). Set on pick-up, cleared on put-down, transferred on
+   * hand-over; the movement applier carries this object with its holder
+   * so it never orphans at the pick-up site and hand-overs keep object
+   * identity instead of re-linking by proximity. Optional for backward
+   * compatibility — absent means "no linked scene object".
+   */
+  heldObjectId?: string | null;
   look?: ActorLook;
   /**
    * Exp-7 item A6: third-person pronouns for narrative prose
@@ -128,10 +137,15 @@ export type World = {
  * F6: a world-history entry. `text` is the human-readable record;
  * `perceivers` is the list of actor ids who perceived the event (F6:
  * knowledge is perception-gated, not global).
+ * Stage-1 A4: `actionText` is the ground-truth action behind the entry.
+ * The repetition screen derives cores from it — never from the narrative,
+ * which a mis-render can poison (exp stage-1, turn 1: "walks toward Dana"
+ * for an engine move toward Tanya let a verbatim repeat slip through).
  */
 export type HistoryEntry = {
   text: string;
   perceivers: string[];
+  actionText?: string;
 };
 
 /**
@@ -148,6 +162,7 @@ export function normalizeHistoryEntry(
   return {
     text: raw.text,
     perceivers: Array.isArray(raw.perceivers) ? [...raw.perceivers] : [...allActorIds],
+    ...(raw.actionText !== undefined ? { actionText: raw.actionText } : {}),
   };
 }
 
