@@ -34,7 +34,11 @@ import {
   parseActionQuotes,
   resolveDeterministicSemantics,
 } from "./deterministicSemantics.js";
-import { normLower, quotedSegments } from "./validate/speech.js";
+import {
+  extractExactQuote,
+  quoteContained,
+  reinsertQuote,
+} from "../core/speech.js";
 import { tryCloseTruncatedJson } from "../llm/json.js";
 import {
   findSupplementObserverSubject,
@@ -317,20 +321,26 @@ function repairMissingPropStub(
 }
 
 /**
- * Exp-3 item 3 (S4/M4): deterministic quote reinsertion. The 8B drops long
- * quotes on every attempt (tick 19: Tanya's test-plan offer died 3× on
- * speech.dropped_words — the echo-gate exemption can't help when the model
- * never renders the quote at all). The engine knows the exact words —
- * they are in the action text — so when the ONLY failures are
- * speech-rendering nits and the narrative dropped the action's quotes, the
- * missing quotes are reinserted deterministically: appended as a
- * `<Name> says "<quote>"` sentence when the model's frame is otherwise
- * clean (preserving its movement description), or replacing the narrative
- * outright when the frame itself contains invented dialogue (the rewrite
- * then contains only action-grounded quotes). The model's valid patches
- * are kept. Accepted only when the full gate suite AND the final accept
- * gate pass on the rewritten payload. No LLM call. Pure except for the
- * audit log.
+ * Exp-3 item 3 (S4/M4): deterministic quote reinsertion — Phase 2: now a
+ * pure backstop. The 8B drops long quotes on every attempt (tick 19:
+ * Tanya's test-plan offer died 3× on speech.dropped_words — the echo-gate
+ * exemption can't help when the model never renders the quote at all).
+ * The engine knows the exact words — they are in the action text — so
+ * when the narrative dropped the action's exact quote, it is reinserted
+ * deterministically via the pure core transform (`reinsertQuote` in
+ * `src/core/speech.ts`: appended as `<Name> says "<quote>"` when the
+ * model's frame is otherwise clean, preserving its movement description;
+ * replacing the narrative outright when the frame itself contains
+ * invented dialogue). The model's valid patches are kept. Accepted only
+ * when the full gate suite AND the final accept gate pass on the
+ * rewritten payload. No LLM call. Pure except for the audit log.
+ *
+ * Phase 2 note: the primary repair now happens in-loop
+ * (`applyEngineSpeech` in the orchestrator, before validation), so this
+ * salvage tier is the backstop for candidates that somehow bypassed it.
+ * The contract covers the exact quote (first quoted segment) only —
+ * multi-quote choreography is a non-goal; remaining segments stay subject
+ * to the ordinary speech gates.
  */
 function repairDroppedQuotes(
   world: World,
@@ -340,39 +350,21 @@ function repairDroppedQuotes(
   cfg: EngineConfig,
   logger?: Logger,
 ): ConsequenceResult | null {
-  const quotes = parseActionQuotes(action.text);
-  if (quotes.length === 0) return null;
-  const frameQuotes = quotedSegments(candidate.narrative);
-  const grounded = (q: string): boolean =>
-    quotes.some((aq) => {
-      const a = normLower(aq);
-      const b = normLower(q);
-      return a === b || a.includes(b) || b.includes(a);
-    });
-  // Nothing to fix when the frame already renders every action quote and
-  // invents none.
-  const missing = quotes.filter((aq) => !frameQuotes.some((fq) => {
-    const a = normLower(aq);
-    const b = normLower(fq);
-    return a === b || a.includes(b) || b.includes(a);
-  }));
-  if (missing.length === 0 && frameQuotes.every(grounded)) return null;
+  const exactQuote = extractExactQuote(action.text);
+  if (exactQuote === null) return null;
+  // Nothing to fix when the frame already carries the exact quote.
+  if (quoteContained(exactQuote, candidate.narrative)) return null;
   const actor = world.actors.find((a) => a.id === action.actorId);
   const name = actor?.name ?? action.actorId;
-  const frame = candidate.narrative.trim();
-  const narrative =
-    frameQuotes.every(grounded) && frame.length > 0
-      ? `${frame} ${name} says ${missing.map((q) => `"${q}"`).join(" ")}`
-      : `${name} says ${quotes.map((q) => `"${q}"`).join(" ")}`;
   const repaired: ConsequenceResult = {
     ...structuredClone(candidate),
-    narrative,
+    narrative: reinsertQuote(candidate.narrative, name, exactQuote),
   };
   // effects.quotedSpeech must match the rendered quotes, or the speech
   // gates fail the repair on revalidation.
   if (repaired.effects) {
     repaired.effects.spoke = true;
-    repaired.effects.quotedSpeech = quotes;
+    repaired.effects.quotedSpeech = [exactQuote];
   }
   const revalidation = validateConsequence(world, repaired, action, semantics, cfg);
   if (!revalidation.valid) return null;
@@ -383,7 +375,7 @@ function repairDroppedQuotes(
     tick: world.tick,
     turnIndex: world.turnIndex,
     actorId: action.actorId,
-    input: { action, quotes, missing },
+    input: { action, exactQuote },
     output: { narrative: repaired.narrative },
   });
   return repaired;

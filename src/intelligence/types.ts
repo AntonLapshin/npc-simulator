@@ -25,6 +25,14 @@ export type ConsequenceResolveOpts = {
    * as facts to narrate; the model never emits coordinates.
    */
   engineMovement?: MovementOutcome | null;
+  /**
+   * Phase 2: engine-dictated exact quote for this turn (computed by the
+   * turn orchestrator before the render call). Engines surface it to the
+   * model as the verbatim contract; the model never invents dialogue.
+   * Null = the action carries no quoted speech; undefined = unknown
+   * (older callers).
+   */
+  exactQuote?: string | null;
 };
 
 export interface ConsequenceEngine {

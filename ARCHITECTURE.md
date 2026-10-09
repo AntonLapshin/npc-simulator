@@ -113,7 +113,12 @@ by hand — no coverage tool is installed). Phase 1 establishes the pattern with
 `src/core/movement.ts` (destination resolution, step computation, invariants),
 `src/core/text.ts` (text predicates), `src/core/geometry.ts` and
 `src/core/pathfinding.ts` (moved verbatim out of `src/engine/`; the old paths
-are re-export shims).
+are re-export shims). Phase 2 adds `src/core/speech.ts` (exact-quote
+extraction, verbatim containment, deterministic reinsertion) under
+`src/engine/speechExecutor.ts` (turn pre-pass, render-contract facts,
+in-loop quote backstop); the old quote-repair logic in `turnSalvage.ts`
+delegates to it, and `validate/speech.ts`'s quote parser is consolidated
+onto the core (`parseActionQuotes`).
 
 ## Turn pipeline
 
@@ -141,6 +146,17 @@ are re-export shims).
      input carries `EXECUTED MOVEMENT` facts ("Anton moved (2,3)→(5,6), now
      1 cell from Tanya") so the render narrates what actually happened; the
      prompt forbids emitting coordinates.
+   - **Speech pre-pass (Phase 2)** — before the attempt loop,
+     `planSpeech` extracts the action text's exact quote deterministically
+     (`speechExecutor.ts` → `src/core/speech.ts`; multi-quote actions are
+     out of scope — the FIRST segment is the contract). The consequence
+     input carries `EXACT QUOTE` facts ("the narrative MUST contain this
+     exact quote, character-for-character"); the prompt's quote section is
+     rewritten around it. Per attempt, `applyEngineSpeech` repairs any
+     narrative missing the quote deterministically (appended to a clean
+     frame, replacing an invented one — the exp-3 item 3 repair, made
+     pure), burning no LLM retry; the `speech.exact_quote_missing`
+     validator gate stays as the backstop for paths that bypass the loop.
    - The semantic judge starts once per turn, concurrently with the first
      consequence call.
    - Up to `maxRetries+1` attempts (default 3+1), each raced against the
@@ -195,6 +211,23 @@ arrival prose must end within 4 cells of the landmark. Validator movement
 checks are engine-output invariants (`assertMovementInvariants`), not retry
 triggers: `movement.no_position_change`, `movement.position_unchanged`,
 `movement.no_progress_actor`, and `movement.no_progress_object` are deleted.
+
+**Speech** (Phase 2 — engine-owned): the model never invents dialogue.
+`src/core/speech.ts` (pure) owns exact-quote extraction
+(`extractExactQuote` — first quoted segment of the action text; the
+documented multi-quote rule), verbatim containment (`quoteContained` —
+character-for-character modulo quote-style canonicalization), and
+deterministic reinsertion (`reinsertQuote`); `src/engine/speechExecutor.ts`
+(orchestration) runs the turn pre-pass once, states the render contract as
+`EXACT QUOTE` facts, and applies the in-loop backstop
+(`applyEngineSpeech`) before validation. The validator's
+`speech.exact_quote_missing` gate is the backstop (registered as a
+speech-nit code, so salvage tier 1 can still downgrade it); the old
+`repairDroppedQuotes` salvage tier delegates to the same pure core and is
+now a pure backstop rather than a repair path. Paraphrase is no longer an
+acceptable render of a quoted turn — the backstop appends the exact quote
+deterministically instead of burning a retry. Kills B1 (invented
+dialogue).
 
 **LLM constraint ladder** (`src/llm/complete.ts`, `src/schemas.ts`):
 Zod strict schemas for proposal/selection; a lenient "repair" tier for

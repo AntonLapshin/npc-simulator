@@ -15,6 +15,8 @@ import {
   validateMovementIntent,
 } from "./validate/movement.js";
 import {
+  extractExactQuote,
+  validateExactQuote,
   validateNarrativePlaceholder,
   validateSpeechPreservation,
 } from "./validate/speech.js";
@@ -296,17 +298,26 @@ export function validateConsequence(
     }
   }
 
-  // Speech preservation: the narrative must be grounded in the judged
-  // meaning of the action. semantics.quotedSpeech is the ground truth for
-  // uttered words (from the effects declaration or the SemanticJudge) —
-  // the narrative is compared against it, never against regex-extracted
-  // action quotes. Movement intent likewise comes from semantics.moves,
-  // with the destination resolved by actor id (never substring search).
+  // Speech preservation: the narrative must be grounded in the meaning of
+  // the action. Phase 2: the action text's quoted speech is engine-owned
+  // ground truth — extractExactQuote is the same extraction the turn
+  // pre-pass uses, and the narrative must carry the exact quote verbatim
+  // (validateExactQuote). semantics.quotedSpeech remains the ground truth
+  // for the looser gates (from the effects declaration or the
+  // SemanticJudge) — the narrative is compared against it for
+  // paraphrase-level preservation, never against regex-extracted action
+  // quotes. Movement intent likewise comes from semantics.moves, with the
+  // destination resolved by actor id (never substring search).
   // Without semantics (no effects, no judge) these gates fail open:
   // schema, geometry, and turn structure still guard coherence.
   if (action) {
     const resolved = semantics ?? effectsToSemantics(normalized);
     errors.push(...validateNarrativePlaceholder(normalized.narrative, action));
+    // Phase 2: engine-owned speech — the exact-quote containment gate is
+    // the validator backstop for the in-loop deterministic reinsertion.
+    errors.push(
+      ...validateExactQuote(extractExactQuote(action.text), normalized.narrative),
+    );
     // Exp-5 item 5 (S4): narrative-only — never pass reasoning here.
     errors.push(...validateNarrativeActors(world, { narrative: normalized.narrative }));
     // Exp-4 item 6 (S4/M1): first-person NPC prose fails fast with a
@@ -376,12 +387,15 @@ export {
 } from "./validate/movement.js";
 export {
   contentWords,
+  extractExactQuote,
   maskResumedActivity,
   normLower,
   questionPreserved,
+  quoteContained,
   quotedSegments,
   sameStem,
   stripForCompare,
+  validateExactQuote,
   validateNarrativePlaceholder,
   validateSpeechPreservation,
 } from "./validate/speech.js";

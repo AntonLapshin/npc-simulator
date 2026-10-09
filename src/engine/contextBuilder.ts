@@ -20,6 +20,7 @@ import {
 } from "./perceptionHelpers.js";
 import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { executedMovementFacts, type MovementOutcome } from "./movementExecutor.js";
+import { exactQuoteFacts } from "./speechExecutor.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -1178,6 +1179,11 @@ export function buildConsequenceContext(
   // below tell the render call what happened so it narrates honestly.
   // Undefined = unknown (older callers); null = no movement executed.
   engineMovement?: MovementOutcome | null,
+  // Phase 2: the engine already dictated this turn's exact quote — the
+  // facts below state the verbatim contract so the render call copies it
+  // character-for-character instead of inventing dialogue.
+  // Undefined = unknown (older callers); null = no quoted speech.
+  exactQuote?: string | null,
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action, cfg);
@@ -1198,12 +1204,15 @@ export function buildConsequenceContext(
     // Phase 1: engine-owned movement — the render call narrates the
     // already-executed movement; it never emits coordinates.
     ...(engineMovement !== undefined ? executedMovementFacts(world, action.actorId, engineMovement) : []),
+    // Phase 2: engine-owned speech — the render call copies the
+    // engine-dictated exact quote verbatim; it never invents dialogue.
+    ...(exactQuote !== undefined ? exactQuoteFacts(world, action.actorId, exactQuote) : []),
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "MOVEMENT IS ENGINE-EXECUTED: the EXECUTED MOVEMENT section above is what already happened this turn — narrate it honestly and never invent coordinates. Do not emit x/y for any actor (any coordinates you emit are ignored).",
     "A single turn covers at most 6 cells of engine movement — a cross-room walk takes several turns, never one teleport.",
     buildObjectIdCatalog(world),
-    "QUOTED-SPEECH COPY RULE: if the action text contains \"...\" segments, copy each one character-for-character into effects.quotedSpeech AND into the narrative. Never invent quotes, never add greetings, never substitute different dialogue.",
+    "EXACT QUOTE RULE: the action's quoted words are engine-owned ground truth (see EXACT QUOTE above) — the narrative MUST contain the exact quote character-for-character. Never paraphrase, alter, truncate, invent, or substitute different dialogue.",
     "PHYSICAL CONTACT RULE: if the action shakes hands, hugs, high-fives, pats, kisses, or hands/passes/gives something to someone, the acting actor MUST end ADJACENT to that person (within 2.5 cells Euclidean). A handshake across the room is invalid — walk over first, then touch.",
     "IDENTITY RULE: " + (actor ? `${buildIdentityAnchor(world, action.actorId)} Act out YOUR role only.` : "Act out the acting actor's role only."),
     "ROSTER RULE: " + buildRosterAnchor(world),
@@ -1249,7 +1258,7 @@ export function buildConsequenceContext(
     "Observers may only react INTERNALLY: set their one-time 'thoughts' field (private immediate inner reaction to this event — never spoken aloud, never narrated; be blunt, candid, profane/explicit when in-character, e.g. surprise, recognition, annoyance), and optionally adjust emotion, goal, memoriesAppend, beliefsAppend, relationshipsAppend.",
     "Set 'thoughts' for EVERY perceiving actor listed above (including the acting actor — its take on what just happened). Thoughts are one-time and will guide that actor's next turn. An event with no observer patch means that observer recorded no reaction.",
     `Narrative rule: describe ONLY what ${action.actorId} observably does, grounded strictly in the given action text.`,
-    "If the action is speech, preserve its wording — quote or closely paraphrase it, never invent different dialogue lines. If the action contains quoted words, the narrative MUST contain those same words.",
+    "If the action is speech, quote its exact words character-for-character (see EXACT QUOTE above) — never paraphrase, never invent different dialogue lines, never truncate a longer speech to a fragment.",
     "Do NOT describe any other actor perceiving, hearing, speaking, moving, glancing, looking up, or reacting — even passively.",
     "You may name another actor only as a stationary spatial landmark for the acting actor's own movement (e.g. 'toward Jeff'), never as someone doing something.",
     "Observer awareness belongs ONLY in their thoughts/memoriesAppend patches, never in the narrative. Each observer's visible response belongs to their own future turn.",
