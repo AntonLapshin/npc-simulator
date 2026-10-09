@@ -135,7 +135,7 @@ describe("exp5 item 5 (S4): narrative-only actor audit", () => {
         action,
         candidate,
         {
-          exactQuote: quote, moved: false, pose: null, effectivePose: "stand",
+          exactQuote: quote, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
           x: 16, y: 2, engineManipulation: null,
         },
       ),
@@ -165,7 +165,7 @@ describe("exp5 item 7 (S3): accept-path prose gates", () => {
       action,
       { narrative: "Anton walks into the conference room.", reasoning: "r" },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 16, y: 2, engineManipulation: null,
       },
     );
@@ -235,7 +235,7 @@ describe("exp5 item 7 (S3): accept-path prose gates", () => {
       action,
       { narrative: `Dana: ${narrative}`, thoughts: "Watching.", reasoning: "r" },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 15, y: 11, engineManipulation: null,
       },
     );

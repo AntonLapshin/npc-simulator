@@ -240,6 +240,19 @@ export function applyRenderResult(
       acting.x = x;
       acting.y = y;
       if (moved) {
+        // Stage-1 A3: the held scene object travels with its holder —
+        // never orphaned at the pick-up site. Gated on the prop: a
+        // prop-less actor carries nothing even if a stale link lingers.
+        if ((acting.prop ?? null) !== null) {
+          const heldId = acting.heldObjectId ?? null;
+          if (heldId !== null) {
+            const obj = objectById.get(heldId);
+            if (obj !== undefined) {
+              obj.x = x;
+              obj.y = y;
+            }
+          }
+        }
         acting.state = describePosition(
           next,
           x,
@@ -260,6 +273,12 @@ export function applyRenderResult(
       for (const ap of executed.manipulation.actorProps) {
         const target = actorById.get(ap.actorId);
         if (target !== undefined) target.prop = ap.prop;
+      }
+      // Stage-1 A3: the scene-object link follows the prop (set on
+      // pick-up, cleared on put-down, transferred on hand-over).
+      for (const h of executed.manipulation.heldObjectIds) {
+        const target = actorById.get(h.actorId);
+        if (target !== undefined) target.heldObjectId = h.heldObjectId;
       }
       for (const mv of executed.manipulation.objectMoves) {
         const obj = objectById.get(mv.objectId);
@@ -297,7 +316,13 @@ export function applyRenderResult(
   // before the turn's changes).
   const perceivers = [...perceiverIds(world, action.actorId, config)];
   const pushEntry = (text: string): void => {
-    const entry: HistoryEntry = normalizeHistoryEntry({ text, perceivers }, []);
+    // Stage-1 A4: record the ground-truth action alongside the narrative —
+    // the repetition screen cores from the action, never from prose a
+    // mis-render can poison.
+    const entry: HistoryEntry = normalizeHistoryEntry(
+      { text, perceivers, actionText: action.text },
+      [],
+    );
     next.history.push(entry);
   };
   // Single history entry per turn.

@@ -32,7 +32,7 @@ import {
 // ---------------------------------------------------------------------------
 
 function actor(over: Partial<CoreActor> = {}): CoreActor {
-  return { id: "u", name: "U", x: 0, y: 0, prop: null, ...over };
+  return { id: "u", name: "U", x: 0, y: 0, prop: null, heldObjectId: null, ...over };
 }
 
 function obj(over: Partial<CoreObject> & { id: string; name: string }): CoreObject {
