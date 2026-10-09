@@ -15,8 +15,7 @@ import type {
 import { Logger } from "../../src/logging/logger.js";
 import { defaultConfig } from "../../src/config.js";
 import { runTurn } from "../../src/engine/turnOrchestrator.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import type { TurnTelemetry } from "../../src/core/telemetry.js";
 import { makeTinyWorld } from "../helpers.js";
 
@@ -56,13 +55,12 @@ function makeRiggedDeps(logger: Logger, turnCallBudget: number) {
   const seen: TurnTelemetry[] = [];
   return {
     deps: {
-      proposalEngine: new MockProposalEngine(logger, {}, { providerBacked: true }),
-      selectionEngine: new MockSelectionEngine(logger, {}, { providerBacked: true }),
+      intentEngine: new MockIntentEngine(logger, {}, { providerBacked: true }),
       consequenceEngine: new FlakyRenderEngine(),
       logger,
       config: { ...defaultConfig, autosaveEnabled: false, turnCallBudget },
       // forceAllNpc: the tiny world's first actor is the user actor —
-      // autonomous mode runs it through proposal/selection/render.
+      // autonomous mode runs it through intent/render.
       forceAllNpc: true,
       onTurnTelemetry: (t: TurnTelemetry) => {
         seen.push(t);
@@ -73,7 +71,7 @@ function makeRiggedDeps(logger: Logger, turnCallBudget: number) {
 }
 
 describe("turn economics (Phase 6)", () => {
-  it("rigged run: 4 provider calls against budget 2 logs budget_exceeded + turn_telemetry", async () => {
+  it("rigged run: 3 provider calls against budget 2 logs budget_exceeded + turn_telemetry", async () => {
     const logger = new Logger({ writeToFile: false });
     const { deps, seen } = makeRiggedDeps(logger, 2);
 
@@ -89,18 +87,18 @@ describe("turn economics (Phase 6)", () => {
       budget: number;
       calls: { proposal: number; selection: number; render: number };
     };
-    // 1 proposal + 1 selection + 2 render (initial + the forced retry).
-    expect(output.providerCalls).toBe(4);
+    // 1 intent (proposal slot) + 2 render (initial + the forced retry).
+    expect(output.providerCalls).toBe(3);
     expect(output.budget).toBe(2);
-    expect(output.calls).toEqual({ proposal: 1, selection: 1, render: 2 });
+    expect(output.calls).toEqual({ proposal: 1, selection: 0, render: 2 });
     expect(budgetEvents[0]!.error).toContain("BUDGET EXCEEDED");
 
     const telemetryEvents = logger.store.byEvent("turn_telemetry");
     expect(telemetryEvents).toHaveLength(1);
     const telemetry = telemetryEvents[0]!.output as TurnTelemetry;
-    expect(telemetry.providerCalls).toBe(4);
+    expect(telemetry.providerCalls).toBe(3);
     expect(telemetry.budgetExceeded).toBe(true);
-    expect(telemetry.calls).toEqual({ proposal: 1, selection: 1, render: 2 });
+    expect(telemetry.calls).toEqual({ proposal: 1, selection: 0, render: 2 });
     expect(telemetry.outcome).toBe("clean");
     expect(telemetry.actorId).toBe("u");
 
@@ -118,7 +116,7 @@ describe("turn economics (Phase 6)", () => {
     expect(logger.store.byEvent("budget_exceeded")).toHaveLength(0);
     const telemetry = logger.store.byEvent("turn_telemetry")[0]!.output as TurnTelemetry;
     expect(telemetry.budgetExceeded).toBe(false);
-    expect(telemetry.providerCalls).toBe(4);
+    expect(telemetry.providerCalls).toBe(3);
     expect(seen).toHaveLength(1);
   });
 
