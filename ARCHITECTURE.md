@@ -130,7 +130,10 @@ subsumed by the executor. Phase 5 adds `src/core/decision.ts` (target
 questions over the live roster/scene, target resolution, deterministic
 intent-candidate templates, probability ranking — the pure half of the
 Laya decision cascade) under `src/decision/` (proposal/selection engines,
-shared intent-cascade step).
+shared intent-cascade step). Phase 6 adds `src/core/telemetry.ts` (turn
+economics: budget predicate, duration formatting, generated-findings
+report) under `src/engine/turnTelemetry.ts` (`ProviderCallCounter`) and
+the orchestrator's per-turn `turn_telemetry` event.
 
 ## Turn pipeline
 
@@ -267,6 +270,37 @@ repair), zod-validates, runs engine-specific `extraCheck` (dedup, POV-swap
 detection, id validation against the real roster), and retries with an
 appended repair prompt. `response_format: {type: "json_object"}` is sent by
 default (set `LLM_JSON_MODE=0` to disable).
+
+## Turn economics (Phase 6 — budgets, telemetry, protocol)
+
+Turn cost is multiplicative: (calls per turn) × (seconds per call).
+Eleven experiment rounds attacked seconds-per-call; the calls-per-turn
+side — where ~70% of exp-7's time went — had no instrumentation. Phase 6
+makes the economics structural. Telemetry only: nothing here changes
+engine behavior.
+
+- **Call budget** (`EngineConfig.turnCallBudget`, default 4): the
+  orchestrator counts provider-backed engine invocations per turn
+  (`ProviderCallCounter` in `src/engine/turnTelemetry.ts`; engines opt in
+  via `providerBacked` on the engine interfaces — the three LLM engines
+  declare it, the Laya cascade / deterministic stubs / mocks don't).
+  Crossing the budget logs a loud `budget_exceeded` event — never a hard
+  abort (a 5-call turn beats a fallback). Post-Phase-5 shape: ~1 call on
+  the cascade path, 3–4 on the LLM-decision fallback path.
+- **Per-turn telemetry**: every turn logs a `turn_telemetry` JSONL event
+  with the `proposal / selection+execute / render` ms split, the per-stage
+  call counts, the budget verdict, and the outcome
+  (`clean | liveness | fallback`). The pure types, budget predicate, and
+  report formatting live in `src/core/telemetry.ts`; `--auto` prints a
+  one-row-per-turn running table via the `onTurnTelemetry` hook and warns
+  at the 90 s turn-time gate (`TURN_TIME_GATE_MS`).
+- **Generated findings**: `npm run report:turns -- logs/<session>.jsonl`
+  (new; `scripts/report-turns.ts`) regenerates the exp-7-style findings
+  table — summary, per-turn economics, per-stage latency — from any run's
+  log. Findings docs are generated, never hand-written.
+- **Protocol**: `experiments/PROTOCOL.md` is the phase-gate checklist
+  (diagnose preflight → 3B smoke → 14B smoke → 20-turn run), plus the
+  re-scope-don't-force-merge discipline.
 
 ## Decision layer (Phase 5 — Laya cascade as default)
 
