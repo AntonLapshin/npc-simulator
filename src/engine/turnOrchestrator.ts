@@ -38,6 +38,7 @@ import {
   executeManipulation,
   type ManipulationOutcome,
 } from "./manipulationExecutor.js";
+import { buildTurnClamp } from "./clampPolicy.js";
 import { planPose, stripCoordinateMentions } from "../core/text.js";
 import { quoteContained, reinsertQuote } from "../core/speech.js";
 import {
@@ -453,6 +454,26 @@ export async function resolveRender(
   const enginePose = planPose(action.text);
   const executeMs = Date.now() - executeStart;
 
+  // PLAN_V2 Phase 3: the clamp policy — one deterministic pass over the
+  // parsed intent, recorded as attempted-vs-executed for the narrate
+  // input. No LLM, no retries, no correction loops: a clamped turn costs
+  // exactly the same provider calls as a normal turn. V2-only — the v1
+  // path never sees it, so v1 turns are byte-identical in outcome.
+  const turnClamp = readTurnLoopV2()
+    ? buildTurnClamp(world, action, plannedMovement, engineMovement, exactQuote, opts.parsedSemantics)
+    : null;
+  if (turnClamp !== null) {
+    logger.log({
+      module: "clamp",
+      event: "clamp_applied",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action },
+      output: turnClamp,
+    });
+  }
+
   const executed: ExecutedTurn = {
     movement: engineMovement,
     pose: enginePose,
@@ -511,6 +532,9 @@ export async function resolveRender(
               engineMovement,
               exactQuote,
               engineManipulation,
+              // PLAN_V2 Phase 3: the attempted-vs-executed clamp record
+              // (v2 only — undefined on v1 so the prompt never sees it).
+              clamp: turnClamp ?? undefined,
             }),
           timeLeft(),
         );

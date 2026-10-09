@@ -10,6 +10,7 @@ import type { MovementOutcome } from "../engine/movementExecutor.js";
 import type { ManipulationOutcome } from "../engine/manipulationExecutor.js";
 import type { Intent } from "../decision/decisionTypes.js";
 import type { IntentResult } from "../core/intent.js";
+import type { TurnClamp } from "../core/clamp.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -112,6 +113,15 @@ export type ConsequenceResolveOpts = {
    * (older callers).
    */
   engineManipulation?: ManipulationOutcome | null;
+  /**
+   * PLAN_V2 Phase 3: the turn's attempted-vs-executed clamp record (v2
+   * only). Engines surface it to the model as the honest-gap facts to
+   * narrate — "she reaches for his hand, but he's across the room" —
+   * instead of silent drops or (not done) sentinels. Null = computed, no
+   * gap; undefined = unknown (v1 and older callers — no clamp block in
+   * the prompt).
+   */
+  clamp?: TurnClamp | null;
 };
 
 export interface ConsequenceEngine {

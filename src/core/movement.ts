@@ -106,6 +106,17 @@ export function hasContactVerb(text: string): boolean {
   return CONTACT_VERB_RE.test(text);
 }
 
+/**
+ * PLAN_V2 Phase 3: the contact-verb phrase matched in the action text
+ * (lowercased, trimmed), or null when the text names no contact verb.
+ * Pure. Single source of truth for the CONTACT_VERB_RE vocabulary — the
+ * clamp policy uses it to phrase the attempted contact honestly.
+ */
+export function matchContactVerb(text: string): string | null {
+  const m = CONTACT_VERB_RE.exec(text);
+  return m === null ? null : m[0].trim().toLowerCase();
+}
+
 // ---------------------------------------------------------------------------
 // Step computation.
 // ---------------------------------------------------------------------------

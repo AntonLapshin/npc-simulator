@@ -78,6 +78,7 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       opts?.engineMovement,
       opts?.exactQuote,
       opts?.engineManipulation,
+      opts?.clamp,
     );
     // Exp-6 item 2: user-turn directive leads the prompt (before the
     // world dump) so the writer treats the player's words as sacred.
