@@ -28,15 +28,16 @@ does.
 
 ### P1. LLMs propose, deterministic code decides
 
-Four LLM roles exist — **Proposal** (invent 2–10 candidate action sentences),
-**Selection** (pick the final action), **SemanticJudge** (classify what an
-action *means*: moves/speaks/destination/addressee/contact/quotes), and
-**Consequence** (describe what happened as narrative + patches). None of them
-can mutate the world. Every consequence is a `ConsequenceResult` that must pass
-`validateConsequence` (`src/engine/physicalValidator.ts`) before
-`applyConsequence` (`src/engine/patchApplier.ts`) touches state. Psychology
-(thoughts, emotion, goal, memories) is free-form text; physics and turn
-structure are hard rules.
+Three LLM roles exist — **Proposal** (invent 2–10 candidate action sentences),
+**Selection** (pick the final action), and **Render** (describe what happened
+as prose). None of them can mutate the world. Every render is a
+`ConsequenceResult` — prose only (`narrative`, `thoughts`, `emotion`,
+`reasoning?`) — that must pass `validateRenderProse`
+(`src/engine/validate/render.ts`) before `applyRenderResult`
+(`src/engine/patchApplier.ts`) touches state. Psychology (thoughts, emotion,
+goal, memories) is free-form text; physics and turn structure are hard rules.
+The engine executes first (Phases 1–3: movement, speech quotes, manipulation);
+the render narrates the executed facts.
 
 ### P2. Patch-based world mutation
 
@@ -139,92 +140,64 @@ subsumed by the executor.
    (POV-swap and verb+noun-repeat screens; substitutes the first clean
    candidate or the `"Stay where you are and observe the situation."`
    fallback).
-3. **Consequence resolution** — `resolveWithValidation`:
-   - **Movement pre-pass (Phase 1)** — before the attempt loop,
-     `planMovementSemantics` resolves movement intent deterministically from
-     the action text, and `executeMovement` (`movementExecutor.ts` →
-     `src/core/movement.ts`) computes the engine step: destination from
-     semantics (`destinationActorId` → `destinationObjectId` →
-     `contactActorId`, contact promoted so handshakes close distance),
-     pathfind via 4-directional A*, final cell returned with the path.
-     `null` for stationary intents. Every model-emitted x/y is **stripped**
-     from every patch (logged as `model_coordinates_ignored`); the engine
-     outcome is merged into the acting actor's patch only. The consequence
-     input carries `EXECUTED MOVEMENT` facts ("Anton moved (2,3)→(5,6), now
-     1 cell from Tanya") so the render narrates what actually happened; the
-     prompt forbids emitting coordinates.
-   - **Speech pre-pass (Phase 2)** — before the attempt loop,
-     `planSpeech` extracts the action text's exact quote deterministically
-     (`speechExecutor.ts` → `src/core/speech.ts`; multi-quote actions are
-     out of scope — the FIRST segment is the contract). The consequence
-     input carries `EXACT QUOTE` facts ("the narrative MUST contain this
-     exact quote, character-for-character"); the prompt's quote section is
-     rewritten around it. Per attempt, `applyEngineSpeech` repairs any
-     narrative missing the quote deterministically (appended to a clean
-     frame, replacing an invented one — the exp-3 item 3 repair, made
-     pure), burning no LLM retry; the `speech.exact_quote_missing`
-     validator gate stays as the backstop for paths that bypass the loop.
-   - **Manipulation pre-pass (Phase 3)** — before the attempt loop,
-     `executeManipulation` (`manipulationExecutor.ts` →
-     `src/core/objects.ts`) plans the acting actor's pick-up / put-down /
-     hand-over deterministically from the action text and the affordance
-     table: pick-up needs empty hands and a pickable object of the kind
-     within `MANIPULATION_REACH = 4` cells (no thin-air props); put-down
-     needs a held prop and records a named in-reach surface; hand-over
-     needs a held prop, a recipient (contact or text mention — never
-     "shake hands"), adjacency ≤ 2.5 cells, and the recipient's hands
-     free. More than one manipulation kind in the text plans nothing
-     (single-manipulation contract — split across turns). Per attempt,
-     the plan is refreshed against the merged semantics' contact (a
-     newly-resolved contact re-plans; a guard-failing one drops the plan),
-     then `applyEngineManipulation` **strips every model-emitted
-     objectPatch and prop patch** (logged as `model_object_patch_ignored`)
-     and merges the engine outcome (acting actor always; hand-over
-     recipient too). The consequence input carries `EXECUTED
-     MANIPULATION` facts ("Dana picked up the laptop — Dana now holds
-     the laptop") so the render narrates what actually happened; the
-     prompt forbids emitting objectPatches or `prop`.
-   - The semantic judge starts once per turn, concurrently with the first
-     consequence call.
-   - Up to `maxRetries+1` attempts (default 3+1), each raced against the
-     remaining `turnTimeoutMs` wall budget (default 600 s; Exp-6 item 3).
-     Engine exceptions → feedback retry.
-   - Per attempt: `resolveActionSemantics` (effects + judge → merged →
-     deterministically grounded; disagreements logged) → engine movement
-     refresh (only when merged semantics add a destination/contact the
-     text pass couldn't see; dropped on a Laya veto) → merge (strip model
-     x/y, apply engine x/y) → `validateConsequence` → pass returns; fail
-     logs and builds targeted retry feedback (prose-only hint,
-     object-affordance nudge — no movement hints anymore).
-   - Two consecutive *unparseable* outputs → stop retrying early
-     (format-collapse tier): `salvageFormatCollapse` builds a thoughts-only
-     payload (Exp-6 item 4). Identical parse errors are detected by signature
-     (`parseErrorSignature`, digit-collapsing) and abort early instead of
-     burning remaining calls.
-   - Post-loop: `trySalvageConsequence` (strip hallucinated-id patches →
-     deterministic addressee stub → prop stub → tier-1 speech-nit downgrade
-     → tier-2 speech/object-wording downgrade). Salvage never fabricates
-     movement — candidates already carry the engine position.
-   - `buildLivenessConsequence` when `consecutiveFallbacks ≥
-     livenessFallbackThreshold` (default 3; NPC turns only) — a deterministic
-     minimal applied turn so dialogue can advance by words when bodies cannot.
+3. **Execute + render (Phase 4)** — `resolveRender`:
+   - **Execute (engine, Phases 1–3)** — before the render call, the engine
+     executes the turn deterministically:
+     - *Movement* — `planMovementSemantics` resolves movement intent from
+       the action text, and `executeMovement` (`movementExecutor.ts` →
+       `src/core/movement.ts`) computes the step: destination from semantics
+       (`destinationActorId` → `destinationObjectId` → `contactActorId`,
+       contact promoted so handshakes close distance), pathfind via
+       4-directional A*, final cell returned with the path. `null` for
+       stationary intents. Contact verbs (`hasContactVerb` in
+       `src/core/movement.ts`) name the contact actor deterministically.
+     - *Speech* — `planSpeech` extracts the action text's exact quote
+       deterministically (`speechExecutor.ts` → `src/core/speech.ts`;
+       multi-quote actions are out of scope — the FIRST segment is the
+       contract).
+     - *Manipulation* — `executeManipulation` (`manipulationExecutor.ts` →
+       `src/core/objects.ts`) plans the acting actor's pick-up / put-down /
+       hand-over deterministically from the action text and the affordance
+       table.
+     - *Pose* — `planPose` (`src/core/text.ts`) resolves sit/stand from the
+       action text.
+   - **Render (LLM)** — a single render call (`llmConsequenceEngine.ts`)
+     narrates the executed facts. The prompt says "here is what happened
+     (executed, final); narrate it," with the executed-facts block
+     (movement, quote, manipulation, pose) as its source of truth.
+     Narrative *invention* beyond the facts is a voice violation. The
+     schema is prose-only — any `actorPatches` / `objectPatches` / `effects`
+     the model emits are stripped and ignored (logged at debug).
+   - **Prose-only validation** — `validateRenderProse(world, action,
+     render, facts)`: voice, pronouns, echo/placeholder, observer-discipline,
+     exact-quote containment, identity, and grounding vs the engine facts
+     (movement, pose, manipulation, contact adjacency, speech coverage,
+     thought grounding). No patch validators in the path.
+   - Max 2 attempts (`RENDER_MAX_ATTEMPTS`); per attempt the deterministic
+     repairs run first (quote backstop via `reinsertQuote`, doubled-prefix
+     collapse), then validation; failures build targeted retry feedback
+     (`renderRetryFeedback`).
+   - Post-loop: the prose liveness floor (`buildLivenessConsequence` when
+     `consecutiveFallbacks ≥ livenessFallbackThreshold`, default 3; NPC
+     turns only) — a deterministic minimal prose turn so dialogue can
+     advance by words when bodies cannot.
    - `structuredClone(FALLBACK_CONSEQUENCE)` ("Nothing changes.").
-4. **Apply** — `applyConsequence` with fallback/honest-history options; memory
+4. **Apply** — `applyRenderResult` with fallback/liveness/honest-history options; memory
    caps trim oldest (memories 50, beliefs/relationships 30); history capped at
    200.
 5. **Advance** — `incrementTick` + `advanceTurn`; autosave to
    `saves/<id>_tick<N>.json`; `turn_completed` logged with another full world
    clone.
 
-**Validator check order** (`physicalValidator.ts`): schema/lenient
-normalization (`id`→`actorId`/`objectId` aliases, stringified arrays, hoisted
-nested objectPatches) → unknown ids (with fuzzy `suggestSimilarIds` hints) →
-coordinate bounds/collision/path → x/y pairing → observer turn-discipline →
-object rect validity → placeholder narrative → narrative name audit → object
-grounding → narrative movement grounding → semantic gates (speech
-preservation, movement intent, destination object, contact adjacency ≤2.5,
-addressee patch, acting-actor presence, state coherence, action-verb coverage,
-observer-subject).
+**Render validation** (`src/engine/validate/render.ts`, Phase 4): the schema
+strips unknown keys (old `actorPatches` / `objectPatches` / `effects` are
+ignored, logged at debug); then prose-only checks run against the
+engine-executed facts — voice, pronouns, echo/placeholder, observer-discipline,
+exact-quote containment, identity, and grounding (narrated movement requires
+an engine move; narrated pose changes require the engine pose; narrated
+manipulation requires an executed manipulation; narrated contact requires
+post-move adjacency; questions and utterances must survive rendering; thoughts
+stay grounded).
 
 **Movement physics** (Phase 1 — engine-owned): the model never emits
 coordinates. `src/core/movement.ts` (pure) resolves the destination and
@@ -501,9 +474,10 @@ separately.
    turns record the *narrative*.** Comments justify both, but `getOpenQuestions`
    and proposal grounding treat them identically — deliberate asymmetry, or
    should clean turns record the narrative too?
-2. **Judge runs on user turns in production** (`resolveWithValidation` calls
-   `SemanticJudge.classify` on user action text every turn — comment says
-   deliberate). An extra LLM call per user turn: intended cost or oversight?
+2. **The semantic judge is gone from the turn loop** (Phase 4 deleted the
+   judge-classification path — contact verbs and destinations resolve
+   deterministically). Any remaining `SemanticJudge` references are legacy;
+   flag them for removal if found.
 3. **Observer `goal`-rewriting** (F5) — deliberate social-influence lever or an
    over-broad allowlist?
 4. **`tick` increments once per turn for the whole world** — not per actor, not
