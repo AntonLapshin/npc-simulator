@@ -20,10 +20,20 @@ function normalize(text: string): string {
  * prompt / raw / parsed response like the real LLM module.
  */
 export class MockConsequenceEngine implements ConsequenceEngine {
+  /**
+   * Phase 6: mocks are local by default (not counted by the turn
+   * budget). Tests simulating a provider-backed engine pass
+   * `{ providerBacked: true }`.
+   */
+  readonly providerBacked: boolean;
+
   constructor(
     private readonly logger: Logger,
     private readonly script: MockConsequenceScript = {},
-  ) {}
+    opts: { providerBacked?: boolean } = {},
+  ) {
+    this.providerBacked = opts.providerBacked ?? false;
+  }
 
   async resolve(
     world: World,

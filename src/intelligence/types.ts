@@ -12,10 +12,22 @@ import type { Intent } from "../decision/decisionTypes.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
+  /**
+   * Phase 6: true when propose() performs provider (LLM) calls. Local
+   * engines — the Laya cascade, deterministic stubs, mocks — leave it
+   * unset: the turn budget counter only counts provider-backed
+   * invocations, so local decision paths cost nothing.
+   */
+  readonly providerBacked?: boolean;
 }
 
 export interface SelectionEngine {
   select(world: World, actorId: string, suggestions: string[]): Promise<SelectionResult>;
+  /**
+   * Phase 6: true when select() performs provider (LLM) calls.
+   * See ProposalEngine.providerBacked.
+   */
+  readonly providerBacked?: boolean;
 }
 
 /**
@@ -78,7 +90,11 @@ export interface ConsequenceEngine {
    *
    * Phase 3: `opts.engineManipulation` carries the already-executed
    * manipulation for the render call to narrate.
+   *
+   * Phase 6: `providerBacked` — true when resolve() performs provider
+   * (LLM) calls. See ProposalEngine.providerBacked.
    */
+  readonly providerBacked?: boolean;
   resolve(
     world: World,
     action: Action,

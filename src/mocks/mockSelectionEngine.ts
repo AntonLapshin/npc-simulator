@@ -11,10 +11,20 @@ export type MockSelectionScript = Record<string, { action: string; reasoning: st
  * (or a fallback sentence when no suggestions exist).
  */
 export class MockSelectionEngine implements SelectionEngine {
+  /**
+   * Phase 6: mocks are local by default (not counted by the turn
+   * budget). Tests simulating a provider-backed engine pass
+   * `{ providerBacked: true }`.
+   */
+  readonly providerBacked: boolean;
+
   constructor(
     private readonly logger: Logger,
     private readonly script: MockSelectionScript = {},
-  ) {}
+    opts: { providerBacked?: boolean } = {},
+  ) {
+    this.providerBacked = opts.providerBacked ?? false;
+  }
 
   async select(
     world: World,
