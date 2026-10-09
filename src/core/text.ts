@@ -61,6 +61,24 @@ export function maskQuotedSpans(text: string): string {
 }
 
 /**
+ * Stage-2 B3: model-emitted grid coordinates ("my desk at (3, 8)") are
+ * advisory prose the engine ignores (movement planning strips model
+ * coordinates) — but left in the action text they leak into history and
+ * confuse renders. Strip parenthesized/bracketed "(x, y)" mentions (plus
+ * a dangling "at" before them) from the selected action text. Bare "3, 8"
+ * without brackets is left alone — too easy to confuse with ordinary
+ * prose ("call at 3, 8 sharp" is contrived; "(3, 8)" is not). Pure.
+ */
+const COORDINATE_MENTION_RE = /(\s+\bat\b)?\s*[\(\[]\s*\d+\s*,\s*\d+\s*[\)\]]/gi;
+export function stripCoordinateMentions(text: string): string {
+  return text
+    .replace(COORDINATE_MENTION_RE, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .trim();
+}
+
+/**
  * F35: the single canonical "resumed activity" mask. Resuming a task is
  * not relocating ("return/back to typing/work/...")
  */

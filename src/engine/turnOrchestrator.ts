@@ -33,7 +33,7 @@ import {
   executeManipulation,
   type ManipulationOutcome,
 } from "./manipulationExecutor.js";
-import { planPose } from "../core/text.js";
+import { planPose, stripCoordinateMentions } from "../core/text.js";
 import { quoteContained, reinsertQuote } from "../core/speech.js";
 import {
   budgetWarningMessage,
@@ -775,7 +775,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       decidedIntent,
     );
     report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
-    let actionText = stripSelectionPrefix(selection.action);
+    let actionText = stripCoordinateMentions(stripSelectionPrefix(selection.action));
     // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
     // on it. A POV-swapped pick ("Anton walks…" on Dana's turn) or a
     // verb+noun repeat of a recent own action (handshake attractor) is
@@ -842,7 +842,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
             !isIntentBanned(s) &&
             !isClusterBanned(s),
         );
-      actionText = clean ?? FALLBACK_SELECTION.action;
+      actionText =
+        clean !== undefined ? stripCoordinateMentions(clean) : FALLBACK_SELECTION.action;
       logger.log({
         module: "selection",
         event: "selection_substituted",
@@ -881,7 +882,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       });
       if (rescored) {
         const filtered = proposal.suggestions.filter(
-          (s) => stripSelectionPrefix(s) !== actionText,
+          (s) => stripCoordinateMentions(stripSelectionPrefix(s)) !== actionText,
         );
         if (filtered.length > 0) {
           // Phase 6: the re-pick is a second selection provider call.
@@ -892,7 +893,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
             filtered,
             decidedIntent,
           );
-          const repickText = stripSelectionPrefix(repick.action);
+          const repickText = stripCoordinateMentions(stripSelectionPrefix(repick.action));
           const repickRejection = validateSelectionForActor(world, actor.id, repickText);
           actionText =
             repickRejection === undefined && !isIntentBanned(repickText) && !isClusterBanned(repickText)

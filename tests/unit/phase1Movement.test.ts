@@ -94,6 +94,27 @@ describe("planMovementSemantics", () => {
       planMovementSemantics(world, { actorId: "alf", text: "Bea, where should I sit?" }).moves,
     ).toBe(false);
   });
+
+  it("Stage-2 B4: quoted 'let's go' is speech, not locomotion (tick-1 repro)", () => {
+    const world = moveWorld();
+    const planned = planMovementSemantics(world, {
+      actorId: "bea",
+      text: "Pause my test plan and say, 'Sure, let's go — your desk is just a few steps that way.'",
+    });
+    expect(planned.moves).toBe(false);
+    expect(planned.destinationActorId).toBeUndefined();
+    expect(planned.destinationObjectId).toBeUndefined();
+  });
+
+  it("Stage-2 B4: unquoted locomotion still plans when dialogue is present", () => {
+    const world = moveWorld();
+    const planned = planMovementSemantics(world, {
+      actorId: "alf",
+      text: 'Walk toward Bea and say "let\'s catch up later."',
+    });
+    expect(planned.moves).toBe(true);
+    expect(planned.destinationActorId).toBe("bea");
+  });
 });
 
 describe("executorDestination", () => {

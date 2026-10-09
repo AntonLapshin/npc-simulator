@@ -14,6 +14,7 @@ import {
   normalizeQuotes,
   parseActionQuotes,
   singleQuotedSegments,
+  stripCoordinateMentions,
 } from "../../../src/core/text.js";
 
 describe("normalizeQuotes", () => {
@@ -175,5 +176,26 @@ describe("maskQuotedSpans", () => {
 
   it("leaves unquoted prose untouched", () => {
     expect(maskQuotedSpans("Anton walks to the door.")).toBe("Anton walks to the door.");
+  });
+});
+
+describe("stripCoordinateMentions", () => {
+  it("strips the Stage-2 tick-3 coordinate leak, including the dangling 'at'", () => {
+    expect(
+      stripCoordinateMentions("Walk west toward my desk at (3, 8) since Tanya said it's that way"),
+    ).toBe("Walk west toward my desk since Tanya said it's that way");
+  });
+
+  it("strips bracketed and tight forms", () => {
+    expect(stripCoordinateMentions("Go to [12,4] quickly.")).toBe("Go to quickly.");
+    expect(stripCoordinateMentions("Meet at ( 7 , 9 ).")).toBe("Meet.");
+  });
+
+  it("leaves ordinary prose untouched", () => {
+    expect(stripCoordinateMentions("Walk toward Tanya's desk and ask for help.")).toBe(
+      "Walk toward Tanya's desk and ask for help.",
+    );
+    // Bare "3, 8" without brackets is not a coordinate mention.
+    expect(stripCoordinateMentions("Call at 3, 8 sharp.")).toBe("Call at 3, 8 sharp.");
   });
 });

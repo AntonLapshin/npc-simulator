@@ -23,7 +23,7 @@ import {
   isNonLocomotionSense,
   type MovementOutcome,
 } from "../core/movement.js";
-import { extractDirectionHint, hasDisplacementToken } from "../core/text.js";
+import { extractDirectionHint, hasDisplacementToken, maskQuotedSpans } from "../core/text.js";
 import { resolveDeterministicSemantics, resolveMentionedActorId } from "./deterministicSemantics.js";
 
 export type { MovementOutcome };
@@ -70,8 +70,16 @@ export function planMovementSemantics(
     // no destination — the step computation picks the greedy cell.
     return { moves: true };
   }
-  const det = resolveDeterministicSemantics(world, action);
-  const moves = hasDisplacementToken(action.text) && !isNonLocomotionSense(action.text);
+  // Stage-2 B4: quoted speech is the character talking, not the narrator
+  // describing — "let's go" inside dialogue must not parse as locomotion
+  // intent (Stage-2 tick-1 repro: Tanya moved on a quote). Intent AND
+  // destination resolve on the quote-masked text. (quotedSpeech for the
+  // speech executor is extracted from the raw text inside
+  // resolveDeterministicSemantics callers that need it — here only the
+  // destination fields are used.)
+  const maskedText = maskQuotedSpans(action.text);
+  const det = resolveDeterministicSemantics(world, { ...action, text: maskedText });
+  const moves = hasDisplacementToken(maskedText) && !isNonLocomotionSense(maskedText);
   if (!moves) {
     // Contact approach: a handshake/hug turn with no walk verb still has
     // to close distance. Phase 4: the semantic judge no longer supplies
