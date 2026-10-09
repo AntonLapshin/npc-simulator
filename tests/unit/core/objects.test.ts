@@ -438,6 +438,15 @@ describe("planManipulation hand-over", () => {
     expect(planManipulation(s, "u", "Anton shook Nadia's hand.")).toBeNull();
   });
 
+  it("Stage-2 B1: body-part hand nouns never plan a hand-over", () => {
+    const s = twoActors({ prop: "report" });
+    expect(planManipulation(s, "u", "Raise a hand in a friendly wave to Nadia.")).toBeNull();
+    expect(planManipulation(s, "u", "Take Nadia's hand and smile.")).toBeNull();
+    // Transfer frames still plan.
+    const plan = planManipulation(s, "u", "Hand the report to Nadia.");
+    expect(plan).toMatchObject({ kind: "hand-over", targetActorId: "n" });
+  });
+
   it("hand-over works when the held prop has no scene object nearby", () => {
     const s = snap(
       [actor({ id: "u", name: "U", prop: "phone" }), actor({ id: "n", name: "Nadia", x: 1, y: 0 })],
@@ -559,6 +568,28 @@ describe("detectNarrativeManipulation", () => {
     expect(detectNarrativeManipulation("Anton shakes Tanya's hand.")).toEqual([]);
     expect(detectNarrativeManipulation("Anton shook Tanya's hand.")).toEqual([]);
     expect(detectNarrativeManipulation("Nothing much happens.")).toEqual([]);
+  });
+
+  it("Stage-2 B1: body-part hand nouns are not transfers", () => {
+    // False positives from the Stage-2 live run (tick 3): the bare noun
+    // "hand"/"hands" is a body part, not a transfer event.
+    expect(detectNarrativeManipulation("Anton raises a hand in a friendly wave.")).toEqual([]);
+    expect(detectNarrativeManipulation("She takes her hand and smiles.")).toEqual([]);
+    expect(detectNarrativeManipulation("Anton stands beside the desk, hands empty.")).toEqual([]);
+    expect(detectNarrativeManipulation("He waves a hand at Tanya.")).toEqual([]);
+    expect(detectNarrativeManipulation("She returns to the task at hand.")).toEqual([]);
+    expect(detectNarrativeManipulation("He lends a hand to the new intern.")).toEqual([]);
+  });
+
+  it("Stage-2 B1: hand-over still detected inside transfer frames", () => {
+    expect(detectNarrativeManipulation("Anton hands the report to Tanya.")).toEqual(["hand-over"]);
+    expect(detectNarrativeManipulation("She picks up the mug and hands it to Tanya.")).toEqual([
+      "pick-up",
+      "hand-over",
+    ]);
+    expect(detectNarrativeManipulation("He handed the report over.")).toEqual(["hand-over"]);
+    expect(detectNarrativeManipulation("Anton hands Nadia's report to Tanya.")).toEqual(["hand-over"]);
+    expect(detectNarrativeManipulation("He gave her the phone.")).toEqual(["hand-over"]);
   });
 
   it("collects multiple transfer events in one narrative", () => {

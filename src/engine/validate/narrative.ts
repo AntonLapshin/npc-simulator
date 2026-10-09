@@ -9,6 +9,7 @@ import { maskQuotedSpans } from "../../core/text.js";
 import { isActorMentioned } from "../deterministicSemantics.js";
 import { distanceToRect, isNonLocomotionSense, CONTACT_RADIUS } from "./movement.js";
 import { OBJECT_INTERACT_RADIUS } from "./objects.js";
+import { HAND_TRANSFER_FRAME_RE, SHAKE_HANDS_RE } from "../../core/objects.js";
 
 /**
  * Actors that perceived the acting actor's event (mirrors contextBuilder).
@@ -1076,8 +1077,17 @@ export function isExplicitStayAction(text: string): boolean {
  */
 const ACTION_CONTACT_RE =
   /\b(handshake|shake\s+.*hands?|shake\s+.*hand|hug|embrace|kiss|high[\s-]?five|fist[\s-]?bump|\bpat\b|slap|hands?\s+over|handing|hands?\s+(him|her|them)|give\s+.*(coffee|cup)|pass\s+.*(coffee|cup))\b/i;
-const NARRATIVE_CONTACT_RE =
-  /\b(shake|shook|hands?|hug|embrace|kiss|high[\s-]?five|fist|pat|slap|give|gave|pass|hand)\b/i;
+/**
+ * Stage-2 B1: the bare "hand"/"hands" noun is a body part ("raises a hand
+ * in a friendly wave", "takes her hand") — it only claims contact inside
+ * a transfer frame (HAND_TRANSFER_FRAME_RE) or the handshake idiom
+ * (SHAKE_HANDS_RE, contact but never a transfer). Unambiguous contact
+ * verbs keep their bare match.
+ */
+const NARRATIVE_CONTACT_RE = new RegExp(
+  `\\b(shake|shakes|shaking|shook|hug|embrace|kiss|high[\\s-]?five|fist|pat|slap|give|gave|pass)\\b|${HAND_TRANSFER_FRAME_RE.source}|${SHAKE_HANDS_RE.source}`,
+  "i",
+);
 
 export function validateContactCoverage(
   world: World,

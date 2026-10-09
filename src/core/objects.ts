@@ -181,17 +181,43 @@ const CARRY_ON_RE = /\bcarr(?:y|ies|ied|ying)\s+on\b/gi;
  */
 const PUT_DOWN_VERB_RE =
   /\b(?:puts?|sets?|lays?|laid)\b[\w\s]{0,48}?\bdown\b|\b(?:puts?|sets?|lays?|laid)\b[\w\s]{0,48}?\baside\b|\bplaces?\b[\w\s]{0,48}?\bon\b/i;
-/** Transfer verbs. "shake hands" is contact, not transfer — excluded. */
-const HAND_OVER_VERB_RE =
-  /\bhands?\b|\bhanding\b|\bhanded\b|\bgives?\b|\bgave\b|\bgiving\b|\bpass(?:es|ed|ing)?\b/i;
+/**
+ * Transfer frames for the hand/hands/handed/handing forms (Stage-2 B1).
+ * The bare noun "hand"/"hands" is a body part ("raises a hand", "takes her
+ * hand", "hands empty", "the task at hand") — it only reads as a transfer
+ * inside a transfer frame:
+ * - "hand(s/ed/ing) over" ("Hand it over", "handed the report over");
+ * - "hand <object-phrase> to <recipient>" ("hands the report to Nadia",
+ *   "hand it to her", "hands Nadia's report to Tanya");
+ * - dative with a pronoun recipient ("hand him the report"). Proper-name
+ *   dative ("hands Tanya the laptop") is NOT detected — the
+ *   case-insensitive match cannot tell a capitalized name from "in a";
+ *   prefer the "to" form. "lend/give a hand" idioms stay out (no transfer
+ *   frame); "give" still matches as an unambiguous transfer verb below.
+ * Exported for the narrative contact gate, which scopes its bare "hand"
+ * noun the same way.
+ */
+export const HAND_TRANSFER_FRAME_RE =
+  /\bhand(?:s|ed|ing)?\s+(?:[\w'’\-]+\s+){0,3}over\b|\bhand(?:s|ed|ing)?\s+(?:the|a|an|his|her|their|its|my|your|our|this|that|these|those|me|him|us|them|it|\w+'s)\b[\w\s'’,\-]{0,32}?\bto\b|\bhand(?:s|ed|ing)?\s+(?:me|him|her|us|them)\s+(?:the|a|an|his|her|their|its|my|your|our|this|that|these|those)\s+\w+/i;
+/**
+ * Transfer verbs. "shake hands" is contact, not transfer — excluded.
+ * Stage-2 B1: the hand/hands/handed/handing forms only match inside a
+ * transfer frame (HAND_TRANSFER_FRAME_RE) — the bare noun is a body part.
+ */
+const HAND_OVER_VERB_RE = new RegExp(
+  `${HAND_TRANSFER_FRAME_RE.source}|\\bgives?\\b|\\bgave\\b|\\bgiving\\b|\\bpass(?:es|ed|ing)?\\b`,
+  "i",
+);
 /**
  * The handshake idiom in all its shapes ("shake hands", "shakes Tanya's
  * hand", "shook her hand") — contact, never a transfer. The optional
  * single word covers the possessive/pronoun owner; anything longer
  * ("shake the bottle and hand it over") is left alone so a real
- * transfer verb later in the sentence still counts.
+ * transfer verb later in the sentence still counts. Exported for the
+ * narrative contact gate: the handshake idiom IS a contact claim (just
+ * never a transfer).
  */
-const SHAKE_HANDS_RE = /\bsh(?:ak(?:e|es|ing)|ook)\s+(?:\w+(?:'s)?\s+)?hands?\b/gi;
+export const SHAKE_HANDS_RE = /\bsh(?:ak(?:e|es|ing)|ook)\s+(?:\w+(?:'s)?\s+)?hands?\b/gi;
 /** Use verbs that imply taking hold of a cup. */
 const SIP_VERB_RE =
   /\bsips?\b|\bsipping\b|\bsipped\b|\bdrinks?\b|\bdrinking\b|\bdrank\b|\bswigs?\b|\bgulps?\b/i;
