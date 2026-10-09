@@ -31,6 +31,31 @@ export interface SelectionEngine {
 }
 
 /**
+ * Stage 3 C2/C3: one fallback delegation performed by a wrapping engine.
+ */
+export type EngineDelegation = {
+  /** Why the wrapper delegated (the fail() cause). */
+  cause: string;
+  /** True when the fallback engine performs provider (LLM) calls. */
+  providerBacked: boolean;
+};
+
+/**
+ * Stage 3 C2/C3: an engine that wraps a fallback engine and may delegate
+ * to it mid-call (the Laya cascade engines delegating to their LLM
+ * fallback when the cascade fails or is under-confident).
+ *
+ * The wrapper records each delegation so the orchestrator can (a) count
+ * the delegated provider call in the turn budget — the wrapper itself is
+ * local, so the plain providerBacked note() skips it — and (b) log the
+ * delegation cause for post-hoc attribution. Undefined when the last
+ * invocation did not delegate; reset at the start of every invocation.
+ */
+export interface DelegatingEngine {
+  readonly lastDelegation: EngineDelegation | undefined;
+}
+
+/**
  * Phase 5: selection engines that accept the turn's already-decided
  * intent skip their own intent cascade (the orchestrator's intent-first
  * step or the Laya proposal engine decided it). The parameter is

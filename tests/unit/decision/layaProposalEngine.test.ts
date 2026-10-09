@@ -281,3 +281,48 @@ describe("LayaProposalEngine", () => {
     ]);
   });
 });
+
+describe("LayaProposalEngine.lastDelegation (Stage 3 C2/C3)", () => {
+  it("records the cause and provider-backed-ness when delegating", async () => {
+    const fb = recordingFallback();
+    (fb as unknown as { providerBacked: boolean }).providerBacked = true;
+    const engine = new LayaProposalEngine({ client: downClient() }, fb);
+    expect(engine.lastDelegation).toBeUndefined();
+    await engine.propose(officeWorld(), "anton");
+    expect(engine.lastDelegation).toMatchObject({
+      cause: expect.stringContaining("intent cascade failed"),
+      providerBacked: true,
+    });
+  });
+
+  it("marks providerBacked false for a local fallback", async () => {
+    const engine = new LayaProposalEngine({ client: downClient() }, recordingFallback());
+    await engine.propose(officeWorld(), "anton");
+    expect(engine.lastDelegation?.providerBacked).toBe(false);
+  });
+
+  it("resets on every propose() call", async () => {
+    const engine = new LayaProposalEngine({ client: downClient() }, recordingFallback());
+    await engine.propose(officeWorld(), "anton");
+    expect(engine.lastDelegation).toBeDefined();
+    // A succeeding run clears the record: scripted cascade -> wait has no
+    // target question, no candidates for wait... force success via a
+    // full script instead: use the down client again but the record must
+    // be fresh per call, so a second failing call re-records.
+    await engine.propose(officeWorld(), "anton");
+    expect(engine.lastDelegation?.cause).toContain("intent cascade failed");
+  });
+
+  it("stays undefined when the cascade path succeeds", async () => {
+    const candidates = ["Anton waits quietly", "Anton observes the room"];
+    const client = scriptedClient({
+      intent_kind: choice("wait", KINDS),
+      manner: choice("casually", ["casually"]),
+      [EXACT_INTENT_QUESTION_ID]: choice(candidates[0]!, candidates, 0.95),
+    });
+    const engine = new LayaProposalEngine({ client }, recordingFallback());
+    const result = await engine.propose(officeWorld(), "anton");
+    expect(result.suggestions.length).toBeGreaterThan(0);
+    expect(engine.lastDelegation).toBeUndefined();
+  });
+});

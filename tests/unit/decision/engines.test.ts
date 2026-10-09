@@ -258,3 +258,78 @@ describe("LayaSemanticJudge", () => {
     expect(semantics.destinationObjectId).toBeUndefined();
   });
 });
+
+describe("LayaSelectionEngine.lastDelegation (Stage 3 C2/C3)", () => {
+  function downClient(): LayaClient {
+    return new LayaClient({
+      baseUrl: "http://stub",
+      fetchImpl: (async () => {
+        throw new Error("laya down");
+      }) as typeof fetch,
+    });
+  }
+
+  function providerBackedFallback(): SelectionEngine {
+    return {
+      providerBacked: true,
+      select: async (_w, _a, suggestions) => ({
+        action: suggestions[0] ?? "idle",
+        reasoning: "provider fallback",
+      }),
+    };
+  }
+
+  it("records the cause and provider-backed-ness when the cascade is down", async () => {
+    const engine = new LayaSelectionEngine({ client: downClient() }, providerBackedFallback());
+    expect(engine.lastDelegation).toBeUndefined();
+    await engine.select(makeWorld(), "a1", ["Say hello."]);
+    expect(engine.lastDelegation).toMatchObject({
+      cause: expect.stringContaining("intent cascade failed"),
+      providerBacked: true,
+    });
+  });
+
+  it("records delegation on the none-fit path", async () => {
+    const candidates = ["Say hello.", "Keep typing."];
+    const client = scriptedClient({
+      intent_kind: choice("speak", 0.9, ["speak", "move", "interact", "gesture", "wait"]),
+      addressee: choice("one specific person", 0.85, [
+        "one specific person",
+        "everyone present",
+        "nobody in particular",
+      ]),
+      manner: choice("casually", 0.8, ["directly and purposefully", "casually", "hesitantly", "playfully"]),
+      candidate_fit: choice(NONE_FIT_OPTION, 0.95, [...candidates, NONE_FIT_OPTION]),
+    });
+    const engine = new LayaSelectionEngine({ client }, providerBackedFallback());
+    await engine.select(makeWorld(), "a1", candidates);
+    expect(engine.lastDelegation).toMatchObject({
+      cause: expect.stringContaining("none fit"),
+      providerBacked: true,
+    });
+  });
+
+  it("marks providerBacked false for a local fallback", async () => {
+    const engine = new LayaSelectionEngine({ client: downClient() }, stubFallback);
+    await engine.select(makeWorld(), "a1", ["Say hello."]);
+    expect(engine.lastDelegation?.providerBacked).toBe(false);
+  });
+
+  it("stays undefined when the Laya pick succeeds", async () => {
+    const candidates = ["Say hello to Dana.", "Keep typing."];
+    const client = scriptedClient({
+      intent_kind: choice("speak", 0.9, ["speak", "move", "interact", "gesture", "wait"]),
+      addressee: choice("one specific person", 0.85, [
+        "one specific person",
+        "everyone present",
+        "nobody in particular",
+      ]),
+      manner: choice("casually", 0.8, ["directly and purposefully", "casually", "hesitantly", "playfully"]),
+      candidate_fit: choice(candidates[0]!, 0.9, [...candidates, NONE_FIT_OPTION]),
+    });
+    const engine = new LayaSelectionEngine({ client }, stubFallback);
+    const result = await engine.select(makeWorld(), "a1", candidates);
+    expect(result.action).toBe(candidates[0]);
+    expect(engine.lastDelegation).toBeUndefined();
+  });
+});
