@@ -1,5 +1,6 @@
 import type {
   Action,
+  ActionSemantics,
   ConsequenceResult,
   EngineConfig,
   ProposalResult,
@@ -25,6 +26,7 @@ import type {
   SelectionEngineWithIntent,
 } from "../intelligence/types.js";
 import { applyRenderResult, type ExecutedTurn } from "./patchApplier.js";
+import { parseActionSemantics } from "./semanticParser.js";
 import { renderRetryFeedback, validateRenderProse, type RenderFacts } from "./validate/render.js";
 import {
   executeMovement,
@@ -343,7 +345,15 @@ export async function resolveRender(
   world: World,
   action: Action,
   deps: EngineDependencies,
-  opts: { allowLiveness?: boolean; intent?: Intent; callCounter?: ProviderCallCounter } = {},
+  opts: { allowLiveness?: boolean; intent?: Intent; callCounter?: ProviderCallCounter;
+    /**
+     * PLAN_V2 Phase 2 (Laya as parser): the action sentence's parsed
+     * ActionSemantics from the parse step (one batched local decide,
+     * fail-open). When present the executors use it directly; when
+     * absent they keep their deterministic text parsing (v1, and the
+     * fail-open fallback when Laya is down/unavailable).
+     */
+    parsedSemantics?: ActionSemantics } = {},
 ): Promise<{
   render: ConsequenceResult;
   executed: ExecutedTurn;
@@ -380,7 +390,7 @@ export async function resolveRender(
   // render calls — engine execution is microseconds, provider calls are
   // the cost.
   const executeStart = Date.now();
-  let plannedMovement = planMovementSemantics(world, action, opts.intent);
+  let plannedMovement = planMovementSemantics(world, action, opts.intent, opts.parsedSemantics);
   // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1, off
   // by default). Laya only ever VETOES a planned move — when it is
   // confident the action needs no relocation. Laya failure or low
@@ -412,7 +422,7 @@ export async function resolveRender(
       output: { engineMovement },
     });
   }
-  const exactQuote = planSpeech(action, opts.intent);
+  const exactQuote = planSpeech(action, opts.intent, opts.parsedSemantics);
   if (exactQuote !== null) {
     logger.log({
       module: "speech",
@@ -428,7 +438,7 @@ export async function resolveRender(
   // candidate templates are written as inverses of planManipulation's
   // verb ontology, so the template → parse round-trip recovers the
   // intent's target deterministically (covered by round-trip tests).
-  const engineManipulation = executeManipulation(world, action);
+  const engineManipulation = executeManipulation(world, action, opts.parsedSemantics);
   if (engineManipulation !== null) {
     logger.log({
       module: "objects",
@@ -1059,6 +1069,17 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // renderability re-pick, if any).
   selectionBlockMs = Date.now() - selectionStart;
 
+  // PLAN_V2 Phase 2: Laya as parser — one batched local decide over the
+  // action sentence → ActionSemantics for the executors. Runs on the v2
+  // path for NPC turns (directly after the intent call) AND human turns
+  // (the human's text IS the intent) — no special casing, so the picture
+  // stays accurate for player actions too. Fail-open: Laya down or
+  // unwired → undefined and the executors' deterministic text parsers
+  // take over; the turn never blocks on the parser.
+  const parsedSemantics = readTurnLoopV2()
+    ? await parseActionSemantics(world, action, turnDeps.laya, logger)
+    : undefined;
+
   logger.log({
     module: "turn",
     event: "action_chosen",
@@ -1081,6 +1102,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     intent: decidedIntent,
     // Phase 6: the turn's provider-call counter (render invocations).
     callCounter,
+    // PLAN_V2 Phase 2: pre-parsed semantics for the executors.
+    parsedSemantics,
   });
   // Phase 6: the "selection+execute" bucket — selection block plus the
   // deterministic engine execution inside resolveRender.

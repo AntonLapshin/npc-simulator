@@ -165,7 +165,7 @@ describe("A3: held scene-object identity", () => {
     u.prop = "laptop";
     u.heldObjectId = "laptop_1";
     n.x = 2; n.y = 1;
-    const handOver = executeManipulation(world, { actorId: "u", text: "Hand the laptop to N." }, "n");
+    const handOver = executeManipulation(world, { actorId: "u", text: "Hand the laptop to N." }, { contactActorId: "n" });
     expect(handOver?.plan.kind).toBe("hand-over");
     expect(handOver?.heldObjectIds).toEqual([
       { actorId: "u", heldObjectId: null },
