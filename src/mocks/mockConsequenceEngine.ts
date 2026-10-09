@@ -48,6 +48,8 @@ export class MockConsequenceEngine implements ConsequenceEngine {
     // engine-dictated exact quote as the verbatim contract.
     // Phase 3: like the real engine, the mock's context carries the
     // already-executed manipulation as facts to narrate.
+    // PLAN_V2 Phase 3: like the real engine, the mock's context carries
+    // the attempted-vs-executed clamp record as the honest-gap facts.
     const prompt = buildConsequenceContext(
       world,
       action,
@@ -56,6 +58,7 @@ export class MockConsequenceEngine implements ConsequenceEngine {
       opts?.engineMovement,
       opts?.exactQuote,
       opts?.engineManipulation,
+      opts?.clamp,
     );
     this.logger.log({
       module: "consequence",
