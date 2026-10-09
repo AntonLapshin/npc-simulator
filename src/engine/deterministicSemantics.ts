@@ -11,59 +11,28 @@
 // production grounding path so both resolve mentions identically.
 
 import type { Action, World } from "../types.js";
-
-/**
- * Exp-6 item 2: canonicalize curly/typographic quote characters to their
- * straight ASCII equivalents before any quote comparison. The tick-7
- * misfire: the action text used ' (U+2019) while the narrative used ' —
- * the grounding gate then dropped a perfectly good quote as "ungrounded".
- * Applied to both sides (action text and narrative) before parsing and
- * before substring comparison, so mixed typography never breaks grounding.
- */
-const QUOTE_NORMALIZATIONS: Array<[RegExp, string]> = [
-  [/[‘’‚‛‹›`´]/g, "'"],
-  [/[“”„‟«»]/g, '"'],
-];
-
-export function normalizeQuotes(s: string): string {
-  let out = s;
-  for (const [re, rep] of QUOTE_NORMALIZATIONS) out = out.replace(re, rep);
-  return out;
-}
-
-/** Double- and single-quoted segments (content length >= 2). Format parsing, not a verb ontology. */
-export function parseActionQuotes(text: string): string[] {
-  // Exp-6 item 2: normalize first so curly-quoted segments ("...") are
-  // found and curly apostrophes (don't) canonicalize before comparison.
-  const normalized = normalizeQuotes(text);
-  const out: string[] = [];
-  const doubleRe = /"([^"]{2,})"/g;
-  let m: RegExpExecArray | null;
-  while ((m = doubleRe.exec(normalized)) !== null) out.push(m[1]!);
-  out.push(...singleQuotedSegments(normalized));
-  return out;
-}
-
-/**
- * Exp-3 item 6 (S3): single-quoted segment extraction with apostrophe
- * awareness, shared by parseActionQuotes and quotedSegments (speech.ts).
- * Dialogue is often single-quoted after a comma or colon ("say to Anton,
- * 'Feel free…'", "greets her: 'Good morning…'"), and quotes contain
- * apostrophes ("I'm Dana"). The naive [^']+ content class truncates at
- * the first apostrophe and misses comma/colon-led quotes — the tick-20
- * invented quote was invisible to the invented_dialogue gate for exactly
- * this reason. An interior ' counts as an apostrophe (not a closer) when
- * followed by a letter; the closing ' must not be followed by a letter
- * (so the ' in "Tanya's" never closes early); bare contractions
- * ("don't", "I'm") never open because the ' isn't quote-led.
- */
-const SINGLE_QUOTE_RE = /(^|[\s(\[{,:])'((?:[^']|'(?=[A-Za-z])){4,})'(?![A-Za-z])/g;
-
-export function singleQuotedSegments(text: string): string[] {
-  const out: string[] = [];
-  for (const m of text.matchAll(SINGLE_QUOTE_RE)) out.push(m[2]!);
-  return out;
-}
+// Phase 1: pure text predicates live in `src/core/text.ts`. Re-exported
+// here so existing importers keep working.
+import {
+  hasDisplacementToken,
+  hasSpeechToken,
+  hasStationaryWorkToken,
+  maskNonLocomotion,
+  maskResumedActivity,
+  normalizeQuotes,
+  parseActionQuotes,
+  singleQuotedSegments,
+} from "../core/text.js";
+export {
+  hasDisplacementToken,
+  hasSpeechToken,
+  hasStationaryWorkToken,
+  maskNonLocomotion,
+  maskResumedActivity,
+  normalizeQuotes,
+  parseActionQuotes,
+  singleQuotedSegments,
+};
 
 /** Locomotion verbs: whole-body displacement (mirrors the LLM judge prompt). */
 const LOCOMOTION_VERBS =
@@ -294,39 +263,6 @@ export function findManipulatedObjects(
     }
   }
   return out;
-}
-
-/**
- * Explicit speech verbs (Exp-4 item 3, tick 14): explaining, telling,
- * asking, nodding-along etc. count as speech even with no quote marks.
- * "Nod and start explaining Anton's first task" speaks — otherwise every
- * explanation is droppable. Greeting verbs stay out of the *unquoted*
- * set only in the sense that quotes still dominate; the token itself is
- * intentionally broad (rendering stays lenient, content strict).
- */
-const SPEECH_VERBS =
-  "say|says|said|tell|tells|told|speak|speaks|spoke|spoken|talk|talks|talked|" +
-  "ask|asks|asked|asking|answer|answers|answered|reply|replies|replied|" +
-  "explain|explains|explained|explaining|describe|describes|described|describing|" +
-  "mention|mentions|mentioned|mentioning|discuss|discusses|discussed|discussing|" +
-  "announce|announces|announced|shout|shouts|shouted|whisper|whispers|whispered|" +
-  "call|calls|called|thank|thanks|thanked|thanking|greet|greets|greeted|greeting|" +
-  "introduce|introduces|introduced|introducing|brief|briefs|briefed|briefing|" +
-  "nod|nods|nodded|nodding|" +
-  "hello|hi|hey|speech|exclaim|exclaims|exclaimed|exclaiming";
-
-/**
- * Exp-4 item 3: does the action text carry an explicit speech token? True
- * for any quoted segment (existing ground truth) or an unquoted speech
- * verb above ("explain", "nod and start explaining...", "thank both").
- * Used by the grounding layer to force `speaks=true` so unquoted
- * explanations cannot pass hollow.
- */
-export function hasSpeechToken(text: string): boolean {
-  if (parseActionQuotes(text).length > 0) return true;
-  // A bare question mark is an utterance even without a verb ("Is this my spot?").
-  if (text.includes("?")) return true;
-  return new RegExp(`\\b(?:${SPEECH_VERBS})\\b`, "i").test(text);
 }
 
 /** Object-kind ranking for walk vs grab targets (Exp-4 item 5). */
@@ -627,154 +563,6 @@ export type DeterministicSemantics = {
   /** First mentioned non-acting actor — the spoken-to candidate. */
   addresseeActorId?: string;
 };
-
-/**
- * F35: the single canonical "resumed activity" mask. Resuming a task is
- * not relocating ("return/back to typing/work/...") and must never read
- * as locomotion or as starting an object interaction. Shared by
- * maskNonLocomotion below and by validate/speech.ts (which imports and
- * re-exports this) — one implementation, no drift.
- */
-export function maskResumedActivity(t: string): string {
-  let out = t;
-  out = out.replace(
-    /\breturn\w*\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  // Item C8 (S4): "return/returns/returned <focus|attention>" (no "to") is
-  // resumed activity, not locomotion — "return focus to my laptop" must not
-  // read as a displacement token that forces phantom movement.
-  out = out.replace(
-    /\breturn\w*\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?(focus|attention)\b/gi,
-    " ",
-  );
-  // Item C8 (S4): the "return/back to <noun>" family gains the optional
-  // determiner ("return to the task") plus attention/laptop ("return ...
-  // to my laptop") — resuming work at the laptop is not relocating to it.
-  const resumedNouns = "(work|tasks?|focus|focusing|attention|laptop|business|dut(y|ies))";
-  const det = "(?:(?:the|a|an|his|her|their|my|your|its)\\s+)?";
-  out = out.replace(
-    new RegExp(`\\breturn\\w*\\s+to\\s+${det}${resumedNouns}\\b`, "gi"),
-    " ",
-  );
-  out = out.replace(
-    /\b(?:go\w*|get\w*|come\w*|turn\w*)\s+back\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  out = out.replace(
-    /\bback\s+to\s+(?:(?:the|a|an|his|her|their|my|your|its)\s+)?[a-z]+ing\b/gi,
-    " ",
-  );
-  out = out.replace(
-    new RegExp(`\\b(?:go\\w*|get\\w*|come\\w*|turn\\w*)\\s+back\\s+to\\s+${det}${resumedNouns}\\b`, "gi"),
-    " ",
-  );
-  out = out.replace(new RegExp(`\\bback\\s+to\\s+${det}${resumedNouns}\\b`, "gi"), " ");
-  return out;
-}
-
-/**
- * Phase 2 (exp-3 item 3): mask non-locomotion clauses (perception /
- * cognition / resumed activity) to clause end. Canonical allowlist shared
- * by the mock judge and the deterministic moves-grounding below; the LLM
- * judge prompt carries the equivalent rule in prose.
- *
- * Resuming a task is not relocating ("return/back to typing/work/...").
- * Perception/cognition verbs head non-locomotion clauses: looking or
- * glancing anywhere ("look up", "glance over notes"), asking, sipping,
- * reviewing, preparing, typing/thinking/waiting. Masked to clause end so a
- * later movement verb in the SAME clause is not misread either — nuanced
- * mixed clauses belong to the LLM judge.
- */
-export function maskNonLocomotion(text: string): string {
-  // F35: resumed-activity masking is the canonical maskResumedActivity
-  // above (shared with validate/speech.ts).
-  let t = maskResumedActivity(text);
-  // Metaphor is not movement ("go the extra mile").
-  t = t.replace(/\bgo\s+(?:the\s+)?extra\s+mile\b/gi, " ");
-  // Perception/cognition verbs head non-locomotion clauses.
-  t = t.replace(
-    /\b(look|looks|looking|glance|glances|glancing|ask|asks|asked|asking|sip|sips|sipping|drink|drinks|drinking|drank|review|reviews|reviewing|prepare|prepares|preparing|type|types|typing|typed|think|thinks|thinking|wait|waits|waiting)\b[^,.;]*/gi,
-    " ",
-  );
-  return t;
-}
-
-/**
- * Explicit whole-body displacement verbs (Phase 2 / exp-3 item 3):
- * walk/go/head/move/approach/`return to <place>` plus the close synonyms
- * the LLM judge prompt already treats as locomotion (run/step/come/enter/
- * leave/follow/join, saunter/drift/sidle/dance over, roll one's chair, slip
- * out, teleport). Perception/cognition verbs (look/glance/ask/sip/review/
- * prepare/type/...) are NEVER here — their clauses are masked above.
- *
- * Bare "head" is deliberately excluded (body-part collisions: "shake his
- * head"); headed/heading/head-to-<dir> is matched separately below.
- */
-const DISPLACEMENT_VERBS =
-  "walk|walks|walking|walked|go|goes|going|went|move|moves|moving|moved|run|runs|running|ran|" +
-  "step|steps|stepping|stepped|come|comes|coming|came|approach|approaches|approaching|approached|" +
-  "enter|enters|entering|entered|leave|leaves|leaving|follow|follows|following|followed|" +
-  "join|joins|joining|joined|return|returns|returning|returned|advance|advances|advancing|" +
-  "proceed|proceeds|proceeding|shift|shifts|shifting|slide|slides|sliding|stroll|strolls|strolling|" +
-  "hurry|hurries|hurrying|rush|rushes|rushing|rushed|saunter|saunters|sauntering|" +
-  "drift|drifts|drifting|sidle|sidles|sidling|dance|dances|dancing|" +
-  "roll|rolls|rolling|rolled|slip|slips|slipping|slipped|teleport|teleports|teleporting";
-
-const HEAD_TO_RE =
-  /\b(heads?\s+(to|toward|towards|for|into|out|off|over|back|down|up|north|south|east|west|through|across|along)|headed|heading\s+(to|toward|towards|for|into|out|off|over|back))\b/i;
-
-const PROXIMITY_RE =
-  /\b(closer|close to|nearer|toward|towards|up to|next to|beside|behind|over to)\b/i;
-
-/**
- * Exp-7 item A7: stationary-work verbs — fine-motor / observational
- * activity that never implies whole-body displacement (exp-7 B7: "typing
- * furiously" / "stare blankly" arrived with moves=true from the model's
- * self-declared effects and died on movement.no_position_change). A
- * displacement token in the same text still wins (a walk-then-type turn
- * moves); without one, the model's moved=true is ungrounded and the
- * grounding layer downgrades it instead of demanding x/y for typing.
- */
-const STATIONARY_WORK_VERBS =
-  "type|types|typing|typed|stare|stares|staring|stared|sip|sips|sipping|sipped|" +
-  "read|reads|reading|work|works|working|worked|listen|listens|listening|" +
-  "watch|watches|watching|scroll|scrolls|scrolling|click|clicks|clicking";
-
-export function hasStationaryWorkToken(text: string): boolean {
-  // NB: tested against the RAW text, not the maskNonLocomotion output —
-  // the mask's perception/cognition clause removal exists to avoid
-  // locomotion false positives (the opposite concern), and it strips
-  // exactly these verbs. A spurious hit here is harmless: the grounding
-  // downgrade only fires when something already claimed moves=true.
-  return new RegExp(`\\b(?:${STATIONARY_WORK_VERBS})\\b`, "i").test(text);
-}
-
-/**
- * Phase 2 (exp-3 item 3): does the action text carry a
- * destination-or-displacement token? `moves` requires one: an explicit
- * displacement verb (masked for perception/cognition/resumed-activity
- * clauses, body-part "head", and subordinate someone-else clauses) or an
- * explicit proximity phrase. A glance, question, sip, or typing session
- * carries no token — so a `moves=true` verdict on such text is ungrounded
- * and the grounding layer downgrades it (kills forced teleports and
- * ask-question fallbacks in one edit).
- *
- * Over-broad by design: an unrecognized real verb simply keeps the merged
- * verdict (status quo) — only the absence of ANY token downgrades.
- */
-export function hasDisplacementToken(text: string): boolean {
-  let t = text;
-  // Body-part "head" is not locomotion ("nodding the head").
-  t = t.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
-  t = maskNonLocomotion(t);
-  // Someone ELSE's motion in a subordinate clause ("as he enters") is not
-  // the acting actor moving.
-  t = t.replace(/\b(as|while|when)\b[^,.;]*/gi, " ");
-  if (HEAD_TO_RE.test(t)) return true;
-  if (new RegExp(`\\b(?:${DISPLACEMENT_VERBS})\\b`, "i").test(t)) return true;
-  return PROXIMITY_RE.test(t);
-}
 
 /**
  * The deterministic judge (Phase 1 role split): quotes and destinations

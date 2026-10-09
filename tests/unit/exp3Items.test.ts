@@ -34,7 +34,7 @@ import {
   rankDestinationObjects,
   resolveDestinationObjectId,
 } from "../../src/engine/deterministicSemantics.js";
-import { vetoAwayFromNarrativeTarget } from "../../src/engine/textHints.js";
+import { computeMovementOutcome } from "../../src/core/movement.js";
 import { validateSpeechPreservation } from "../../src/engine/validate/speech.js";
 import { trySalvageConsequence } from "../../src/engine/turnSalvage.js";
 import { recheckAcceptedProse } from "../../src/engine/turnSalvageGates.js";
@@ -405,26 +405,22 @@ describe("exp3 item 7 (S5): movement destination fixes", () => {
     expect(picked).toBe("anton_desk");
   });
 
-  it("tick-28 repro: vetoes a repair stepping AWAY from the narrative's approach target", () => {
+  it("tick-28 repro: the engine always steps toward the narrative's approach target", () => {
+    // Phase 1: the veto-away-from-narrative-target machinery is deleted.
+    // The engine computes movement directly from the resolved destination,
+    // so a step AWAY from the target is impossible by construction.
     const world = deskWorld();
     const anton = world.actors.find((a) => a.id === "anton")!;
-    anton.x = 11; anton.y = 7;
+    anton.x = 14; anton.y = 7;
     const tanya = world.actors.find((a) => a.id === "tanya")!;
     tanya.x = 11; tanya.y = 6;
-    // Repair suggests (8,10): distance to Anton goes 1.0 → 4.2 (away).
-    const away = vetoAwayFromNarrativeTarget(
-      world, "tanya",
-      "Tanya walks over to Anton and greets him warmly, offering her hand.",
-      { x: 8, y: 10 },
-    );
-    expect(away).toBeNull();
-    // A step toward Anton is kept.
-    const toward = vetoAwayFromNarrativeTarget(
-      world, "tanya",
-      "Tanya walks over to Anton and greets him warmly, offering her hand.",
-      { x: 11, y: 7 },
-    );
-    expect(toward).toEqual({ x: 11, y: 7 });
+    // "Tanya walks over to Anton and greets him warmly, offering her hand."
+    // resolves destinationActorId=anton; the engine step must be strictly
+    // closer to Anton (the old vetoed repair suggested (8,10): 1.0 → 4.2).
+    const o = computeMovementOutcome(world, "tanya", { destinationActorId: "anton" });
+    expect(o).not.toBeNull();
+    const oldDist = Math.hypot(11 - 14, 6 - 7);
+    expect(Math.hypot(o!.x - 14, o!.y - 7)).toBeLessThan(oldDist);
   });
 
   it("fuzzyMatchObjectId resolves unambiguous invented ids, rejects ambiguous ones", () => {

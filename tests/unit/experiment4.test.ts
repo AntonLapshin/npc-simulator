@@ -13,9 +13,9 @@ import {
 } from "../../src/engine/deterministicSemantics.js";
 import {
   clampMoveToCap,
-  isClampableMovementFailure,
+  computeMovementOutcome,
   MAX_STEP_DISTANCE,
-} from "../../src/engine/movementAssist.js";
+} from "../../src/core/movement.js";
 import {
   isFallbackConsequence,
   resolveWithValidation,
@@ -310,26 +310,7 @@ describe("exp4-1 clamp over-cap walks to a partial step (ticks 15/18)", () => {
     expect(Math.hypot(clamped!.x - 16, clamped!.y - 2)).toBeGreaterThan(3);
   });
 
-  it("isClampableMovementFailure covers cap + progress errors", () => {
-    // F2: codes, not prose.
-    expect(
-      isClampableMovementFailure([
-        { code: "movement.over_step_cap", message: "acting actor (anton) moves 13.0 cells in one turn" },
-      ]),
-    ).toBe(true);
-    expect(
-      isClampableMovementFailure([
-        { code: "movement.no_progress_actor", message: "make real progress" },
-      ]),
-    ).toBe(true);
-    expect(
-      isClampableMovementFailure([
-        { code: "speech.invented_dialogue", message: "narrative invents dialogue" },
-      ]),
-    ).toBe(false);
-  });
-
-  it("resolveWithValidation clamps instead of falling back (tick-15 shape)", async () => {
+  it("resolveWithValidation ignores over-cap model coordinates and applies the engine step (tick-15 shape)", async () => {
     const logger = new Logger({ sessionId: "exp4-clamp", writeToFile: false });
     const world = antonWorld();
     const overCap: ConsequenceResult = {
@@ -346,8 +327,16 @@ describe("exp4-1 clamp over-cap walks to a partial step (ticks 15/18)", () => {
     const out = await resolveWithValidation(world, { actorId: "anton", text: "Walk to my desk and sit down." }, deps);
     expect(out.narrative).not.toBe("Nothing changes.");
     const moved = out.actorPatches.find((p) => p.actorId === "anton")!;
+    // Phase 1: the model's over-cap coordinates are ignored (logged at
+    // debug); the engine computes the step deterministically instead.
+    const expected = computeMovementOutcome(world, "anton", { destinationObjectId: "anton_desk" }, null)!;
+    expect(moved.x).toBe(expected.x);
+    expect(moved.y).toBe(expected.y);
     expect(Math.hypot(moved.x! - 16, moved.y! - 2)).toBeLessThanOrEqual(MAX_STEP_DISTANCE + 1e-9);
-    expect(logger.store.byEvent("movement_repaired")).toHaveLength(1);
+    // Non-coordinate patch content survives the merge.
+    expect(moved.pose).toBe("sit");
+    const ignored = logger.store.byEvent("model_coordinates_ignored");
+    expect(ignored.some((e) => (e.output as { ignoredX?: number })?.ignoredX === 4)).toBe(true);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 });
