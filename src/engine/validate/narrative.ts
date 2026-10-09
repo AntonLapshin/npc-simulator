@@ -6,7 +6,7 @@ import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity, quotedSegments } from "./speech.js";
 import { isActorMentioned } from "../deterministicSemantics.js";
-import { distanceToRect, isNonLocomotionSense } from "./movement.js";
+import { distanceToRect, isNonLocomotionSense, CONTACT_RADIUS } from "./movement.js";
 import { OBJECT_INTERACT_RADIUS } from "./objects.js";
 
 /**
@@ -33,35 +33,6 @@ export function perceiverIds(
 }
 
 /**
- * Addressee patching (action item 5): when the action speaks directly TO a
- * perceiving actor ("ask Tanya ..."), that addressee must record at least
- * a thoughts reaction. A direct question with no patch on the person asked
- * means the event left no trace on them — reject so the model retries.
- */
-export function validateAddresseePatch(
-  world: World,
-  normalized: { actorPatches: { actorId: string; thoughts?: string }[] },
-  action: Action,
-  semantics: ActionSemantics,
-  cfg: EngineConfig = defaultConfig,
-): ValidationError[] {
-  const errors: ValidationError[] = [];
-  if (semantics.addresseeActorId === undefined) return errors;
-  if (semantics.addresseeActorId === action.actorId) return errors;
-  const target = world.actors.find((a) => a.id === semantics.addresseeActorId);
-  if (!target) return errors;
-  if (!perceiverIds(world, action.actorId, cfg).has(target.id)) return errors; // couldn't perceive — no patch owed
-  const patched = normalized.actorPatches.some((p) => p.actorId === target.id);
-  if (!patched) {
-    errors.push({
-      code: "speech.addressee_not_patched",
-      message: `action speaks directly to ${target.id} but ${target.id} has no actorPatch: give every perceiving actor (especially a direct addressee) at least a 'thoughts' reaction patch`,
-    });
-  }
-  return errors;
-}
-
-/**
  * Acting-actor presence (exp-2 item 2, tick 11 repro): a turn whose judged
  * meaning is locomotion or physical contact must leave a trace on the acting
  * actor itself. Patches on observers only (or no patches at all for contact)
@@ -71,151 +42,6 @@ export function validateAddresseePatch(
  * (a greeting need not change state), and fail-open turns without semantics
  * are untouched.
  */
-/**
- * Exp-6 item 5 (tick 1): state↔pose↔position coherence. The consequence
- * stood Tanya up, walked her 5.8 cells, and put the laptop down — but her
- * `state` string still read "sitting at her desk and working on a laptop".
- * Prose/state drift was free because no check compared them. When a patch
- * changes the acting actor's pose, prop, or position, the effective
- * `state` (patch.state ?? world state) must not contradict it:
- * - pose → stand while the state claims sitting/seated (or pose → sit
- *   while the state claims standing — "standing desk" furniture excluded);
- * - prop cleared/swapped while the state still claims to work on/hold it
- *   ("working on a laptop" with prop=null; a "puts the laptop down"
- *   release phrasing stays coherent);
- * - a >2-cell move while the state still claims sitting (the "sitting
- *   state while standing 5.8 cells away" case) — chair-rolling exempt.
- * Rejects with a targeted message so the retry fixes the prose; the
- * validator never rewrites sentences itself.
- */
-export function validateStateCoherence(
-  world: World,
-  normalized: {
-    actorPatches: {
-      actorId: string;
-      x?: number;
-      y?: number;
-      state?: string;
-      pose?: string;
-      prop?: string | null;
-    }[];
-  },
-  action: Action,
-): ValidationError[] {
-  const errors: ValidationError[] = [];
-  const sittingRe = /\bsit\b|\bsitting\b|\bseated\b/i;
-  const standingRe = /\bstand\b|\bstanding\b(?!\s+desk)|\bstood\b/i;
-  /**
-   * True when the state carries descriptive content beyond the bare
-   * posture word ("sitting at her desk and working on a laptop" vs
-   * "sitting"). The tick-1 failure was a rich stale description feeding
-   * the next turn's proposal context; a bare posture word is the world's
-   * terse status line and stays valid without an update (blessed by the
-   * exp-2/3/4 sit/settle tests).
-   */
-  const isDescriptiveState = (state: string, postureRe: RegExp): boolean => {
-    const stripped = state.replace(postureRe, "").replace(/[^a-z0-9]+/gi, " ").trim();
-    return stripped.length >= 3;
-  };
-  for (const patch of normalized.actorPatches) {
-    const actor = world.actors.find((a) => a.id === patch.actorId);
-    if (!actor) continue;
-    const poseChanged = patch.pose !== undefined && patch.pose !== actor.pose;
-    const propChanged = patch.prop !== undefined && patch.prop !== actor.prop;
-    const moved =
-      patch.x !== undefined &&
-      patch.y !== undefined &&
-      Math.hypot(patch.x - actor.x, patch.y - actor.y) > 2;
-    if (!poseChanged && !propChanged && !moved) continue;
-    const state = patch.state ?? actor.state;
-    const pose = patch.pose ?? actor.pose;
-    if (poseChanged) {
-      if (
-        /^stand$/i.test(patch.pose!) &&
-        sittingRe.test(state) &&
-        isDescriptiveState(state, sittingRe)
-      ) {
-        errors.push({
-          code: "state.pose_state_mismatch",
-          message: `actor ${patch.actorId}: pose changed to "stand" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (standing, no longer sitting)`,
-        });
-      } else if (
-        /^sit$/i.test(patch.pose!) &&
-        standingRe.test(state) &&
-        isDescriptiveState(state, standingRe)
-      ) {
-        errors.push({
-          code: "state.pose_state_mismatch",
-          message: `actor ${patch.actorId}: pose changed to "sit" but state still reads "${state.slice(0, 80)}": update 'state' to match the new pose (sitting, no longer standing)`,
-        });
-      }
-    }
-    if (propChanged && actor.prop) {
-      const oldProp = actor.prop;
-      const releaseRe = new RegExp(
-        `\\b(put|puts|putting|set|sets|setting|plac\\w+|hand\\w+)\\b[^.]{0,40}\\b${oldProp}\\b`,
-        "i",
-      );
-      const stillClaimsProp =
-        new RegExp(`\\b${oldProp}\\b`, "i").test(state) && !releaseRe.test(state);
-      if (stillClaimsProp) {
-        errors.push({
-          code: "state.prop_state_mismatch",
-          message: `actor ${patch.actorId}: prop changed from "${oldProp}" to ${patch.prop === null ? "null" : `"${patch.prop}"`} but state still reads "${state.slice(0, 80)}": update 'state' to match (no longer working on/holding the ${oldProp})`,
-        });
-      }
-    }
-    if (
-      moved &&
-      !/^stand$/i.test(pose ?? "") &&
-      sittingRe.test(state) &&
-      isDescriptiveState(state, sittingRe)
-    ) {
-      // Rolling a chair is legitimate seated locomotion — exempt it.
-      if (!/\b(roll\w*|wheel\w*|chair)\b/i.test(action.text)) {
-        errors.push({
-          code: "state.moved_while_sitting",
-          message: `actor ${patch.actorId}: moved ${Math.hypot(patch.x! - actor.x, patch.y! - actor.y).toFixed(1)} cells but state still reads "${state.slice(0, 80)}": update 'state' (and 'pose') to match — a sitting state cannot walk across the room`,
-        });
-      }
-    }
-    // Exp-7 item A6: the acting actor's state string is self-descriptive —
-    // a wrong-set pronoun there is a misgendering (exp-7 tick 8: Dana's
-    // state applied as "sitting at her desk and working on a laptop",
-    // plagiarized from Tanya's state). Checked on the acting actor only;
-    // observer state patches are rejected by turn discipline anyway.
-    if (patch.actorId === action.actorId && typeof patch.state === "string") {
-      errors.push(...validateStatePronouns(world, patch.actorId, patch.state));
-    }
-  }
-  return errors;
-}
-
-export function validateActingActorPresence(  normalized: { actorPatches: { actorId: string }[] },
-  action: Action,
-  semantics: ActionSemantics,
-): ValidationError[] {
-  // Exp-2 item 8 (S4/S5): word-sense override — an interrogative question
-  // or a pure facing turn is not locomotion even when the judged semantics
-  // say moves=true, so it must not demand an acting-actor movement patch
-  // (a speech+facing turn with zero patches stays allowed, like any
-  // speech-only turn). Contact turns are unaffected.
-  const moves = semantics.moves && !isNonLocomotionSense(action.text);
-  const needsActor = moves || semantics.contactActorId !== undefined;
-  if (!needsActor) return [];
-  const hasActing = normalized.actorPatches.some((p) => p.actorId === action.actorId);
-  if (!hasActing) {
-    const kind = semantics.contactActorId !== undefined ? "physical contact" : "movement";
-    return [
-      {
-        code: "turn_discipline.acting_actor_not_patched",
-        message: `action implies ${kind} but acting actor (${action.actorId}) has no actorPatch (only observers patched, or none): patch the acting actor itself with the movement/contact outcome`,
-      },
-    ];
-  }
-  return [];
-}
-
 /**
  * Exp-3 item 6 (S3, tick-20 repro): identity-consistency gate. The
  * consequence "Dana approaches Tanya's desk and greets her: 'Good morning,
@@ -385,38 +211,6 @@ export function validateRelationshipLabel(
 const CONTACT_EFFECT_RE =
   /\b(stains?|stained|spills?|spilled|breaks?|brok(?:e|en)|tears?|tore|torn|scratch(?:es|ed)?|dents?|dented|marks?|marked|dirt(?:y|ied)|burn(?:s|ed|t)?|wets?|wetted|knocks?|knocked|splash(?:es|ed)?)\b/i;
 
-export function validateInventedContact(
-  world: World,
-  normalized: {
-    objectPatches: { objectId: string; description?: string }[];
-  },
-  action: Action,
-): ValidationError[] {
-  const errors: ValidationError[] = [];
-  for (const patch of normalized.objectPatches) {
-    if (patch.description === undefined) continue;
-    if (!CONTACT_EFFECT_RE.test(patch.description)) continue;
-    const obj = world.scene.objects.find((o) => o.id === patch.objectId);
-    if (!obj) continue;
-    for (const other of world.actors) {
-      if (other.id === action.actorId) continue;
-      if (!textMentionsActor(patch.description, other)) continue;
-      const d = distanceToRect(other.x, other.y, obj);
-      if (d > OBJECT_INTERACT_RADIUS) {
-        errors.push({
-          code: "object.invented_contact",
-          message:
-            `object ${patch.objectId}: description attributes a physical effect to ${other.id} ` +
-            `("${patch.description.slice(0, 90)}") but ${other.id} is ${d.toFixed(1)} cells away ` +
-            `(at (${other.x}, ${other.y})): cross-actor physical contact needs the named actor ` +
-            `within ${OBJECT_INTERACT_RADIUS} cells — invented causation`,
-        });
-      }
-    }
-  }
-  return errors;
-}
-
 /**
  * Exp-6 item 8 (M8): third-person fallback rewrite. User-turn fallbacks
  * canonicalize the raw user text ("Anton tried: I turn toward Dana and
@@ -523,103 +317,36 @@ function thoughtNounGrounded(world: World, action: Action, noun: string): boolea
   return world.history.some((h) => h.text.toLowerCase().includes(lower));
 }
 
+/**
+ * Phase 4: thought grounding for the render contract. The render result
+ * carries the acting actor's flat `thoughts` string (no patches) — it must
+ * not invent people and must not claim ungrounded past requests/grants.
+ * Pure.
+ */
 export function validateThoughtGrounding(
   world: World,
   action: Action,
-  normalized: {
-    actorPatches: { actorId: string; thoughts?: string }[];
-    narrative: string;
-  },
+  actorId: string,
+  thoughts: string | undefined,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
-  for (const patch of normalized.actorPatches) {
-    const thoughts = patch.thoughts;
-    if (thoughts === undefined || thoughts.trim().length === 0) continue;
-    const unknown = findUnknownPersonNames(world, thoughts);
-    if (unknown.length > 0) {
-      errors.push({
-        code: "thoughts.unknown_proper_noun",
-        message: `thoughts for ${patch.actorId} name unknown person "${unknown[0]}" — only roster actors exist; inner reactions never invent people`,
-      });
-      continue;
-    }
-    for (const re of THOUGHT_CLAIM_RES) {
-      const m = re.exec(thoughts);
-      if (m?.[1] !== undefined && !thoughtNounGrounded(world, action, m[1])) {
-        errors.push({
-          code: "thoughts.ungrounded_claim",
-          message: `thoughts for ${patch.actorId} claim "${m[0].trim().slice(0, 60)}" with no history support — nothing in the story mentions "${m[1].toLowerCase()}"; thoughts describe reactions to what actually happened, never invent past requests or grants`,
-        });
-        break;
-      }
-    }
+  if (thoughts === undefined || thoughts.trim().length === 0) return errors;
+  const unknown = findUnknownPersonNames(world, thoughts);
+  if (unknown.length > 0) {
+    errors.push({
+      code: "thoughts.unknown_proper_noun",
+      message: `thoughts for ${actorId} name unknown person "${unknown[0]}" — only roster actors exist; inner reactions never invent people`,
+    });
+    return errors;
   }
-  return errors;
-}
-
-/**
- * Exp-3 item 8 (S6): state-label quality gate. Model-supplied `state`
- * strings are the source of "near the tanya's mug" (article stacked on a
- * possessive) and wrong-desk labels ("near the tanya's desk sign" while
- * sitting at Dana's own desk). Two deterministic checks on the effective
- * state (patch.state ?? world state) when the turn moves the actor or
- * sets state explicitly:
- * - grammar: /(near|at) the [A-Za-z]+'s/ — a stacked article+possessive
- *   is never grammatical ("near Tanya's mug", not "near the tanya's mug");
- * - wrong landmark: the state names another actor's owned furniture
- *   ("<other>'s desk/chair") while the actor is within 2.5 cells of their
- *   OWN same-kind object — the label points at the wrong desk.
- * Reject with a targeted rewrite message (the validator never rewrites
- * prose). Pure.
- */
-export function validateStateLabel(
-  world: World,
-  normalized: {
-    actorPatches: { actorId: string; x?: number; y?: number; state?: string }[];
-  },
-  action: Action,
-): ValidationError[] {
-  const errors: ValidationError[] = [];
-  for (const patch of normalized.actorPatches) {
-    const actor = world.actors.find((a) => a.id === patch.actorId);
-    if (!actor) continue;
-    if (patch.state === undefined) continue;
-    const state = patch.state;
-    if (/\b(near|at) the [A-Za-z]+'s\b/i.test(state)) {
+  for (const re of THOUGHT_CLAIM_RES) {
+    const m = re.exec(thoughts);
+    if (m?.[1] !== undefined && !thoughtNounGrounded(world, action, m[1])) {
       errors.push({
-        code: "state.grammar_stacked_article",
-        message: `actor ${patch.actorId}: state "${state.slice(0, 80)}" stacks an article on a possessive ("the tanya's mug") — write "near Tanya's mug" / "at Dana's desk", never "the <name>'s"`,
+        code: "thoughts.ungrounded_claim",
+        message: `thoughts for ${actorId} claim "${m[0].trim().slice(0, 60)}" with no history support — nothing in the story mentions "${m[1].toLowerCase()}"; thoughts describe reactions to what actually happened, never invent past requests or grants`,
       });
-      continue;
-    }
-    // Wrong-desk: "X's <furniture>" for X ≠ actor, while actor is near
-    // their own same-kind furniture.
-    const m = /\b([A-Za-z]+)'s\s+(desk|chair|table|sofa|machine|cubicle)\b/i.exec(state);
-    if (m) {
-      const ownerName = m[1]!.toLowerCase();
-      const kind = m[2]!.toLowerCase();
-      const owner = world.actors.find(
-        (a) =>
-          a.id !== patch.actorId &&
-          (a.name.toLowerCase() === ownerName || a.id.toLowerCase() === ownerName),
-      );
-      if (owner !== undefined) {
-        // The <actorId>_ id-prefix convention encodes ownership: if the
-        // actor's own same-kind furniture is within 2.5 cells, the label
-        // naming someone else's is wrong-desk.
-        const ownNearby = world.scene.objects.some(
-          (o) =>
-            o.id.toLowerCase().startsWith(`${patch.actorId}_`) &&
-            new RegExp(kind, "i").test(`${o.id} ${o.name}`) &&
-            Math.hypot(actor.x - (o.x + o.w / 2), actor.y - (o.y + o.h / 2)) <= 2.5,
-        );
-        if (ownNearby) {
-          errors.push({
-            code: "state.wrong_landmark",
-            message: `actor ${patch.actorId}: state "${state.slice(0, 80)}" names ${owner.id}'s ${kind} while the actor's own ${kind} is nearby — the label points at the wrong desk; name the landmark the actor is actually at`,
-          });
-        }
-      }
+      break;
     }
   }
   return errors;
@@ -766,34 +493,34 @@ const NARRATIVE_POSE_CHANGE_RE =
   /\b((stand|stands|standing|stood)\s+up\b|\bsit(s|ting)?\s+down\b|\bsat\s+down\b|\btakes?\s+a\s+seat\b|\bget(s|ting)?\s+up\b)/i;
 const STAY_NEGATION_RE = /\b(stay|stays|staying|stayed|remain|remains|remaining|remained|keep|keeps|keeping|kept|continue|continues|continuing|still|without\s+(moving|standing\s+up|sitting\s+down))\b/i;
 
+/**
+ * Phase 4: narrative movement/pose grounding for the render contract.
+ * Movement and pose are engine-executed — the narrative must describe
+ * exactly what the engine did, no more:
+ * - narrated locomotion requires the engine to have moved the actor;
+ * - a narrated stand-up requires engine pose "stand" (sit-down: "sit");
+ * - an explicit stay action ("stay where you are") with an engine move is
+ *   always a violation (the tick-11 hole — the action text is ground
+ *   truth, immune to any declaration).
+ * Pure.
+ */
+const NARRATIVE_STAND_UP_RE =
+  /\b((stand|stands|standing|stood)\s+up\b|\bget(s|ting)?\s+up\b)/i;
+const NARRATIVE_SIT_DOWN_RE =
+  /\b(sit(s|ting)?\s+down\b|\bsat\s+down\b|\btakes?\s+a\s+seat\b)/i;
+
 export function validateNarrativeMovementGrounding(
   world: World,
-  normalized: {
-    narrative: string;
-    actorPatches: { actorId: string; x?: number; y?: number; pose?: string }[];
-    effects?: { moved?: boolean };
-  },
   action: Action,
+  narrative: string,
+  moved: boolean,
+  pose: "sit" | "stand" | null,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
-  const actor = world.actors.find((a) => a.id === action.actorId);
-  const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
-  const movedPatch =
-    actor !== undefined &&
-    patch?.x !== undefined &&
-    patch?.y !== undefined &&
-    (patch.x !== actor.x || patch.y !== actor.y);
-  // 1. Declared movement must move.
-  if (normalized.effects?.moved === true && !movedPatch) {
-    errors.push({
-      code: "movement.declared_without_patch",
-      message: `effects declares moved=true but acting actor (${action.actorId}) has no position change: emit x and y with a new reachable position when movement occurs — never declare movement without the patch`,
-    });
-  }
-  // 2. Narrated locomotion must move (mask resumed activity + body-part
+  // Narrated locomotion must move (mask resumed activity + body-part
   // "head" + staying-negations so "return to typing", "shake his head",
   // and "stays seated" never trip this gate).
-  let masked = maskResumedActivity(normalized.narrative);
+  let masked = maskResumedActivity(narrative);
   masked = masked.replace(/\b(his|her|my|your|their|its|the|a|an)\s+heads?\b/gi, " ");
   // Metaphor is not movement ("go the extra mile" — mirrors the
   // deterministic action-side mask).
@@ -801,19 +528,31 @@ export function validateNarrativeMovementGrounding(
   const claimsLocomotion =
     (NARRATIVE_LOCOMOTION_RE.test(masked) || HEAD_VERB_RE.test(masked)) &&
     !STAY_NEGATION_RE.test(masked);
-  if (claimsLocomotion && !movedPatch) {
+  if (claimsLocomotion && !moved) {
     errors.push({
-      code: "movement.narrated_without_patch",
-      message: `narrative describes movement ("${normalized.narrative.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement — describing a walk without the patch is incomplete`,
+      code: "movement.narrated_without_move",
+      message: `narrative describes movement ("${narrative.slice(0, 80)}") but the engine executed no movement for ${action.actorId} this turn: narrate only the EXECUTED MOVEMENT facts — never describe a walk the engine did not perform`,
     });
   }
-  // 3. Narrated pose change must set pose ("stands up" needs pose:"stand").
-  // Deliberately narrow (stand UP / sit DOWN only): "standing beside it"
-  // is posture prose, not a pose change.
-  if (NARRATIVE_POSE_CHANGE_RE.test(normalized.narrative) && patch?.pose === undefined) {
+  // Narrated pose change must match the engine-executed pose.
+  if (NARRATIVE_STAND_UP_RE.test(narrative) && pose !== "stand") {
     errors.push({
-      code: "movement.pose_change_without_patch",
-      message: `narrative describes standing up/sitting down but no pose patch sets it: include pose ("stand" or "sit") on the acting actor (${action.actorId})`,
+      code: "movement.pose_change_ungrounded",
+      message: `narrative describes standing up but the engine did not set a standing pose for ${action.actorId} this turn: narrate only what the engine executed — never invent a pose change`,
+    });
+  }
+  if (NARRATIVE_SIT_DOWN_RE.test(narrative) && pose !== "sit") {
+    errors.push({
+      code: "movement.pose_change_ungrounded",
+      message: `narrative describes sitting down but the engine did not set a sitting pose for ${action.actorId} this turn: narrate only what the engine executed — never invent a pose change`,
+    });
+  }
+  // Explicit-stay actions never move, no matter what.
+  if (moved && isExplicitStayAction(action.text)) {
+    const actor = world.actors.find((a) => a.id === action.actorId);
+    errors.push({
+      code: "movement.unexpected_move",
+      message: `action explicitly says to stay ("${action.text.slice(0, 60)}") but the engine moved ${action.actorId}${actor !== undefined ? ` from (${actor.x}, ${actor.y})` : ""}: a stay action never moves`,
     });
   }
   return errors;
@@ -1153,33 +892,6 @@ export function validateNarrativePronouns(
 }
 
 /**
- * Exp-7 item A6: pronoun check for the acting actor's `state` patch.
- * State strings are self-descriptive ("sitting at HER desk" describes the
- * patched actor's own status), so the full pronoun set is checked —
- * exp-7 tick 8 applied Dana's state as "sitting at her desk and working
- * on a laptop", plagiarized from Tanya's state string. Pure.
- */
-export function validateStatePronouns(
-  world: World,
-  actorId: string,
-  state: string,
-): ValidationError[] {
-  const actor = world.actors.find((a) => a.id === actorId);
-  const pronouns = actor?.pronouns?.trim().toLowerCase();
-  if (!actor || !pronouns) return [];
-  const hit = findWrongPronoun(state, pronouns, false);
-  if (hit === undefined) return [];
-  return [
-    {
-      code: "state.pronoun_mismatch",
-      message:
-        `state patch uses "${hit}" for ${actor.name}, whose pronouns are ${actor.pronouns} — ` +
-        `the state string describes ${actor.name}; keep its pronouns in the ${actor.pronouns} set`,
-    },
-  ];
-}
-
-/**
  * Deterministic repair for the doubled-prefix shape: "Dana: Dana: …" →
  * "Dana: …". Pure. First-person prose is NOT auto-rewritten (too risky) —
  * it fails the voice gate with a targeted retry hint instead.
@@ -1193,4 +905,167 @@ export function collapseDoubledPrefix(
     new RegExp(`^(${escapeName(actorName)}\\s*:\\s*){2,}`, "i"),
     `${actorName}: `,
   );
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Item 5 (S2): strip a leading turn-attribution prefix ("Ana: …", "ana - …")
+ * before prose checks. Narratives in this codebase carry the acting actor's
+ * name as a prefix (see synthesizeActionNarrative), but
+ * `validateObserverSubject` matches clause-leading observer names — with
+ * the prefix in place the true grammatical subject ("Jeff introduces…")
+ * hides behind "Ana:" and the gate never fires. Only the ACTING actor's
+ * own name/id is stripped; an observer's prefix ("Jeff: …" on Ana's turn)
+ * is left in place so the gates still see it. Pure.
+ */
+export function stripAttributionPrefix(
+  narrative: string,
+  actorName: string,
+  actorId: string,
+): string {
+  const dequoted = narrative.replace(/^["'(\[]+/, "");
+  for (const label of [actorName, actorId]) {
+    if (label.trim().length === 0) continue;
+    const m = dequoted.match(new RegExp(`^${escapeRegExp(label.trim())}\\s*[:\\-]\\s*`, "i"));
+    if (m) return dequoted.slice(m[0].length);
+  }
+  return narrative;
+}
+
+/**
+ * Item 5 (S2): verb-agnostic observer-as-subject supplement. The
+ * validator's OBSERVER_SUBJECT_VERBS list missed "introduces" (tick 10:
+ * "Jeff introduces Ana to Dan." passed), and any verb list can miss the
+ * next one. Per turn discipline the narrative must describe ONLY the
+ * acting actor — so ANY clause led by a roster observer's name + word is
+ * a violation, regardless of verb. Mirrors validateObserverSubject's
+ * clause-splitting and name/boundary handling (possessives like "Tanya's
+ * hand" and comma-led "Jeff, smiling," do not match); strictly more
+ * sensitive, so it subsumes the validator's list on the stripped narrative.
+ * Pure.
+ */
+export function findSupplementObserverSubject(
+  world: World,
+  narrative: string,
+  action: Action,
+): ValidationError[] {
+  const names = observerNameTokens(world, action.actorId);
+  if (names.length === 0) return [];
+  const observerError = (id: string, clause: string): ValidationError[] => [
+    {
+      code: "narrative.observer_as_subject",
+      message: `narrative casts roster observer "${id}" as the acting subject ("${clause.slice(0, 60)}...") on ${action.actorId}'s turn: describe ONLY what the acting actor (${action.actorId}) observably does`,
+    },
+  ];
+  // Exp-5 item 7 (S3, tick-23 repro): observer-led coordinations, checked
+  // on the unsplit clause first — the and-split below shreds "Tanya and
+  // Dana turn…" into a bare "tanya" fragment and an acting-actor-led
+  // clause, hiding the observer. Verb-agnostic here (any trailing word
+  // counts); the validator version additionally requires a verb from its
+  // list.
+  const sentences = narrative
+    .split(/[.!?;]+\s*/)
+    .map((c) => c.replace(/^["'(\[]+/, "").trim().toLowerCase())
+    .filter((c) => c.length > 0);
+  for (const s of sentences) {
+    const hit = matchObserverCoordination(s, names);
+    if (hit !== undefined) return observerError(hit.id, s);
+  }
+  const clauses = narrative
+    .split(/[.!?;]+\s*|\s+and\s+/i)
+    .map((c) => c.replace(/^["'(\[]+/, "").trim().toLowerCase())
+    .filter((c) => c.length > 0);
+  for (const clause of clauses) {
+    for (const { token, id } of names) {
+      if (token.length < 2) continue;
+      if (!clause.startsWith(token)) continue;
+      const rest = clause.slice(token.length);
+      // Name must be a whole word followed by whitespace + another word
+      // ("Jeff introduces…" matches; "Jeff's desk", "Jeff," do not).
+      if (/^\s+[a-z]+/.test(rest)) {
+        return observerError(id, clause);
+      }
+      break;
+    }
+  }
+  return [];
+}
+
+/**
+ * Item 5 (S2): explicit-stay actions. "Stay where you are." carries no
+ * locomotion verb, so the movement gates stay silent. The action TEXT is
+ * the ground truth: an unambiguous stay instruction plus an actual
+ * position change on the acting actor is always a violation. Pure.
+ */
+const EXPLICIT_STAY_RE =
+  /\bstay\b/i;
+const EXPLICIT_HOLD_RE =
+  /\b(don't|dont|do not) move\b|\bhold (still|your position)\b|\bremain\s+(in place|put|seated|standing|where (you|he|she|they) are|still)\b/i;
+
+export function isExplicitStayAction(text: string): boolean {
+  return EXPLICIT_STAY_RE.test(text) || EXPLICIT_HOLD_RE.test(text);
+}
+
+/**
+ * Phase 4: prose half of the old contact coverage check (the
+ * patch-based adjacency half died with the patch channel). When the
+ * action describes physical contact with a named roster actor, the
+ * narrative must mention the contact — dodging the verb does not excuse
+ * dropping it. Pure.
+ */
+const ACTION_CONTACT_RE =
+  /\b(handshake|shake\s+.*hands?|shake\s+.*hand|hug|embrace|kiss|high[\s-]?five|fist[\s-]?bump|\bpat\b|slap|hands?\s+over|handing|hands?\s+(him|her|them)|give\s+.*(coffee|cup)|pass\s+.*(coffee|cup))\b/i;
+const NARRATIVE_CONTACT_RE =
+  /\b(shake|shook|hands?|hug|embrace|kiss|high[\s-]?five|fist|pat|slap|give|gave|pass|hand)\b/i;
+
+export function validateContactCoverage(
+  world: World,
+  action: Action,
+  narrative: string,
+): ValidationError[] {
+  if (!ACTION_CONTACT_RE.test(action.text)) return [];
+  const namesRosterActor = world.actors.some(
+    (a) => a.id !== action.actorId && isActorMentioned(world, action.text, a.id),
+  );
+  if (!namesRosterActor) return [];
+  if (NARRATIVE_CONTACT_RE.test(narrative)) return [];
+  return [
+    {
+      code: "contact.narrative_drops_contact",
+      message: `action describes physical contact ("${action.text.slice(0, 80)}") but the narrative never mentions it: narrate the handshake/hug/handover (dodging the verb does not excuse dropping the contact)`,
+    },
+  ];
+}
+
+/**
+ * Phase 4: narrated contact must be physically possible. If the narrative
+ * claims physical contact with a named roster actor (handshake, hug, ...)
+ * but the acting actor's post-move position is not adjacent to them, the
+ * contact is invented — the engine closes what it can (6-cell cap), but a
+ * handshake across the room is narrative invention beyond the facts.
+ * Pure.
+ */
+export function validateNarratedContactAdjacency(
+  world: World,
+  action: Action,
+  narrative: string,
+  x: number,
+  y: number,
+): ValidationError[] {
+  if (!NARRATIVE_CONTACT_RE.test(narrative)) return [];
+  const target = world.actors.find(
+    (a) => a.id !== action.actorId && isActorMentioned(world, narrative, a.id),
+  );
+  if (!target) return [];
+  const dist = Math.hypot(x - target.x, y - target.y);
+  if (dist <= CONTACT_RADIUS) return [];
+  return [
+    {
+      code: "contact.too_far",
+      message: `narrative claims physical contact with ${target.id} but the acting actor ends at (${x}, ${y}), ${dist.toFixed(1)} cells away: narrate the approach instead, or drop the contact`,
+    },
+  ];
 }
