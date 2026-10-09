@@ -129,12 +129,38 @@ describe("exp3-1 deterministic quote grounding (ticks 0/3/9/17)", () => {
 });
 
 describe("exp3-2 speech gate split (ticks 3 vs 4/12/15/18)", () => {
-  it("passes a legitimate question paraphrase (tick 3)", () => {
+  it("a question paraphrase fails the exact-quote gate on direct validation (tick 3, Phase 2)", () => {
+    // Phase 2 (renderer architecture): paraphrase is no longer acceptable
+    // on quoted turns — the narrative must carry the exact quote
+    // character-for-character. Direct validation (no in-loop backstop)
+    // rejects the paraphrase with speech.exact_quote_missing; in the turn
+    // loop applyEngineSpeech repairs it deterministically instead.
     const world = makeTinyWorld();
     const v = validateConsequence(
       world,
       {
         ...baseResult("U asks N for directions to his desk."),
+        actorPatches: [
+          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
+          { actorId: "n", thoughts: "Helpful." },
+        ],
+      },
+      { actorId: "u", text: 'Walk to N and ask "could you show me where my desk is?"' },
+      {
+        moves: true, destinationActorId: "n", speaks: true,
+        quotedSpeech: ["could you show me where my desk is?"],
+      },
+    );
+    expect(v.valid).toBe(false);
+    expect(v.errors.map((e) => e.code)).toContain("speech.exact_quote_missing");
+  });
+
+  it("passes a verbatim question render (tick 3, Phase 2)", () => {
+    const world = makeTinyWorld();
+    const v = validateConsequence(
+      world,
+      {
+        ...baseResult('U walks to N and asks "could you show me where my desk is?"'),
         actorPatches: [
           { actorId: "u", x: 2, y: 2, thoughts: "Going." },
           { actorId: "n", thoughts: "Helpful." },
@@ -559,7 +585,8 @@ describe("exp3-9/10/11/12/13 prompting", () => {
     const ctx = buildConsequenceContext(world, { actorId: "u", text: "Pour a coffee." });
     expect(ctx).toContain("OBJECT IDS");
     expect(ctx).toContain("anton_mug");
-    expect(ctx).toContain("QUOTED-SPEECH COPY RULE");
+    // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
+    expect(ctx).toContain("EXACT QUOTE RULE");
     expect(ctx).toContain("omitting the verb from the narrative never excuses omitting the patch");
     expect(ctx).toContain("at most 6 cells");
   });
@@ -591,7 +618,8 @@ describe("exp3-9/10/11/12/13 prompting", () => {
       expect(short).toContain(needle);
     }
     expect(full.length).toBeGreaterThan(short.length);
-    expect(full).toContain("QUOTED-SPEECH COPY RULE");
+    // Phase 2: the quote-handling section is rewritten around exactQuote.
+    expect(full).toContain("SPEECH IS ENGINE-OWNED");
     expect(full).toContain("OBJECT IDS");
   });
 
@@ -697,7 +725,12 @@ describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
     expect(v).toEqual({ valid: true, errors: [] });
   });
 
-  it("tick-3 paraphrase still passes end to end under strict quote grounding", async () => {
+  it("tick-3 paraphrase fails direct validation under the Phase-2 verbatim contract", async () => {
+    // Phase 2: "strict quote grounding" now means character-for-character —
+    // a paraphrase no longer passes validateConsequence directly. In the
+    // turn loop the deterministic backstop (applyEngineSpeech) appends the
+    // exact quote before validation, so end-to-end turns still pass; the
+    // gate here is the backstop for paths that bypass it.
     const world = makeTinyWorld();
     const logger = createTestLogger();
     const action = { actorId: "u", text: 'Walk to N and ask "could you show me where my desk is?"' };
@@ -739,7 +772,8 @@ describe("phase1 deterministic grounding exit (ticks 0/3/6/9)", () => {
       action,
       resolved.semantics!,
     );
-    expect(v).toEqual({ valid: true, errors: [] });
+    expect(v.valid).toBe(false);
+    expect(v.errors.map((e) => e.code)).toContain("speech.exact_quote_missing");
   });
 
   it("logs judge_vs_effects_disagreement on every resolution, even on agreement", async () => {
@@ -1269,7 +1303,11 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     expect(contact).toBeNull();
   });
 
-  it("resolveWithValidation guides prose-only retry, then accepts (tick-9 end to end)", async () => {
+  it("resolveWithValidation repairs a dropped quote deterministically, no retry burned (tick-9 end to end, Phase 2)", async () => {
+    // Phase 2: a dropped quote no longer costs a retry — the in-loop
+    // deterministic backstop reinserts the exact quote before validation,
+    // so the turn is accepted on attempt 1. The old prose-only retry hint
+    // for quote repairs is dead: verbatim by construction.
     const logger = new Logger({ sessionId: "exp3-phase4-retry", writeToFile: false });
     const world = officeWorld();
     world.actors.find((a) => a.id === "u")!.x = 3;
@@ -1283,34 +1321,35 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
       reasoning: "r",
       effects: { moved: true, destinationObjectId: "coffee_machine", spoke: true, quotedSpeech: ["is this my spot?"] },
     };
+    let calls = 0;
     const deps = makeTestDeps(logger, {
       consequenceEngine: {
         resolve: async (_w: World, _a: { actorId: string; text: string }, feedback?: string) => {
           seenFeedback.push(feedback);
-          // First attempt drops the action's quote; the retry restores it.
+          calls++;
+          // The render drops the action's quote; the engine owns speech
+          // now, so the backstop restores it without a retry.
           // Both attempts omit x/y — the engine moves regardless.
           return structuredClone({
             ...base,
-            narrative:
-              seenFeedback.length === 1
-                ? "Anton walks toward the coffee machine."
-                : 'Anton walks toward the coffee machine. "Is this my spot?"',
+            narrative: "Anton walks toward the coffee machine.",
           });
         },
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 1, autosaveEnabled: false },
     });
     const out = await resolveWithValidation(world, action, deps);
-    expect(out.narrative).toMatch(/is this my spot/i);
+    expect(calls).toBe(1);
+    expect(out.narrative).toContain('"is this my spot?"');
     // Engine movement applied on the accepted attempt (model emits no x/y).
     const expected = computeMovementOutcome(world, "u", { destinationObjectId: "coffee_machine" }, null)!;
     const moved = out.actorPatches.find((p) => p.actorId === "u")!;
     expect(moved.x).toBe(expected.x);
     expect(moved.y).toBe(expected.y);
-    expect(logger.store.byEvent("retry_started")).toHaveLength(1);
+    expect(logger.store.byEvent("retry_started")).toHaveLength(0);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
-    // The retry was told to keep patches and fix prose only.
-    expect(seenFeedback[1]).toMatch(/keep the remaining valid patches|keep every actorPatch/);
+    // The deterministic repair is audit-logged.
+    expect(logger.store.byEvent("speech_quote_reinserted")).toHaveLength(1);
   });
 
   it("summarizeTurnOutcomes tracks clean / salvaged / fallback separately", async () => {
@@ -1322,13 +1361,15 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     });
     await resolveWithValidation(makeTinyWorld(), { actorId: "u", text: "Wave." }, cleanDeps);
 
-    // Salvaged turn: the narrative drops the action's quote (speech nit);
-    // salvage reinserts it deterministically.
+    // Salvaged turn: the narrative drops the action's SECOND quote. The
+    // Phase-2 in-loop backstop guarantees only the exact (first) quote;
+    // the dropped second quote is a speech nit that salvage tier 1
+    // downgrades to a warning (multi-quote choreography is a non-goal).
     const salvagedWorld = officeWorld();
     salvagedWorld.actors.find((a) => a.id === "u")!.x = 3;
     salvagedWorld.actors.find((a) => a.id === "u")!.y = 3;
     const salvaged: ConsequenceResult = {
-      narrative: "Anton walks toward the coffee machine.",
+      narrative: 'Anton walks toward the coffee machine. Anton says "is this my spot?"',
       actorPatches: [{ actorId: "u", thoughts: "Coffee time." }],
       objectPatches: [],
       reasoning: "r",
@@ -1340,7 +1381,7 @@ describe("phase4 partial-apply fallback (plan Phase 4)", () => {
     });
     await resolveWithValidation(
       salvagedWorld,
-      { actorId: "u", text: 'Walk to the coffee machine and ask "is this my spot?"' },
+      { actorId: "u", text: 'Walk to the coffee machine and ask "is this my spot?" then add "thanks a lot!"' },
       salvagedDeps,
     );
 
