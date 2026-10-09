@@ -1358,6 +1358,19 @@ export function buildNarrateContext(
   }
   lines.push(
     "",
+    // PLAN_V2 Phase 5 (the director): the style guide — instructions for
+    // eventful narration, copied from the PLAN_V2 appendix draft. It tells
+    // the narrator how to *handle* drama, not when to invent it; the
+    // deterministic staleness trigger decides when incidents arrive.
+    "DIRECTOR STYLE GUIDE (how to handle drama — never invent it):",
+    "",
+    "You are narrating a living scene, not transcribing one. Favor the specific over the generic: a chipped mug, not \"a cup\". " +
+      "Let small frictions surface — interruptions, misunderstandings, unfinished sentences. " +
+      "When a director incident arrives, treat it as real and let every character react in character; do not resolve it in the same paragraph it appears. " +
+      "Never summarize feelings instead of showing them. " +
+      "Never let three consecutive turns pass with everyone merely being polite — if the facts give you nothing, say what the room feels like. " +
+      "The world facts are final: narrate what happened, not what should have.",
+    "",
     "Task",
     "",
     `Narrate what ${actorName} observably did this turn, grounded strictly in the executed facts above.`,

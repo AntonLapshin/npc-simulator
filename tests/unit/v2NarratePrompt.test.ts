@@ -40,6 +40,23 @@ describe("buildNarrateContext — executed-facts prompt shape", () => {
     expect(prompt).toContain("ROSTER RULE:");
   });
 
+  it("ships the director style guide (PLAN_V2 appendix draft, verbatim)", () => {
+    const prompt = buildNarrateContext(world(), action, undefined, EMPTY_FACTS);
+    expect(prompt).toContain("DIRECTOR STYLE GUIDE");
+    // Appendix draft, copied faithfully — spot-check the load-bearing lines.
+    expect(prompt).toContain("narrating a living scene, not transcribing one");
+    expect(prompt).toContain("a chipped mug, not \"a cup\"");
+    expect(prompt).toContain(
+      "When a director incident arrives, treat it as real and let every character react in character; do not resolve it in the same paragraph it appears.",
+    );
+    expect(prompt).toContain(
+      "Never let three consecutive turns pass with everyone merely being polite",
+    );
+    expect(prompt).toContain(
+      "The world facts are final: narrate what happened, not what should have.",
+    );
+  });
+
   it("contains NO intended-action phrasing as the source of truth", () => {
     const prompt = buildNarrateContext(world(), action, undefined, EMPTY_FACTS);
     expect(prompt).not.toContain("Action text:");
