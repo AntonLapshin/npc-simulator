@@ -465,6 +465,32 @@ describe("phase3 action-side verb gates (ticks 12/15/18, 10/11)", () => {
     expect(near).toEqual([]);
   });
 
+  it("Stage-2 B1: body-part hand nouns claim no contact and no transfer", () => {
+    const world = officeWorld();
+    // Nadia far away (4,4); u at (1,1). A waved hand is not contact and
+    // "hands empty" is not a hand-over — the Stage-2 tick-3 live repro
+    // failed on both before the transfer-frame scoping.
+    const wave = validateRenderProse(
+      world,
+      { actorId: "u", text: "Wave to Nadia across the room." },
+      { ...baseResult("Anton raises a hand in a friendly wave at Nadia."), thoughts: "Hi." },
+      baseFacts(),
+    );
+    expect(wave.map((e) => e.code)).not.toContain("contact.too_far");
+    expect(wave.map((e) => e.code)).not.toContain("object.phantom_manipulation");
+
+    const empty = validateRenderProse(
+      world,
+      { actorId: "u", text: "Stand by the desk." },
+      {
+        ...baseResult("Anton stands beside the desk, hands empty, glancing at the envelope."),
+        thoughts: "Waiting.",
+      },
+      baseFacts(),
+    );
+    expect(empty.map((e) => e.code)).not.toContain("object.phantom_manipulation");
+  });
+
   it("garbage old-schema patches are stripped and ignored (Phase 4: render-only)", async () => {
     const logger = new Logger({ sessionId: "exp3-phase4-strip", writeToFile: false });
     const world = officeWorld();
