@@ -150,7 +150,7 @@ describe("exp4 item 6 (S4/M1): narrative voice gate", () => {
         reasoning: "r",
       },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 15, y: 11, engineManipulation: null,
       },
     );

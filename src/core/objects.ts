@@ -115,6 +115,12 @@ export type CoreActor = {
   x: number;
   y: number;
   prop: string | null;
+  /**
+   * Stage-1 A3: the scene object backing the held prop, when the engine
+   * recorded one. Null when the prop has no linked scene object (legacy
+   * saves, prop-only flips).
+   */
+  heldObjectId: string | null;
 };
 
 /** Immutable scene-object view for manipulation planning. */
@@ -166,9 +172,15 @@ const TAKE_HOLD_VERB_RE =
   /\btak(?:e|es|ing|en)\b|\bholds?\b|\bholding\b|\bheld\b|\bcarr(?:y|ies|ied|ying)\b/i;
 /** "carry on" is resumption, not carrying — stripped before verb tests. */
 const CARRY_ON_RE = /\bcarr(?:y|ies|ied|ying)\s+on\b/gi;
-/** Release verbs. */
+/**
+ * Release verbs. Stage-1 A2: third-person forms — "puts/sets X down" and
+ * "puts X aside" plan like their imperative counterparts ("put X down",
+ * "set aside"). The first two alternatives take an optional object span
+ * between verb and particle so "puts the laptop down" / "sets the book
+ * aside" match; bare "puts down" / "sets down" still match (empty span).
+ */
 const PUT_DOWN_VERB_RE =
-  /\b(?:put|set|lay)\b[\w\s]{0,48}?\bdown\b|\bputs?\s+down\b|\bsets?\s+down\b|\bset\s+aside\b|\bplaces?\b[\w\s]{0,48}?\bon\b/i;
+  /\b(?:puts?|sets?|lays?|laid)\b[\w\s]{0,48}?\bdown\b|\b(?:puts?|sets?|lays?|laid)\b[\w\s]{0,48}?\baside\b|\bplaces?\b[\w\s]{0,48}?\bon\b/i;
 /** Transfer verbs. "shake hands" is contact, not transfer — excluded. */
 const HAND_OVER_VERB_RE =
   /\bhands?\b|\bhanding\b|\bhanded\b|\bgives?\b|\bgave\b|\bgiving\b|\bpass(?:es|ed|ing)?\b/i;
@@ -260,6 +272,23 @@ export function resolveContactMention(
   return null;
 }
 
+/**
+ * Stage-1 A3: the scene object backing the actor's held prop, when the
+ * engine recorded one at pick-up time. Preferred over proximity
+ * re-linking — the object travels with its holder, so identity survives
+ * movement and hand-over instead of snapping to the nearest same-kind
+ * object. Null when no object is linked (legacy saves, prop-only flips);
+ * callers fall back to `nearestKindObject`. Pure.
+ */
+function heldSceneObject(
+  snapshot: ManipulationSnapshot,
+  actor: CoreActor,
+): CoreObject | null {
+  const id = actor.heldObjectId;
+  if (id === null || id === undefined) return null;
+  return snapshot.objects.find((o) => o.id === id) ?? null;
+}
+
 /** Euclidean distance, actor point → object center. Pure. */
 export function distanceToObjectCenter(
   actor: { x: number; y: number },
@@ -312,8 +341,9 @@ export function nearBrewSource(snapshot: ManipulationSnapshot, actor: CoreActor)
  *   open/boot/use + holdable kind → that kind). Requires: actor holds
  *   nothing, a pickable scene object of the kind within reach (no
  *   thin-air props).
- * - put-down: release verbs ("put/set/lay down", "set aside", "place X
- *   on Y"). Requires: actor holds something.
+ * - put-down: release verbs ("put/set/lay X down", "put/set X aside",
+ *   "place X on Y" — imperative and third-person alike). Requires:
+ *   actor holds something.
  * - hand-over: transfer verbs ("hand over/to", "give", "pass") + a
  *   recipient (contactActorId or a text mention — never "shake hands").
  *   Requires: actor holds something, recipient within 2.5 cells,
@@ -377,7 +407,8 @@ export function planManipulation(
   if (kind === "put-down") {
     const held = actor.prop ?? null;
     if (held === null) return null;
-    const object = nearestKindObject(snapshot, actor, held);
+    const object =
+      heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, held);
     const surface = putDownSurface(text, snapshot, actor);
     return {
       kind,
@@ -400,7 +431,8 @@ export function planManipulation(
     return null;
   // The recipient's hands must be free — the engine never stacks props.
   if ((recipient.prop ?? null) !== null) return null;
-  const object = nearestKindObject(snapshot, actor, held);
+  const object =
+    heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, held);
   return {
     kind,
     actorId,

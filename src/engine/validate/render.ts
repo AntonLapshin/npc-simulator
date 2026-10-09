@@ -26,6 +26,7 @@ import {
   validateEnterFreshness,
   validateIdentityConsistency,
   validateNarrativeActors,
+  validateNarrativeDestinationGrounding,
   validateNarrativeMovementGrounding,
   validateNarrativePronouns,
   validateNarrativeVoice,
@@ -49,6 +50,12 @@ export type RenderFacts = {
   exactQuote: string | null;
   /** Did the engine move the acting actor this turn? */
   moved: boolean;
+  /**
+   * Stage-1 A4: the engine movement's destination actor id (null when the
+   * engine did not move toward a roster actor — undirected moves and
+   * object destinations are out of scope for destination grounding).
+   */
+  destinationActorId: string | null;
   /** Engine-executed pose change (null = pose unchanged). */
   pose: PlannedPose | null;
   /** Effective pose after the engine plan (for the sitting gate). */
@@ -104,6 +111,12 @@ export function validateRenderProse(
   const unquoted = maskQuotedSpans(stripped);
   errors.push(
     ...validateNarrativeMovementGrounding(world, action, unquoted, facts.moved, facts.pose),
+  );
+  // Stage-1 A4: narrated locomotion aimed at the wrong actor contradicts
+  // the engine destination (turn-1 repro: engine moved toward Tanya, the
+  // 3B narrated "walks toward Dana").
+  errors.push(
+    ...validateNarrativeDestinationGrounding(world, action, unquoted, facts.destinationActorId),
   );
   // Phantom manipulation: prose describing a transfer the engine did not
   // execute is fiction.

@@ -18,8 +18,8 @@
 //   8. hand the laptop to Tanya (hand-over, holder flips)
 //   9. third exact quote (Anton)
 //   10. hand the laptop back to Dana (return transfer; a second
-//      "places on the desk" would core-collide with step 7 in the
-//      repetition screen)
+//      "places on the desk" would repeat step 7's putdown|laptop core
+//      in the repetition screen)
 //
 // What it checks per step (the Stage-1 architectural claims):
 //   - deterministic execution (whole battery run twice, final states equal)
@@ -170,6 +170,13 @@ const STEPS: Step[] = [
       if (bx === ax && by === ay) return `dana did not move while carrying (still ${ax},${ay})`;
       const prop = actorProp(after, "dana");
       if (prop !== "laptop") return `dana dropped the laptop mid-walk (prop=${JSON.stringify(prop)})`;
+      // Stage-1 A3: the linked scene object travels with its holder —
+      // no orphan at the pick-up site.
+      const lp = objectPos(after, "dana_laptop");
+      if (lp === null) return "dana_laptop scene object missing after carry-walk";
+      if (lp[0] !== ax || lp[1] !== ay) {
+        return `dana_laptop at (${lp[0]},${lp[1]}) did not travel with Dana (${ax},${ay})`;
+      }
       return othersUnmoved(before, after, "dana");
     },
   },
@@ -243,20 +250,15 @@ const STEPS: Step[] = [
       const d = actorProp(after, "dana");
       if (t !== null) return `tanya.prop = ${JSON.stringify(t)}, expected null after hand-back`;
       if (d !== "laptop") return `dana.prop = ${JSON.stringify(d)}, expected "laptop" after hand-back`;
-      // NOTE (finding O1): held-prop <-> scene-object linkage is
-      // proximity-based per turn, not identity-based. Dana carried the
-      // laptop across the room (step 6); the dana_laptop object stayed
-      // orphaned at the pick-up site (15,11), so this hand-back re-links
-      // the nearest laptop-kind object (tanya_laptop at Tanya's feet) and
-      // moves THAT to Dana. Props (authoritative for prose) are exact;
-      // scene-object identity scrambles. See report action items.
+      // Stage-1 A3: object identity is link-based now, not proximity
+      // re-linked. Dana picked up dana_laptop (step 3), carried it across
+      // the room (step 6), handed THAT object to Tanya (step 9) — so this
+      // hand-back must return the same dana_laptop, not tanya_laptop.
       const [dx, dy] = actorPos(after, "dana");
-      const near = ["dana_laptop", "tanya_laptop"]
-        .map((id) => ({ id, p: objectPos(after, id) }))
-        .filter((o) => o.p !== null && o.p[0] === dx && o.p[1] === dy);
-      if (near.length === 0) {
-        return `no laptop-kind object travelled to Dana (${dx},${dy}): ` +
-          `dana_laptop=${JSON.stringify(objectPos(after, "dana_laptop"))} ` +
+      const lp = objectPos(after, "dana_laptop");
+      if (lp === null) return "dana_laptop scene object missing after hand-back";
+      if (lp[0] !== dx || lp[1] !== dy) {
+        return `dana_laptop at (${lp[0]},${lp[1]}) did not return with Dana (${dx},${dy}): ` +
           `tanya_laptop=${JSON.stringify(objectPos(after, "tanya_laptop"))}`;
       }
       return null;
@@ -271,7 +273,15 @@ function loadOfficeAnton(): World {
 
 function snapshot(w: World): string {
   return JSON.stringify({
-    actors: w.actors.map((a) => ({ id: a.id, x: a.x, y: a.y, prop: a.prop ?? null })),
+    actors: w.actors.map((a) => ({
+      id: a.id,
+      x: a.x,
+      y: a.y,
+      prop: a.prop ?? null,
+      // Stage-1 A3: the held-object link is engine state — it must be
+      // deterministic across passes too.
+      heldObjectId: a.heldObjectId ?? null,
+    })),
     objects: (w.scene.objects as Array<{ id: string; x: number; y: number }>).map((o) => ({
       id: o.id,
       x: o.x,

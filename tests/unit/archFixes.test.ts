@@ -24,7 +24,7 @@ function baseResult(narrative = "Something happens."): ConsequenceResult {
 
 function facts(over: Partial<RenderFacts> = {}): RenderFacts {
   return {
-    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 1, y: 1, engineManipulation: null, ...over,
   };
 }
@@ -181,6 +181,9 @@ describe("Q1: history records the narrative", () => {
     expect(next.history.at(-1)).toEqual({
       text: "U: U waves hello.",
       perceivers: ["u", "n"],
+      // Stage-1 A4: the ground-truth action rides along for the
+      // repetition screen (cores derive from it, not the narrative).
+      actionText: "Wave at everyone.",
     });
   });
 });

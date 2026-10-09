@@ -369,6 +369,11 @@ const CORE_VERBS: Array<[RegExp, string]> = [
   // (exp-6: "move dana_papers to the side" vs "shifts the dana_papers
   // to the left" evaded the string-match ban).
   [/\b(shifts?|shifted|shifting|rearranges?|rearranged|adjusts?|adjusted|adjusting|nudges?|nudged|straightens?|straightened|tidi(?:es|ed|ying))\b/i, "adjust"],
+  // Stage-1 A1: put-down/transfer verbs — "places the laptop on the desk"
+  // must core to "putdown|…" rather than "other|desk", or it collides with
+  // "stays at her desk and keeps working" and the repetition screen
+  // rejects a semantically unrelated action as a repeat.
+  [/\b(places?|placed|placing|puts?|putting|sets?|setting|lays?|laid|laying)\b/i, "putdown"],
 ];
 
 /** Object-kind nouns for the attractor core (desk/coffee/task/…).
@@ -379,6 +384,13 @@ const CORE_VERBS: Array<[RegExp, string]> = [
  * (exp-6 item 9, tick-24). */
 const looseWord = (body: string): RegExp =>
   new RegExp(`(?:^|[^a-z0-9])(?:${body})(?:$|[^a-z0-9])`, "i");
+/**
+ * Stage-1 A1: noun stems naming holdable object kinds. For manipulation
+ * verbs the manipulated object is the stronger dedup signal than the
+ * location, so these scan before location nouns in `suggestionCore`.
+ */
+const HOLDABLE_NOUN_STEMS: ReadonlySet<string> = new Set(["laptop", "mug", "papers"]);
+
 const CORE_NOUNS: Array<[RegExp, string]> = [
   [looseWord("desk"), "desk"],
   [looseWord("coffee"), "coffee"],
@@ -444,8 +456,20 @@ export function suggestionCore(world: World, text: string, selfId?: string): str
   // Exp-6 item 9: object-kind before the self-mention fallback — "Dana
   // shifts the dana_papers" is about the papers, not about Dana; the self
   // mention ("Dana" at the start) is the weaker signal.
+  // Stage-1 A1: manipulation verbs ("take", "putdown") care about the
+  // manipulated object, not the location — holdable-kind nouns scan first
+  // so "places the laptop on the desk" cores to "putdown|laptop" (not
+  // "putdown|desk", which would collide across different manipulated
+  // objects the same way "other|desk" did).
   if (noun === "") {
-    for (const [re, stem] of CORE_NOUNS) {
+    const scanOrder =
+      verb === "take" || verb === "putdown"
+        ? [
+            ...CORE_NOUNS.filter(([, stem]) => HOLDABLE_NOUN_STEMS.has(stem)),
+            ...CORE_NOUNS.filter(([, stem]) => !HOLDABLE_NOUN_STEMS.has(stem)),
+          ]
+        : CORE_NOUNS;
+    for (const [re, stem] of scanOrder) {
       if (re.test(text)) {
         noun = stem;
         break;
@@ -608,13 +632,19 @@ export function getRecentOwnActions(world: World, actorId: string, limit = MAX_R
   // sentinel) never happened — neither a repeat to avoid nor a question
   // answered. The "tried:" prefix already misses the ":" author match
   // below; the explicit sentinel filter keeps this true even if the
-  // format ever changes. Q1: clean turns record the narrative now, so
-  // these are narrative records of own turns.
+  // format ever changes.
+  // Stage-1 A4: cores derive from the ground-truth ACTION text, never
+  // from the narrative — a mis-rendered narrative ("walks toward Dana"
+  // for an engine move toward Tanya) used to poison the core and let a
+  // verbatim repeat slip past this guard. Entries predating the
+  // actionText field fall back to the narrative text.
   const mine = world.history
-    .map((h) => h.text)
     .filter(
-      (h) => !h.includes(NOT_DONE_SENTINEL) && (h.startsWith(prefixName) || h.startsWith(prefixId)),
-    );
+      (h) =>
+        !h.text.includes(NOT_DONE_SENTINEL) &&
+        (h.text.startsWith(prefixName) || h.text.startsWith(prefixId)),
+    )
+    .map((h) => h.actionText ?? h.text);
   return mine.slice(-limit);
 }
 

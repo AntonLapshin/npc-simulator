@@ -23,7 +23,7 @@ function baseResult(narrative = "Something happens."): ConsequenceResult {
 
 function baseFacts(over: Partial<RenderFacts> = {}): RenderFacts {
   return {
-    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 1, y: 1, engineManipulation: null, ...over,
   };
 }

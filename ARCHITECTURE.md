@@ -201,10 +201,20 @@ strips unknown keys (old `actorPatches` / `objectPatches` / `effects` are
 ignored, logged at debug); then prose-only checks run against the
 engine-executed facts — voice, pronouns, echo/placeholder, observer-discipline,
 exact-quote containment, identity, and grounding (narrated movement requires
-an engine move; narrated pose changes require the engine pose; narrated
-manipulation requires an executed manipulation; narrated contact requires
-post-move adjacency; questions and utterances must survive rendering; thoughts
-stay grounded).
+an engine move; narrated locomotion aimed at the wrong actor contradicts the
+engine destination — `movement.destination_mismatch`; narrated pose changes
+require the engine pose; narrated manipulation requires an executed
+manipulation; narrated contact requires post-move adjacency; questions and
+utterances must survive rendering; thoughts stay grounded).
+
+Deliberate non-goal (Stage-1 A4 decision): validators police *false claims*,
+not *missing coverage*. A narrative that omits an executed fact ("looks at
+the door" for a type-on-laptop turn) is infelicitous but not fiction, and
+forcing mentions risks retry inflation on small models. The repetition
+screen, however, is engine machinery — its cores derive from the
+ground-truth action text (`HistoryEntry.actionText`), never from the
+narrative, so a mis-render cannot poison downstream dedup. Omission rates
+are a Stage-2 (14B) measurement before any scoping.
 
 **Movement physics** (Phase 1 — engine-owned): the model never emits
 coordinates. `src/core/movement.ts` (pure) resolves the destination and
