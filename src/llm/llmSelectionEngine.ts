@@ -29,6 +29,9 @@ export type LlmSelectionEngineOptions = {
 };
 
 export class LLMSelectionEngine implements SelectionEngine {
+  /** Phase 6: select() performs provider calls — counted by the turn budget. */
+  readonly providerBacked = true;
+
   constructor(
     private readonly logger: Logger,
     private readonly provider: LLMProvider,

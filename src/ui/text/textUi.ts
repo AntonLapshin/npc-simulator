@@ -52,6 +52,14 @@ import {
 } from "./commands.js";
 import { historyEntryText, loggedTicks, renderStoryRange, renderTurnStory } from "../../logging/storyTrace.js";
 import { loadEnvFile } from "../../util/loadEnv.js";
+import {
+  TURN_TABLE_HEADER,
+  TURN_TIME_GATE_MS,
+  budgetWarningMessage,
+  formatDuration,
+  formatTurnRow,
+  type TurnTelemetry,
+} from "../../core/telemetry.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
@@ -484,6 +492,16 @@ async function runAutoSession(session: TextSession, limit: number): Promise<numb
     const s = Math.round(ms / 1000);
     return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
   };
+  // Phase 6: per-turn economics table + turn-time gate. The orchestrator
+  // fires onTurnTelemetry once per turn; stash the record and print its
+  // row with the turn summary below so each turn's output stays grouped.
+  console.log(TURN_TABLE_HEADER);
+  let pendingTelemetry: TurnTelemetry | undefined;
+  const prevTelemetry = session.deps.onTurnTelemetry;
+  session.deps.onTurnTelemetry = (t) => {
+    pendingTelemetry = t;
+    prevTelemetry?.(t);
+  };
   for (let i = 0; i < limit; i++) {
     if (!session.world) break;
     const actor = getCurrentActor(session.world);
@@ -505,11 +523,29 @@ async function runAutoSession(session: TextSession, limit: number): Promise<numb
     console.log(`── turn ${i + 1}/${limit} · tick ${tick} · ${actor.name} (${actor.id}) · took ${fmtDur(turnMs)} (avg ${fmtDur(avgMs)}/turn${eta}) ──`);
     console.log(text);
     console.log("");
+    // Phase 6: economics row + budget warning for this turn.
+    if (pendingTelemetry !== undefined) {
+      console.log(formatTurnRow(i + 1, pendingTelemetry));
+      if (pendingTelemetry.budgetExceeded) {
+        console.log(
+          `⚠ ${budgetWarningMessage(pendingTelemetry.actorId, pendingTelemetry.providerCalls, pendingTelemetry.budget, pendingTelemetry.calls)}`,
+        );
+      }
+      pendingTelemetry = undefined;
+    }
+    // Phase 6: turn-time gate — warn at 90 s, never abort.
+    if (turnMs > TURN_TIME_GATE_MS) {
+      console.log(
+        `⚠ turn ${i + 1} took ${formatDuration(turnMs)} — over the ${formatDuration(TURN_TIME_GATE_MS)} turn-time gate`,
+      );
+    }
     if (text.startsWith("Turn failed:")) {
       console.log("Stopping early: the engine reported a failed turn.");
       break;
     }
   }
+  // Phase 6: restore the session's telemetry hook (auto mode only).
+  session.deps.onTurnTelemetry = prevTelemetry;
   if (!session.world) {
     console.log("World lost — nothing to save.");
     return 1;

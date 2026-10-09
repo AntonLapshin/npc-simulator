@@ -13,10 +13,20 @@ export type MockProposalScript = Record<string, { suggestions: string[]; reasoni
  * Logs the same structure as real LLM modules (prompt, raw/parsed response).
  */
 export class MockProposalEngine implements ProposalEngine {
+  /**
+   * Phase 6: mocks are local by default (not counted by the turn
+   * budget). Tests simulating a provider-backed engine pass
+   * `{ providerBacked: true }`.
+   */
+  readonly providerBacked: boolean;
+
   constructor(
     private readonly logger: Logger,
     private readonly script: MockProposalScript = {},
-  ) {}
+    opts: { providerBacked?: boolean } = {},
+  ) {
+    this.providerBacked = opts.providerBacked ?? false;
+  }
 
   async propose(world: World, actorId: string): Promise<ProposalResult> {
     const startedAt = Date.now();

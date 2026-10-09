@@ -226,6 +226,9 @@ export function filterUnrenderableSuggestions(
 }
 
 export class LLMProposalEngine implements ProposalEngine {
+  /** Phase 6: propose() performs provider calls — counted by the turn budget. */
+  readonly providerBacked = true;
+
   constructor(
     private readonly logger: Logger,
     private readonly provider: LLMProvider,

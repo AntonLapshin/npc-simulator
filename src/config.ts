@@ -51,6 +51,11 @@ export const defaultConfig: EngineConfig = {
    * A turn burned 47 minutes in Exp-6 with no circuit breaker.
    */
   turnTimeoutMs: 600_000,
+  /**
+   * Phase 6: provider-call budget per turn (see EngineConfig.turnCallBudget).
+   * Loud warning + `budget_exceeded` event when crossed; never an abort.
+   */
+  turnCallBudget: 4,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {

@@ -28,6 +28,9 @@ export type LlmConsequenceEngineOptions = {
 };
 
 export class LLMConsequenceEngine implements ConsequenceEngine {
+  /** Phase 6: resolve() performs provider calls — counted by the turn budget. */
+  readonly providerBacked = true;
+
   constructor(
     private readonly logger: Logger,
     private readonly provider: LLMProvider,
