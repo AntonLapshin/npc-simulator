@@ -50,6 +50,15 @@ import { errorMessage } from "../util/errors.js";
 
 export type { ChatComplete };
 
+/**
+ * Phase 5: the cascade-decision derivation lives in
+ * src/decision/intentCascade.ts (single implementation shared with the
+ * Laya proposal/selection engines). Imported here for local use and
+ * re-exported for existing importers.
+ */
+import { intentFromCascadeDecisions } from "../decision/intentCascade.js";
+export { intentFromCascadeDecisions };
+
 /** Everything a turn needs to talk to the Laya decision layer. */
 export type LayaTurnWiring = {
   client: LayaClient;
@@ -95,54 +104,8 @@ export { isLayaIntentFirst };
 // ---------------------------------------------------------------------------
 // Intent derivation (pure)
 // ---------------------------------------------------------------------------
-
-const INTENT_KINDS: Intent["kind"][] = [
-  "speak",
-  "move",
-  "interact",
-  "gesture",
-  "wait",
-];
-
-/**
- * Derive an Intent from the static SELECTION_CASCADE decisions
- * (intent_kind -> addressee|destination|target_object -> manner). Pure.
- * Mirrors the cascade reading inside LayaSelectionEngine so the intent-first
- * step and the selection engine agree on what the cascade decided.
- */
-export function intentFromCascadeDecisions(
-  decisions: Record<string, LayaAnswer>,
-): Intent {
-  const kindRaw = decisions["intent_kind"];
-  const kind =
-    kindRaw?.type === "choice" &&
-    (INTENT_KINDS as string[]).includes(kindRaw.winner)
-      ? (kindRaw.winner as Intent["kind"])
-      : "wait";
-  const intent: Intent = { kind };
-  const addressee = decisions["addressee"];
-  const destination = decisions["destination"];
-  const targetObject = decisions["target_object"];
-  if (kind === "speak" && addressee?.type === "choice") {
-    intent.targetKind =
-      addressee.winner === "nobody in particular" ? "none" : "actor";
-  } else if (kind === "move" && destination?.type === "choice") {
-    intent.targetKind =
-      destination.winner === "wander aimlessly"
-        ? "none"
-        : destination.winner === "toward someone"
-          ? "actor"
-          : "landmark";
-  } else if (kind === "interact" && targetObject?.type === "choice") {
-    intent.targetKind = "object";
-    intent.manner = targetObject.winner;
-  }
-  const manner = decisions["manner"];
-  if (manner?.type === "choice" && intent.manner === undefined) {
-    intent.manner = manner.winner;
-  }
-  return intent;
-}
+// intentFromCascadeDecisions lives in ../decision/intentCascade.ts (Phase 5
+// consolidation); the pure keyword classifier below stays here.
 
 const INTENT_KEYWORDS: Array<{ kind: Intent["kind"]; pattern: RegExp }> = [
   {
