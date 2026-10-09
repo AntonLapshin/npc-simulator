@@ -13,7 +13,11 @@
 // delegates to the injected fallback (LLM proposal when
 // LLM_DECISION_FALLBACK=1, the deterministic stub otherwise).
 
-import type { ProposalEngine } from "../intelligence/types.js";
+import type {
+  DelegatingEngine,
+  EngineDelegation,
+  ProposalEngine,
+} from "../intelligence/types.js";
 import type { ProposalResult, World } from "../types.js";
 import type { Intent } from "./decisionTypes.js";
 import { buildIntentState } from "./decisionState.js";
@@ -50,12 +54,23 @@ const DEFAULT_MAX_SUGGESTIONS = 3;
 
 const TARGET_QUESTION_KINDS: TargetQuestionKind[] = ["speak", "move", "interact"];
 
-export class LayaProposalEngine implements ProposalEngine {
+export class LayaProposalEngine implements ProposalEngine, DelegatingEngine {
   private readonly client: LayaClient;
   private readonly fallback: ProposalEngine;
   private readonly confidenceThreshold: number;
   private readonly buildState: (world: World, actorId: string) => string;
   private readonly maxSuggestions: number;
+  private lastDelegationState: EngineDelegation | undefined;
+
+  /**
+   * Stage 3 C2/C3: the fallback delegation performed by the last
+   * propose() call, if any — cause plus whether the fallback burns
+   * provider (LLM) calls. Lets the orchestrator count delegated calls in
+   * the turn budget and log the cause.
+   */
+  get lastDelegation(): EngineDelegation | undefined {
+    return this.lastDelegationState;
+  }
 
   constructor(deps: LayaProposalEngineDeps, fallback: ProposalEngine) {
     this.client = deps.client;
@@ -77,11 +92,19 @@ export class LayaProposalEngine implements ProposalEngine {
     intent?: Intent,
   ): Promise<ProposalResult> {
     const state = this.buildState(world, actorId);
-    const fail = (reason: string): Promise<ProposalResult> =>
-      this.fallback.propose(world, actorId).then((fb) => ({
+    this.lastDelegationState = undefined;
+    const fail = (reason: string): Promise<ProposalResult> => {
+      // Stage 3 C2/C3: record the delegation so the orchestrator can
+      // count the fallback's provider call and log the cause.
+      this.lastDelegationState = {
+        cause: reason,
+        providerBacked: this.fallback.providerBacked === true,
+      };
+      return this.fallback.propose(world, actorId).then((fb) => ({
         ...fb,
         reasoning: `laya proposal: ${reason}; fallback: ${fb.reasoning}`,
       }));
+    };
 
     // Step 1: intent cascade (kind -> targetKind -> manner). Static only —
     // the dynamic planner burns an LLM call, incompatible with the

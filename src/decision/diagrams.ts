@@ -20,8 +20,18 @@ export const SELECTION_CASCADE: DecisionDiagram = {
     {
       id: "intent_kind",
       type: "choice",
+      // Stage 3 C1: the static cascade misclassified 9/10 turns of a
+      // dialogue-heavy office scene as interact/object (path confidences
+      // 0.27–0.46) — everything downstream then failed on a wrong-typed
+      // intent. Dialogue-aware guidance: speak is the default when the
+      // recent events are conversation; interact/move need a concrete
+      // object or destination reason.
       instructions:
-        "What kind of thing does the actor do next? Pick the single most fitting intent.",
+        "What kind of thing does the actor do next? Pick the single most fitting intent. " +
+        "When the recent events are conversation, the actor most likely speaks next — pick \"speak\" " +
+        "unless they specifically need to handle an object (\"interact\") or relocate (\"move\"). " +
+        "Pick \"interact\" only when the actor needs to use, take, examine, or move aside a specific object; " +
+        "pick \"move\" only when they go somewhere.",
       options: ["speak", "move", "interact", "gesture", "wait"],
     },
     {

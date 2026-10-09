@@ -4,7 +4,9 @@ import {
   buildCandidateState,
   buildIntentState,
   buildJudgeState,
+  conversationHint,
   estimateTokens,
+  historyEntryHasSpeech,
   STATE_CHAR_BUDGET,
   truncateToChars,
 } from "../../../src/decision/decisionState.js";
@@ -136,5 +138,74 @@ describe("buildJudgeState", () => {
   it("handles empty inventories", () => {
     const state = buildJudgeState("Someone waits.", [], []);
     expect(state).toContain("Someone waits.");
+  });
+});
+
+describe("historyEntryHasSpeech (Stage 3 C1)", () => {
+  it("detects double-quoted dialogue", () => {
+    expect(historyEntryHasSpeech('Anton says "Do you know where my desk is?"')).toBe(true);
+  });
+
+  it("detects single-quoted dialogue", () => {
+    expect(historyEntryHasSpeech("Tanya says, 'I need to talk about the deadline.'")).toBe(true);
+  });
+
+  it("ignores narration without quotes", () => {
+    expect(historyEntryHasSpeech("Anton walks to the whiteboard.")).toBe(false);
+  });
+
+  it("ignores contractions and possessives", () => {
+    expect(historyEntryHasSpeech("Anton doesn't walk to Tanya's desk.")).toBe(false);
+  });
+
+  it("ignores single-word scare quotes", () => {
+    expect(historyEntryHasSpeech('Anton did the "thing" again.')).toBe(false);
+  });
+});
+
+describe("conversationHint (Stage 3 C1)", () => {
+  function worldWithHistory(texts: string[]) {
+    const w = makeWorld();
+    w.history = texts.map((text) => ({ text, perceivers: ["a1", "a2"] }));
+    return w;
+  }
+
+  it("fires when 2 of the last 3 entries are dialogue", () => {
+    const w = worldWithHistory([
+      'Anton says "Where is my desk?"',
+      "Anton walks to the whiteboard.",
+      'Tanya says "It is by the lamp."',
+    ]);
+    expect(conversationHint(w)).toContain("most likely speaks next");
+  });
+
+  it("stays silent when only 1 of the last 3 is dialogue", () => {
+    const w = worldWithHistory([
+      "Anton walks to the whiteboard.",
+      "Dana refills the coffee machine.",
+      'Tanya says "It is by the lamp."',
+    ]);
+    expect(conversationHint(w)).toBe("");
+  });
+
+  it("stays silent with fewer than 2 history entries", () => {
+    const w = worldWithHistory(['Anton says "Hello."']);
+    expect(conversationHint(w)).toBe("");
+  });
+
+  it("appears in the intent state on dialogue-heavy turns", () => {
+    const w = worldWithHistory([
+      'Anton says "Where is my desk?"',
+      'Tanya says "It is by the lamp."',
+      'Anton says "Thanks!"',
+    ]);
+    const state = buildIntentState(w, "a1");
+    expect(state).toContain("Conversation context:");
+    expect(state.length).toBeLessThanOrEqual(STATE_CHAR_BUDGET);
+  });
+
+  it("does not appear in the intent state on quiet turns", () => {
+    const state = buildIntentState(makeWorld(), "a1");
+    expect(state).not.toContain("Conversation context:");
   });
 });

@@ -17,6 +17,7 @@ import {
 import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
 import type {
   ConsequenceEngine,
+  DelegatingEngine,
   ProposalEngine,
   SelectionEngine,
   SelectionEngineWithIntent,
@@ -139,6 +140,60 @@ function report(deps: EngineDependencies, event: TurnProgressEvent): void {
   } catch {
     // Progress reporting must never break the turn.
   }
+}
+
+/**
+ * Stage 3 C2/C3: surface a fallback delegation a wrapping engine
+ * performed internally (the Laya cascade engines delegating to their LLM
+ * fallback). Two previously-invisible effects become honest:
+ * - the delegated provider call counts in the turn budget (the wrapper
+ *   itself is local, so the plain providerBacked note() skipped it —
+ *   this is what made the per-turn P/S columns read 0 while the
+ *   fallback burned real calls in Stage 3);
+ * - a `cascade_delegated` event persists the delegation cause, so the
+ *   next comparison can attribute per-turn causes instead of inferring
+ *   them from intents + downstream events.
+ * Telemetry only — never aborts or alters a turn.
+ */
+function surfaceDelegation(
+  stage: "proposal" | "selection",
+  engine: unknown,
+  logger: Logger,
+  tick: number,
+  turnIndex: number,
+  actorId: string,
+  callCounter: ProviderCallCounter,
+): void {
+  const delegation = (engine as Partial<DelegatingEngine> | undefined)
+    ?.lastDelegation;
+  if (delegation === undefined) return;
+  logger.log({
+    module: "laya",
+    event: "cascade_delegated",
+    tick,
+    turnIndex,
+    actorId,
+    input: { stage },
+    output: {
+      cause: delegation.cause,
+      providerBacked: delegation.providerBacked,
+    },
+  });
+  if (delegation.providerBacked) {
+    callCounter.note(stage, { providerBacked: true });
+  }
+}
+
+/**
+ * Stage 3 C4: true when the selection engine delegated its last select()
+ * to a provider-backed (LLM) fallback. The renderability re-pick must
+ * not burn a second provider call in that case — see the re-pick site.
+ */
+function selectionDelegatedToProvider(engine: unknown): boolean {
+  return (
+    (engine as Partial<DelegatingEngine> | undefined)?.lastDelegation
+      ?.providerBacked === true
+  );
 }
 
 /**
@@ -754,6 +809,9 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     const proposalStart = Date.now();
     callCounter.note("proposal", turnDeps.proposalEngine);
     const proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
+    // Stage 3 C2/C3: a wrapping engine (Laya cascade) may have delegated
+    // to its fallback internally — count that provider call and log why.
+    surfaceDelegation("proposal", turnDeps.proposalEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
     proposalMs = Date.now() - proposalStart;
     report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
     report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
@@ -774,6 +832,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       proposal.suggestions,
       decidedIntent,
     );
+    // Stage 3 C2/C3: surface an internal fallback delegation, if any.
+    surfaceDelegation("selection", turnDeps.selectionEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
     report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
     let actionText = stripCoordinateMentions(stripSelectionPrefix(selection.action));
     // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
@@ -863,6 +923,12 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // the second pick stands regardless of its score (one re-pick, no
     // loops). Fail-open throughout: Laya failure/undefined proceeds.
     // OFF by default (LAYA_RENDERABILITY=1 to enable).
+    //
+    // Stage 3 C4: when the selection engine already delegated to a
+    // provider-backed fallback on the first pick, the engine re-pick is
+    // replaced by a deterministic first-clean-candidate pick — re-invoking
+    // would burn a second provider call where the chat path makes exactly
+    // one (the failure mode behind Stage 3's 14-vs-10 selection gap).
     if (turnDeps.laya !== undefined && turnDeps.laya.config.toggles.renderability === true) {
       const score = await runRenderabilityScore(
         turnDeps.laya.client,
@@ -885,15 +951,38 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           (s) => stripCoordinateMentions(stripSelectionPrefix(s)) !== actionText,
         );
         if (filtered.length > 0) {
-          // Phase 6: the re-pick is a second selection provider call.
-          callCounter.note("selection", turnDeps.selectionEngine);
-          const repick = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
-            world,
-            actor.id,
-            filtered,
-            decidedIntent,
-          );
-          const repickText = stripCoordinateMentions(stripSelectionPrefix(repick.action));
+          let repickText: string;
+          let repickDeterministic = false;
+          if (selectionDelegatedToProvider(turnDeps.selectionEngine)) {
+            // Stage 3 C4: the first pick already burned a provider call
+            // via delegation — take the first clean candidate
+            // deterministically (same rule as the substitution path)
+            // instead of burning a second one.
+            const clean = filtered
+              .map((s) => stripSelectionPrefix(s))
+              .find(
+                (s) =>
+                  s.length > 0 &&
+                  validateSelectionForActor(world, actor.id, s) === undefined &&
+                  !isIntentBanned(s) &&
+                  !isClusterBanned(s),
+              );
+            repickText =
+              clean !== undefined ? stripCoordinateMentions(clean) : FALLBACK_SELECTION.action;
+            repickDeterministic = true;
+          } else {
+            // Phase 6: the re-pick is a second selection provider call.
+            callCounter.note("selection", turnDeps.selectionEngine);
+            const repick = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
+              world,
+              actor.id,
+              filtered,
+              decidedIntent,
+            );
+            // Stage 3 C2/C3: surface an internal fallback delegation, if any.
+            surfaceDelegation("selection", turnDeps.selectionEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
+            repickText = stripCoordinateMentions(stripSelectionPrefix(repick.action));
+          }
           const repickRejection = validateSelectionForActor(world, actor.id, repickText);
           actionText =
             repickRejection === undefined && !isIntentBanned(repickText) && !isClusterBanned(repickText)
@@ -906,7 +995,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
             tick: world.tick,
             turnIndex: world.turnIndex,
             actorId: actor.id,
-            input: { rejected: selection.action, renderabilityScore: score },
+            input: { rejected: selection.action, renderabilityScore: score, deterministic: repickDeterministic },
             output: { action: actionText },
           });
         } else {
