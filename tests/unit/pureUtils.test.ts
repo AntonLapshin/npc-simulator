@@ -11,11 +11,6 @@ import { loadEnvFile } from "../../src/util/loadEnv.js";
 import { stripSelectionPrefix } from "../../src/engine/turnOrchestrator.js";
 import { isFallbackConsequence } from "../../src/engine/turnSalvage.js";
 import { FALLBACK_CONSEQUENCE } from "../../src/llm/llmConsequenceEngine.js";
-import {
-  cleanDonorString,
-  extractDonorString,
-  synthesizeSalvageNarrative,
-} from "../../src/engine/turnSalvage.js";
 import { minimalRepairPrompt, parseErrorSignature } from "../../src/llm/complete.js";
 import { suggestSimilarIds } from "../../src/engine/validate/textUtils.js";
 
@@ -73,69 +68,15 @@ describe("minimalRepairPrompt", () => {
   });
 });
 
-describe("cleanDonorString", () => {
-  it("strips code fences and collapses whitespace", () => {
-    expect(cleanDonorString('```json{"a": 1}```')).toBe('{"a": 1}');
-    expect(cleanDonorString("  hello   world\n\t!  ")).toBe("hello world !");
-  });
-  it("caps at 400 chars", () => {
-    expect(cleanDonorString("x".repeat(500))).toHaveLength(400);
-  });
-});
-
-describe("extractDonorString", () => {
-  it("reads a field from complete JSON", () => {
-    expect(
-      extractDonorString('{"narrative": "Jeff walks in", "thoughts": "t"}', "narrative"),
-    ).toBe("Jeff walks in");
-  });
-  it("closes truncated JSON (max_tokens cutoffs)", () => {
-    expect(extractDonorString('{"narrative": "Jeff walks', "narrative")).toBe("Jeff walks");
-  });
-  it("falls back to regex extraction", () => {
-    expect(extractDonorString('xx "thoughts": "deep in work" yy', "thoughts")).toBe(
-      "deep in work",
-    );
-  });
-  it("returns undefined when the key is absent", () => {
-    expect(extractDonorString('{"other": 1}', "narrative")).toBeUndefined();
-    expect(extractDonorString("no json here", "narrative")).toBeUndefined();
-  });
-});
-
-describe("synthesizeSalvageNarrative", () => {
-  const action = (text: string) => ({ actorId: "anton", text });
-  it("renders quoted speech as a says-narrative", () => {
-    expect(synthesizeSalvageNarrative(action('Say "hello there" loudly'), "Anton")).toBe(
-      'Anton says "hello there"',
-    );
-  });
-  it("falls back to the trimmed action text", () => {
-    expect(synthesizeSalvageNarrative(action("  walk   to the desk  "), "Anton")).toBe(
-      "walk to the desk",
-    );
-  });
-  it("truncates very long action text", () => {
-    const out = synthesizeSalvageNarrative(action("x".repeat(300)), "Anton");
-    expect(out).toHaveLength(278);
-    expect(out.endsWith("…")).toBe(true);
-  });
-});
-
 describe("isFallbackConsequence", () => {
   it("recognizes the canonical fallback", () => {
     expect(isFallbackConsequence(structuredClone(FALLBACK_CONSEQUENCE))).toBe(true);
   });
-  it("rejects altered narratives and non-empty patches", () => {
+  it("rejects altered narratives", () => {
     expect(
       isFallbackConsequence({ ...structuredClone(FALLBACK_CONSEQUENCE), narrative: "x" }),
     ).toBe(false);
-    expect(
-      isFallbackConsequence({
-        ...structuredClone(FALLBACK_CONSEQUENCE),
-        actorPatches: [{ actorId: "a", thoughts: "t" }],
-      }),
-    ).toBe(false);
+    expect(isFallbackConsequence({ narrative: "Custom.", reasoning: "r" })).toBe(false);
   });
 });
 

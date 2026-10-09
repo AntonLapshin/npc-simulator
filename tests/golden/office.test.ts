@@ -46,80 +46,26 @@ describe("golden office scenario", () => {
     });
 
     const consequenceEngine = new MockConsequenceEngine(logger, {
+      // Phase 4: prose-only scripts. Movement is engine-executed; the
+      // narrative narrates the executed facts (no coordinates, no invented
+      // pose changes, no observer thought patches).
       "hey guys, i'm a new team member, my name is jeff!": {
         narrative:
           "Jeff speaks aloud to the office: \"Hey guys, I'm a new team member, my name is Jeff!\"",
-        actorPatches: [
-          {
-            actorId: "jeff",
-            emotion: "nervous",
-            state: "standing near the entrance after introducing himself",
-            memoriesAppend: ["Introduced himself aloud to the office."],
-            relationshipsAppend: ["Jeff has attempted to introduce himself to Ana and Dan."],
-          },
-          {
-            actorId: "ana",
-            emotion: "curious",
-            // F5: observers may update their OWN goal, never another
-            // actor's — no goal patch for Ana on Jeff's turn.
-            memoriesAppend: ["Heard Jeff introduce himself as a new team member."],
-            beliefsAppend: ["Jeff is a new team member.", "Jeff's name is Jeff."],
-            relationshipsAppend: ["Ana has just become aware of Jeff."],
-          },
-          {
-            actorId: "dan",
-            emotion: "annoyed",
-            memoriesAppend: ["Heard Jeff introduce himself while trying to finish urgent work."],
-            beliefsAppend: ["Jeff is a new team member."],
-            relationshipsAppend: ["Dan associates Jeff's arrival with an interruption."],
-          },
-        ],
-        objectPatches: [],
-        reasoning:
-          "Jeff spoke in a normal indoor environment. Ana and Dan are close enough and not separated by sound-blocking objects.",
+        thoughts: "Hope they take it well.",
+        emotion: "nervous",
+        reasoning: "Jeff spoke in a normal indoor environment.",
       },
       "walk over to jeff and welcome him.": {
-        narrative: "Ana stands up from her desk, walks toward Jeff, and stops near him.",
-        actorPatches: [
-          {
-            actorId: "ana",
-            x: 3,
-            y: 9,
-            state: "standing near Jeff",
-            emotion: "friendly",
-            pose: "stand",
-            memoriesAppend: ["Walked over to Jeff after hearing his introduction."],
-            relationshipsAppend: ["Ana approached Jeff in a friendly way."],
-          },
-          {
-            actorId: "jeff",
-            emotion: "hopeful",
-            memoriesAppend: ["Saw Ana walk toward him."],
-            relationshipsAppend: ["Jeff perceives Ana as welcoming."],
-          },
-          {
-            actorId: "dan",
-            memoriesAppend: ["Noticed that Ana got up from her desk."],
-          },
-        ],
-        objectPatches: [],
-        reasoning: "Ana moves close enough to Jeff for direct social interaction.",
+        narrative: "Ana walks toward Jeff and stops near him.",
+        thoughts: "Hope Jeff feels welcome.",
+        emotion: "friendly",
+        reasoning: "Ana moves closer to Jeff; the engine executes the movement.",
       },
       "keep working and do not interrupt the design task.": {
         narrative: "Dan remains at his desk and continues working.",
-        actorPatches: [
-          {
-            actorId: "dan",
-            state: "sitting at his desk and continuing to work",
-            emotion: "stressed",
-            memoriesAppend: ["Chose to keep working instead of greeting Jeff."],
-          },
-          {
-            actorId: "jeff",
-            memoriesAppend: ["Noticed that Dan remained at his desk."],
-          },
-        ],
-        objectPatches: [],
+        thoughts: "This draft cannot wait.",
+        emotion: "stressed",
         reasoning: "Dan maintains his current physical position and task focus.",
       },
     });
@@ -143,41 +89,37 @@ describe("golden office scenario", () => {
     const ana = byId["ana"]!;
     const dan = byId["dan"]!;
 
-    // Final actor positions. Phase 1: Ana's mock emits (3,9), but the model
-    // never emits coordinates — the engine computes the optimal step toward
-    // Jeff (8,8)→(3,10), strictly closer to Jeff than the model's (3,9).
+    // Final actor positions. Phase 1: the model never emits coordinates —
+    // the engine computes the optimal step toward Jeff (8,8)→(3,10),
+    // strictly closer to Jeff than the model's old (3,9) patch.
     expect([ana.x, ana.y]).toEqual([3, 10]);
     expect([jeff.x, jeff.y]).toEqual([1, 10]);
     expect([dan.x, dan.y]).toEqual([15, 8]);
 
-    // Final emotions / goals / states.
-    expect(jeff.emotion).toBe("hopeful");
+    // Emotions come from the render prose (acting actor only).
+    expect(jeff.emotion).toBe("nervous");
     expect(ana.emotion).toBe("friendly");
-    // F5: Ana's goal patch from Jeff's turn is rejected — she keeps her
-    // scenario goal; observers update only their own goal.
-    expect(ana.goal).toBe("Finish a small engineering task before lunch.");
-    expect(ana.state).toBe("standing near Jeff");
     expect(dan.emotion).toBe("stressed");
-    expect(dan.state).toBe("sitting at his desk and continuing to work");
-
-    // Memories / beliefs / relationships.
-    expect(jeff.memories).toContain("Introduced himself aloud to the office.");
-    expect(jeff.memories).toContain("Saw Ana walk toward him.");
-    expect(ana.beliefs).toContain("Jeff is a new team member.");
-    expect(dan.beliefs).toContain("Jeff is a new team member.");
-    expect(ana.relationships).toContain("Ana has just become aware of Jeff.");
-    expect(dan.relationships).toContain("Dan associates Jeff's arrival with an interruption.");
-
-    // Object states unchanged.
+    // Phase 4: no model patches — goals and object states are untouched.
+    expect(ana.goal).toBe("Finish a small engineering task before lunch.");
     const door = final.scene.objects.find((o) => o.id === "door")!;
     expect(door.description).toBe("The office entrance door. It is open.");
+
+    // Memories are the deterministic narrative line (acting actor only).
+    expect(jeff.memories.at(-1)).toContain("Jeff speaks aloud to the office");
+    expect(ana.memories.at(-1)).toContain("Ana walks toward Jeff");
+    expect(dan.memories.at(-1)).toContain("Dan remains at his desk");
+    // Phase 4: observers get no per-turn thought patches — each actor's
+    // thoughts come only from their own turn's prose.
+    expect(dan.thoughts).toBe("This draft cannot wait.");
+    expect(jeff.thoughts).toBe("Hope they take it well.");
 
     // World history: 1 tickless entry per turn x 3 turns.
     // Q1: clean turns record the consequence narrative, not the action text.
     expect(final.history).toHaveLength(3);
     expect(final.history[0]!.text).toContain("Jeff: Jeff speaks aloud to the office:");
     expect(final.history[0]!.text).not.toMatch(/^Tick \d+ - /);
-    expect(final.history[1]!.text).toContain("Ana: Ana stands up from her desk, walks toward Jeff");
+    expect(final.history[1]!.text).toContain("Ana: Ana walks toward Jeff and stops near him.");
     expect(final.history[2]!.text).toContain("Dan: Dan remains at his desk and continues working.");
 
     // Tick / turn advancement: 3 ticks, wraps back to jeff.
@@ -195,8 +137,7 @@ describe("golden office scenario", () => {
       "selection_completed",
       "consequence_started",
       "consequence_completed",
-      "validation_started",
-      "validation_passed",
+      "render_accepted",
       "patch_applied",
       "history_appended",
       "turn_completed",
@@ -204,7 +145,7 @@ describe("golden office scenario", () => {
       expect(events, `missing log event ${expected}`).toContain(expected);
     }
     // No retries or fallbacks in the golden path.
-    expect(events).not.toContain("validation_failed");
+    expect(events).not.toContain("render_failed");
     expect(events).not.toContain("fallback_used");
   });
 });

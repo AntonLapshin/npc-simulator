@@ -3,8 +3,9 @@
 // The logged run needed 8 validation failures + 2 fallbacks across 3 turns:
 // the task-resuming actions of ticks 1-2 ("... then return to typing ...",
 // "... returning to staring at the monitor ...") were misread as locomotion
-// by regex heuristics. Replayed through the SemanticJudge + self-declared
-// effects path, all three ticks validate on attempt 1 with zero retries.
+// by regex heuristics. Replayed with engine-owned movement (Phase 1: the
+// resumed-activity mask), all three ticks validate on attempt 1 with zero
+// retries.
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -32,7 +33,7 @@ const DANA_ACTION =
   "Sighs, rubs temples, and mutters 'Just a few more minutes...' before returning to staring at the monitor, trying to refocus.";
 
 describe("golden office-anton replay", () => {
-  it("ticks 1-2 validate without x/y and without retries", async () => {
+  it("ticks 1-2 render clean on attempt 1", async () => {
     const logger = new Logger({ sessionId: "golden_office_anton", writeToFile: false });
 
     const proposalEngine = new MockProposalEngine(logger, {
@@ -59,48 +60,27 @@ describe("golden office-anton replay", () => {
     });
 
     const consequenceEngine = new MockConsequenceEngine(logger, {
+      // Phase 4: prose-only scripts. Task-resuming actions imply no
+      // movement (the engine's resumed-activity mask); quotes are
+      // engine-dictated verbatim contracts.
       "greetings all!": {
         narrative: 'Anton says "Greetings all!" to the room.',
-        actorPatches: [
-          {
-            actorId: "anton",
-            thoughts: "Hope that came across well.",
-            memoriesAppend: ["Greeted the office."],
-          },
-          { actorId: "tanya", thoughts: "A new coworker — I should say hi." },
-          { actorId: "dana", thoughts: "Someone new. Back to work." },
-        ],
-        objectPatches: [],
-        reasoning: "Anton spoke in a shared room; everyone nearby perceives it.",
-        effects: { moved: false, spoke: true },
+        thoughts: "Hope that came across well.",
+        emotion: "hopeful",
+        reasoning: "Anton spoke in a shared room.",
       },
       [TANYA_ACTION.toLowerCase()]: {
         narrative: "Tanya calls out a friendly 'Hey!' as she sees Anton, then returns to typing.",
-        actorPatches: [
-          {
-            actorId: "tanya",
-            thoughts: "Welcomed Anton without losing focus.",
-            memoriesAppend: ["Greeted Anton, then kept typing."],
-          },
-          { actorId: "anton", thoughts: "Tanya seems welcoming." },
-        ],
-        objectPatches: [],
+        thoughts: "Welcomed Anton without losing focus.",
+        emotion: "welcoming",
         reasoning: "A greeting plus resumed typing; no locomotion occurred.",
-        effects: { moved: false, spoke: true, quotedSpeech: ["Hey!"] },
       },
       [DANA_ACTION.toLowerCase()]: {
         narrative:
           "Dana sighs, rubs his temples, and mutters 'Just a few more minutes...' before returning to staring at the monitor.",
-        actorPatches: [
-          {
-            actorId: "dana",
-            thoughts: "Almost done with this draft.",
-            memoriesAppend: ["Muttered while refocusing on the draft."],
-          },
-        ],
-        objectPatches: [],
+        thoughts: "Almost done with this draft.",
+        emotion: "stressed",
         reasoning: "An in-place mutter plus resumed staring; no locomotion occurred.",
-        effects: { moved: false, spoke: true, quotedSpeech: ["Just a few more minutes..."] },
       },
     });
 
@@ -128,14 +108,13 @@ describe("golden office-anton replay", () => {
     expect(final.history[1]!.text).toContain("Tanya: Tanya calls out a friendly 'Hey!'");
     expect(final.history[2]!.text).toContain("Dana: Dana sighs, rubs his temples");
 
-    // Zero retries: every tick validated on attempt 1.
+    // Zero retries: every tick renders clean on attempt 1.
     const events = logger.store.events();
-    expect(logger.store.byEvent("validation_failed")).toHaveLength(0);
+    expect(logger.store.byEvent("render_failed")).toHaveLength(0);
     expect(events).not.toContain("retry_started");
     expect(events).not.toContain("fallback_used");
-    expect(logger.store.byEvent("validation_passed")).toHaveLength(3);
-    // Effects declarations agree with the independent (mock) judge, so the
-    // merged semantics keep source "effects" on all three ticks.
-    expect(logger.store.byEvent("semantic_resolved")).toHaveLength(3);
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(3);
+    // Phase 4: no semantic judge in the turn loop — prose validation only.
+    expect(events).not.toContain("semantic_resolved");
   });
 });

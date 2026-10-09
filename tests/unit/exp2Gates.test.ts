@@ -7,24 +7,16 @@ import {
   isFacingOnlyTurn,
   isInterrogativeQuestion,
   isNonLocomotionSense,
-  validateMovementIntent,
 } from "../../src/engine/validate/movement.js";
 import {
   quotedSpeechEchoedVerbatim,
   validateNarrativePlaceholder,
 } from "../../src/engine/validate/speech.js";
-import { validateActingActorPresence } from "../../src/engine/validate/narrative.js";
-import { validateActionVerbCoverage } from "../../src/engine/validate/objects.js";
 import { makeTinyWorld, errorText } from "../helpers.js";
-import type { Action, ActionSemantics } from "../../src/types.js";
+import type { Action } from "../../src/types.js";
 
 function action(text: string): Action {
   return { actorId: "u", text };
-}
-
-/** Judged semantics as the LLM word-sense misses produced them (moves=true). */
-function llmMovesSemantics(): ActionSemantics {
-  return { moves: true, speaks: true, quotedSpeech: [] };
 }
 
 describe("exp2 #6 (S3): echo gate exempts fully-spoken actions", () => {
@@ -86,16 +78,6 @@ describe("exp2 #8 (S4): interrogative questions are not sitting", () => {
     expect(isNonLocomotionSense("Assess the situation carefully.")).toBe(false);
   });
 
-  it("question turn with moves=true demands no position change (tick 9 repro)", () => {
-    const world = makeTinyWorld();
-    const errors = validateMovementIntent(
-      world,
-      { actorPatches: [] },
-      action("Ana, where should I sit?"),
-      llmMovesSemantics(),
-    );
-    expect(errors).toEqual([]);
-  });
 });
 
 describe("exp2 #8 (S5): facing is not locomotion", () => {
@@ -113,91 +95,10 @@ describe("exp2 #8 (S5): facing is not locomotion", () => {
     expect(isFacingOnlyTurn("Return to Dan.")).toBe(false);
   });
 
-  it("facing turn with moves=true demands no position change (tick 12 repro)", () => {
-    const world = makeTinyWorld();
-    const errors = validateMovementIntent(
-      world,
-      { actorPatches: [] },
-      action("I turn to Dan and apologize."),
-      llmMovesSemantics(),
-    );
-    expect(errors).toEqual([]);
-  });
-
-  it("a facing turn that relocates is still an unexpected move", () => {
-    const world = makeTinyWorld();
-    const errors = validateMovementIntent(
-      world,
-      { actorPatches: [{ actorId: "u", x: 4, y: 4 }] },
-      action("I turn to Dan and apologize."),
-      llmMovesSemantics(),
-    );
-    expect(errorText(errors)).toContain("movement.unexpected_move");
-  });
-
-  it("genuine locomotion keeps moves=true ('I walk to Dan')", () => {
-    const world = makeTinyWorld();
-    const errors = validateMovementIntent(
-      world,
-      { actorPatches: [] },
-      action("I walk to Dan."),
-      llmMovesSemantics(),
-    );
-    // Phase 1: movement.no_position_change is deleted (impossible by
-    // construction — the engine always moves); unpatched locomotion is
-    // "declared without patch".
-    expect(errorText(errors)).toContain("movement.declared_without_patch");
-  });
 
   it("'sit down on the chair' keeps sit handling (no exemption)", () => {
     expect(isNonLocomotionSense("Sit down on the chair.")).toBe(false);
   });
 
-  it("facing/speech turn needs no acting-actor patch", () => {
-    const errors = validateActingActorPresence(
-      { actorPatches: [] },
-      action("I turn to Dan and apologize."),
-      llmMovesSemantics(),
-    );
-    expect(errors).toEqual([]);
-  });
 
-  it("genuine locomotion still needs the acting-actor patch", () => {
-    const errors = validateActingActorPresence(
-      { actorPatches: [] },
-      action("I walk to Dan."),
-      llmMovesSemantics(),
-    );
-    expect(errorText(errors)).toContain("turn_discipline.acting_actor_not_patched");
-  });
-});
-
-describe("exp2 #8 (S4): sit_no_pose does not fire on questions", () => {
-  it("'where I should sit?' (question) does not demand a sit pose (tick 9 repro)", () => {
-    const world = makeTinyWorld();
-    const errors = validateActionVerbCoverage(
-      world,
-      action("Thanks Ana! …where should I sit? stay near her desk"),
-      {
-        narrative: "Jeff asks Ana where he should sit, staying near her desk.",
-        actorPatches: [],
-        objectPatches: [],
-      },
-    );
-    expect(errorText(errors)).not.toContain("action.sit_no_pose");
-  });
-
-  it("genuine sit actions still demand the pose", () => {
-    const world = makeTinyWorld();
-    const errors = validateActionVerbCoverage(
-      world,
-      action("Sit down on the chair."),
-      {
-        narrative: "Jeff walks to the chair.",
-        actorPatches: [],
-        objectPatches: [],
-      },
-    );
-    expect(errorText(errors)).toContain("action.sit_no_pose");
-  });
 });

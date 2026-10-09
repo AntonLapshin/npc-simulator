@@ -18,18 +18,20 @@ describe("worldStore", () => {
     expect(incrementTick(world).tick).toBe(1);
   });
 
-  it("WorldStore snapshots are immutable and patches apply with logging", () => {
+  it("WorldStore snapshots are immutable and render results apply with logging", () => {
     const logger = new Logger({ sessionId: "store1", writeToFile: false });
     const store = new WorldStore(makeTinyWorld(), { logger });
     const snap = store.snapshot();
     snap.tick = 999;
     expect(store.getWorld().tick).toBe(0);
 
-    store.applyConsequence(
-      { narrative: "Hi.", actorPatches: [{ actorId: "u", emotion: "happy" }], objectPatches: [], reasoning: "r" },
+    store.applyRenderResult(
+      { narrative: "Hi.", thoughts: "Friendly.", emotion: "happy", reasoning: "r" },
       { actorId: "u", text: "Wave." },
+      { movement: null, pose: null, manipulation: null },
     );
     expect(store.getWorld().actors.find((a) => a.id === "u")!.emotion).toBe("happy");
+    expect(store.getWorld().actors.find((a) => a.id === "u")!.thoughts).toBe("Friendly.");
     expect(logger.store.byEvent("patch_applied")).toHaveLength(1);
 
     store.incrementTick();

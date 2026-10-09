@@ -13,10 +13,6 @@ export const defaultConfig: EngineConfig = {
   maxHistoryEntries: 200,
   defaultPerceptionRadius: 12,
   maxRetries: 3,
-  // Exp-7: outer consequence attempts per turn, capped at 2 (see
-  // EngineConfig.consequenceMaxAttempts) — retries demonstrably don't
-  // steer the model, they just burn 60-120 s each.
-  consequenceMaxAttempts: 2,
   logDir: "logs",
   saveDir: "saves",
   autosaveEnabled: true,

@@ -8,7 +8,7 @@
 // business-logic wrapper — sequencing, world reads — over the pure core
 // in `src/core/speech.ts`, mirroring `movementExecutor.ts`.
 
-import type { Action, ConsequenceResult, World } from "../types.js";
+import type { Action, World } from "../types.js";
 import {
   extractExactQuote,
   quoteContained,
@@ -56,41 +56,4 @@ export function exactQuoteFacts(
   ];
 }
 
-export type EngineSpeechResult = {
-  result: ConsequenceResult;
-  reinserted: boolean;
-};
 
-/**
- * Deterministic quote backstop: guarantees the exact quote in the
- * narrative before validation. A narrative missing the quote is repaired
- * via the pure core transform (appended to a clean frame, replacing an
- * invented one); a narrative that already carries it passes through
- * untouched. Returns a clone — the input is never mutated. The
- * `onReinserted` hook lets the caller audit-log each repair (B1 shape:
- * an altered quote is replaced by the action's exact words).
- */
-export function applyEngineSpeech(
-  result: ConsequenceResult,
-  actorId: string,
-  exactQuote: string | null,
-  world: World,
-  onReinserted?: (info: { before: string; after: string }) => void,
-): EngineSpeechResult {
-  if (exactQuote === null) return { result, reinserted: false };
-  if (quoteContained(exactQuote, result.narrative)) {
-    return { result, reinserted: false };
-  }
-  const actor = world.actors.find((a) => a.id === actorId);
-  const name = actor?.name ?? actorId;
-  const repaired: ConsequenceResult = structuredClone(result);
-  repaired.narrative = reinsertQuote(result.narrative, name, exactQuote);
-  // Keep the machine-readable declaration consistent with the rendered
-  // speech (mirrors the old salvage repair).
-  if (repaired.effects) {
-    repaired.effects.spoke = true;
-    repaired.effects.quotedSpeech = [exactQuote];
-  }
-  onReinserted?.({ before: result.narrative, after: repaired.narrative });
-  return { result: repaired, reinserted: true };
-}

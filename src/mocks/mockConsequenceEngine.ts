@@ -1,20 +1,23 @@
 import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
-import { mockClassifyAction } from "./mockSemanticJudge.js";
 import type { Logger } from "../logging/logger.js";
 
-export type MockConsequenceScript = Record<string, ConsequenceResult>;
+/**
+ * Phase 4: scripted render results (prose only). Keys are the normalized
+ * action text (or `${actorId}::${text}`).
+ */
+export type MockConsequenceScript = Record<string, Pick<ConsequenceResult, "narrative" | "thoughts" | "emotion" | "reasoning">>;
 
 function normalize(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 /**
- * Deterministic mock Consequence Engine. Returns the scripted result whose
- * key matches the normalized action text (or `${actorId}::${text}`),
- * otherwise a generic acknowledgement patch for the acting actor.
- * Logs prompt / raw / parsed response like the real LLM module.
+ * Deterministic mock Consequence (render) Engine. Returns the scripted
+ * prose whose key matches the normalized action text (or
+ * `${actorId}::${text}`), otherwise a generic acknowledgement. Logs
+ * prompt / raw / parsed response like the real LLM module.
  */
 export class MockConsequenceEngine implements ConsequenceEngine {
   constructor(
@@ -62,42 +65,13 @@ export class MockConsequenceEngine implements ConsequenceEngine {
       const actor = world.actors.find((a) => a.id === action.actorId);
       const actorName = actor?.name ?? action.actorId;
       const result: ConsequenceResult = scripted
-        ? structuredClone(scripted)
+        ? { ...structuredClone(scripted) }
         : {
             narrative: `${actorName} acts: ${action.text}`,
-            actorPatches: [
-              {
-                actorId: action.actorId,
-                memoriesAppend: [`Did the following: ${action.text}`],
-              },
-            ],
-            objectPatches: [],
+            thoughts: "Doing what needs doing.",
             reasoning: `Mock consequence fallback for ${action.actorId}.`,
           };
 
-      // Model the self-declared `effects` block the real consequence LLM
-      // emits: synthesize it from the mock judge when the script omits it,
-      // so mock runs exercise the effects-first validation path.
-      if (!result.effects) {
-        const semantics = mockClassifyAction(world, action);
-        result.effects = {
-          moved: semantics.moves,
-          spoke: semantics.speaks,
-          ...(semantics.quotedSpeech.length > 0 ? { quotedSpeech: semantics.quotedSpeech } : {}),
-          ...(semantics.destinationActorId !== undefined
-            ? { destinationActorId: semantics.destinationActorId }
-            : {}),
-          ...(semantics.destinationObjectId !== undefined
-            ? { destinationObjectId: semantics.destinationObjectId }
-            : {}),
-          ...(semantics.addresseeActorId !== undefined
-            ? { addresseeActorId: semantics.addresseeActorId }
-            : {}),
-          ...(semantics.contactActorId !== undefined
-            ? { contactActorId: semantics.contactActorId }
-            : {}),
-        };
-      }
       const rawResponse = JSON.stringify(result);
       this.logger.log({
         module: "consequence",
