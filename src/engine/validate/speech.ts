@@ -190,9 +190,9 @@ export function hasOwnUtterance(text: string): boolean {
  * (extractExactQuote, the same extraction the turn pre-pass uses) and the
  * narrative must contain it character-for-character (quote-style
  * canonicalized). Paraphrase is no longer acceptable on quoted turns: the
- * in-loop deterministic backstop (applyEngineSpeech) repairs the
- * narrative before this gate runs, so a failure here means a path that
- * bypassed the backstop (salvage, liveness, or a direct validation call)
+ * in-loop deterministic backstop (the turn orchestrator's quote repair via
+ * the pure core `reinsertQuote`) repairs the narrative before this gate
+ * runs, so a failure here means a path that bypassed the backstop
  * produced non-verbatim prose — a B1-shaped invented/paraphrased dialogue
  * that must never become canonical history.
  */
@@ -212,93 +212,54 @@ export function validateExactQuote(
   ];
 }
 
-/** Action implies speech even without quotes — judged by Decision AI, never regex. */
-export function validateSpeechPreservation(
-  semantics: ActionSemantics,
+/**
+ * Phase 4: prose coverage gates restored from the old
+ * validateActionVerbCoverage (its patch-checking halves died with the
+ * patch channel; these prose halves are pure and stay).
+ *
+ * - speech.question_dropped: the action asks a question, the narrative
+ *   keeps no question mark and no ask-verb.
+ * - speech.no_speech_rendered: the action carries the actor's OWN
+ *   utterance (quoted or an unquoted speech verb — never someone else's
+ *   reported speech), but the narrative renders no speech at all: no
+ *   quote and no speech verb of its own.
+ */
+const EXPLANATORY_VERBS =
+  "explain|explains|explained|explaining|describ(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|brief(?:s|ed|ing)?|present(?:s|ed|ing)?|outlin(?:e|es|ed|ing)";
+
+const NARRATIVE_SPEECH_VERBS =
+  `say|says|said|tell|tells|told|thank|thanks|thanked|greet|greets|greeted|greeting|` +
+  `welcome|welcomes|welcomed|ask|asks|asked|answer|answers|answered|repl(?:y|ies|ied)|` +
+  `mentions?|mentioned|${EXPLANATORY_VERBS}|announce|announces|announced|shout|shouts|` +
+  `shouted|whisper|whispers|whispered|talk|talks|talked|speak|speaks|spoke|spoken|` +
+  `call|calls|called`;
+
+export function validateSpeechCoverage(
+  action: Action,
   narrative: string,
-  actionText?: string,
 ): ValidationError[] {
   const errors: ValidationError[] = [];
-  // Ground truth for uttered words comes from the judge/declaration —
-  // never from regex-extracting quotes out of the raw action text.
-  // Narrative-side quote parsing stays: it reads structured output
-  // (what the model emitted), it does not interpret English meaning.
-  const actionQuotes = semantics.quotedSpeech;
-  const narrativeQuotes = quotedSegments(narrative);
+  const text = action.text;
 
-  // 1. Quoted action words must survive into the narrative (stem overlap —
-  // close paraphrase like "Greeting all!" -> "greets all" passes, but a
-  // wholly different sentence or a truncation to a greeting fragment fails).
-  // Applies to user turns and NPC turns alike: the exact-words rule is not
-  // NPC-only. Require at least half of each quote's content words to
-  // survive for short quotes (1-3 words: all-but-one may be reworded), and
-  // floor(n/2) for longer quotes — so "Hi, I'm Anton,
-  // where is my desk?" cannot collapse to just "Hi, I'm Anton", while a
-  // 5-word question may keep 2 words plus its question structure (see the
-  // interrogative path below).
-  for (const q of actionQuotes) {
-    const words = contentWords(q);
-    if (words.length === 0) continue;
-    const kept = words.filter((w) => contentWords(narrative).some((nw) => sameStem(w, nw)));
-    const need = words.length <= 3 ? Math.ceil(words.length / 2) : Math.floor(words.length / 2);
-    if (kept.length < need && !questionPreserved(q, narrative)) {
+  if (/\bask\w*\b|\?/.test(text)) {
+    if (!narrative.includes("?") && !/\bask\w*|questions?\b/i.test(narrative)) {
       errors.push({
-        code: "speech.dropped_words",
-        message: `narrative drops the acting actor's exact words ("${q.slice(0, 80)}"): preserve the action's wording — quote or closely paraphrase the FULL utterance, never invent different dialogue or truncate it to a fragment`,
+        code: "speech.question_dropped",
+        message: `action asks a question ("${text.slice(0, 80)}") but the narrative keeps no question (no "?" and no ask-verb): preserve the question instead of replacing it (e.g. with thanks)`,
       });
     }
   }
 
-  // 2. Quoted dialogue in the narrative must be grounded in the judged
-  // utterances.
-  //
-  // Exp-3 item 6 (S3): when the judge extracted no quotes (actionQuotes
-  // empty), a narrative quote that appears VERBATIM in the action text is
-  // still grounded — the action text IS the utterance (fully-spoken
-  // actions, e.g. the golden test's "Hey guys, I'm a new team member!").
-  // Only quotes absent from both the judged utterances AND the action
-  // text are invented.
-  const actionNorm = actionText !== undefined ? normLower(actionText) : "";
-  for (const q of narrativeQuotes) {
-    const words = contentWords(q);
-    if (words.length === 0) continue;
-    // Skip tiny interjections ("Hi!", "Oh.") — too short to judge.
-    if (normLower(q).length < 8 && words.length <= 1) continue;
-    const judgedWords = contentWords(actionQuotes.join(" "));
-    const grounded = words.filter((w) => judgedWords.some((aw) => sameStem(w, aw)));
-    // Verbatim-in-action-text grounding (fully-spoken actions).
-    if (
-      grounded.length === 0 &&
-      actionQuotes.length === 0 &&
-      actionNorm.length > 0 &&
-      actionNorm.includes(normLower(q))
-    )
-      continue;
-    // Allow short greeting renders when the judge says speech happened
-    // but records no exact quote ("Say hello" -> "says 'Hi!'").
-    // Exp-3 item 6 (S3, tick-20 repro): the escape previously allowed
-    // ARBITRARILY LONG invented quotes ("Good morning, Tanya. I'm Dana,
-    // the new hire.") whenever the judge said speaks=true with no
-    // extracted quotes — bound it to actual short greetings (≤3 content
-    // words, <28 chars) so longer invented dialogue fails loudly instead
-    // of entering canonical history.
-    const isShortGreetingRender = words.length <= 3 && normLower(q).length < 28;
-    if (
-      grounded.length === 0 &&
-      actionQuotes.length === 0 &&
-      semantics.speaks &&
-      isShortGreetingRender
-    )
-      continue;
-    // Require at least half the narrative quote's content words to appear
-    // in the judged utterances (single-word quotes require the one word).
-    const need = words.length <= 1 ? 1 : Math.ceil(words.length / 2);
-    if (grounded.length < need) {
+  if (hasOwnUtterance(text) && !/\bask\w*\b|\?/.test(text)) {
+    const rendersSpeech =
+      narrative.includes("?") ||
+      quotedSegments(narrative).length > 0 ||
+      new RegExp(`\\b(?:${NARRATIVE_SPEECH_VERBS})\\b`, "i").test(narrative);
+    if (!rendersSpeech) {
       errors.push({
-        code: "speech.invented_dialogue",
-        message: `narrative invents dialogue ("${q.slice(0, 80)}") not present in the action text: describe ONLY what the acting actor observably does, preserving its exact wording`,
+        code: "speech.no_speech_rendered",
+        message: `action says something ("${text.slice(0, 80)}") but the narrative renders no speech (no quote and no speech verb): preserve what is said instead of replacing it with silent behavior`,
       });
-      break; // one dialogue error per turn is enough feedback
     }
   }
 

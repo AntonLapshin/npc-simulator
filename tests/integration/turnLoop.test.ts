@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { runTurn, resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
+import { runTurn, resolveRender } from "../../src/engine/turnOrchestrator.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
+import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
 import type { ConsequenceEngine } from "../../src/intelligence/types.js";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld } from "../helpers.js";
@@ -51,16 +52,12 @@ describe("turn loop", () => {
     expect(world.history.map((e) => e.text).join("\n")).toContain("N:");
   });
 
-  it("invalid consequence retries with feedback then salvages safely", async () => {
+  it("bad render fails twice then falls back safely (no salvage, no patch repairs)", async () => {
     const logger = new Logger({ sessionId: "turn4", writeToFile: false });
-    // Phase 1: model coordinates are stripped before validation, so an
-    // out-of-bounds patch is no longer invalid. An invalid consequence is
-    // one whose narrative the engine cannot honor — here the narrative
-    // claims a walk the action never intends (no engine movement runs).
+    // The narrative claims a walk the engine never executed — a prose
+    // violation under the render contract (movement is engine-owned).
     const bad: ConsequenceResult = {
       narrative: "U walks to the door.",
-      actorPatches: [{ actorId: "u", x: 999, y: 999 }],
-      objectPatches: [],
       reasoning: "bad",
     };
     const consequenceEngine = new MockConsequenceEngine(logger, {
@@ -69,18 +66,16 @@ describe("turn loop", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine,
       getUserAction: async () => "Wave.",
-      config: { ...(makeTestDeps(logger).config!), maxRetries: 1, autosaveEnabled: false },
     });
     const world = await runTurn(makeTinyWorld(), deps);
-    expect(logger.store.byEvent("validation_failed").length).toBeGreaterThanOrEqual(1);
-    expect(logger.store.byEvent("retry_started").length).toBeGreaterThanOrEqual(1);
-    // A narrative the engine cannot honor and salvage cannot repair falls
-    // back safely.
+    // Exactly one retry, then the turn falls back safely.
+    expect(logger.store.byEvent("render_failed")).toHaveLength(2);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    // History records the attempted action (single tickless entry per turn);
-    // the "Nothing changes." fallback narrative lives in the logs, not history.
-    expect(world.history[world.history.length - 1]!.text).toContain("Wave.");
     expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
+    // History records the attempted action as not-done (single tickless
+    // entry per turn); the "Nothing changes." fallback lives in the logs.
+    expect(world.history[world.history.length - 1]!.text).toContain("Wave.");
+    expect(world.history[world.history.length - 1]!.text).toContain("(not done)");
   });
 
   it("history appends a single tickless entry per turn", async () => {
@@ -92,29 +87,34 @@ describe("turn loop", () => {
     expect(world.history[0]!.text).not.toMatch(/^Tick \d+ - /);
   });
 
-  it("resolveWithValidation returns valid output without retry", async () => {
+  it("resolveRender returns prose without retry on clean turns", async () => {
     const logger = new Logger({ sessionId: "turn6", writeToFile: false });
     const deps = makeTestDeps(logger);
     const world = makeTinyWorld();
-    const result = await resolveWithValidation(
+    const { render, executed } = await resolveRender(
       world,
       { actorId: "u", text: "Wave." },
       deps,
     );
-    expect(result.narrative.length).toBeGreaterThan(0);
-    expect(logger.store.byEvent("validation_passed")).toHaveLength(1);
+    expect(render.narrative.length).toBeGreaterThan(0);
+    expect(executed.movement).toBeNull();
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(1);
+    expect(logger.store.byEvent("render_failed")).toHaveLength(0);
   });
 
-  it("retry logs parent action and validator logs success and failure", async () => {
+  it("prose failure retries once with feedback, then accepts", async () => {
     const logger = new Logger({ sessionId: "turn7", writeToFile: false });
     let calls = 0;
+    let sawFeedback = false;
     const flaky: ConsequenceEngine = {
-      async resolve(_world: World, action: Action): Promise<ConsequenceResult> {
+      async resolve(_world: World, action: Action, feedback?: string): Promise<ConsequenceResult> {
         calls++;
+        if (feedback !== undefined) sawFeedback = true;
         if (calls === 1) {
-          return { narrative: "bad", actorPatches: [{ actorId: "nope", x: 1, y: 1 }], objectPatches: [], reasoning: "bad" };
+          // Claims unexecuted locomotion — a render-contract violation.
+          return { narrative: "U walks to the door.", reasoning: "bad" };
         }
-        return { narrative: "good", actorPatches: [], objectPatches: [], reasoning: "ok" };
+        return { narrative: "U waves.", reasoning: "ok" };
       },
     };
     const deps = makeTestDeps(logger, {
@@ -122,9 +122,10 @@ describe("turn loop", () => {
       getUserAction: async () => "act",
     });
     await runTurn(makeTinyWorld(), deps);
-    expect(logger.store.byEvent("validation_failed")).toHaveLength(1);
-    expect(logger.store.byEvent("validation_passed")).toHaveLength(1);
-    expect(logger.store.byEvent("retry_started")).toHaveLength(1);
+    expect(calls).toBe(2);
+    expect(sawFeedback).toBe(true);
+    expect(logger.store.byEvent("render_failed")).toHaveLength(1);
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(1);
   });
 
   it("engine error paths: NPC proposal failure surfaces via throw", async () => {
@@ -142,5 +143,92 @@ describe("turn loop", () => {
     // the NPC turn hit the failing proposal engine.
     let world = await runTurn(makeTinyWorld(), deps);
     await expect(runTurn(world, deps)).rejects.toThrow("provider down");
+  });
+
+  it("ACCEPTANCE: 3-turn run stays within the per-turn call budget", async () => {
+    const logger = new Logger({ sessionId: "accept_calls", writeToFile: false });
+    // Provider-call counting wrapper: every engine call is one provider call.
+    const callsByTick = new Map<number, { proposal: number; selection: number; consequence: number }>();
+    const bucket = (tick: number) => {
+      let b = callsByTick.get(tick);
+      if (!b) {
+        b = { proposal: 0, selection: 0, consequence: 0 };
+        callsByTick.set(tick, b);
+      }
+      return b;
+    };
+    const counting = <T extends { propose?: unknown; select?: unknown; resolve?: unknown }>(
+      engine: T,
+      kind: "proposal" | "selection" | "consequence",
+      method: "propose" | "select" | "resolve",
+    ): T => {
+      const orig = (engine as Record<string, (...a: never[]) => Promise<unknown>>)[method]!.bind(engine);
+      (engine as Record<string, unknown>)[method] = async (...args: never[]) => {
+        const world = args[0] as World;
+        bucket(world.tick)[kind]++;
+        return orig(...args);
+      };
+      return engine;
+    };
+    const deps = makeTestDeps(logger, {
+      proposalEngine: counting(new MockProposalEngine(logger), "proposal", "propose"),
+      selectionEngine: counting(new MockSelectionEngine(logger), "selection", "select"),
+      consequenceEngine: counting(
+        new MockConsequenceEngine(logger, {
+          "wave at n.": { narrative: "U waves at N.", thoughts: "Friendly.", reasoning: "r" },
+          "say hi.": { narrative: "U says hi.", thoughts: "Polite.", reasoning: "r" },
+        }),
+        "consequence",
+        "resolve",
+      ),
+      getUserAction: async () => "Wave at N.",
+    });
+    let world = makeTinyWorld();
+    for (let i = 0; i < 3; i++) world = await runTurn(world, deps);
+
+    expect(callsByTick.size).toBe(3);
+    for (const [tick, counts] of callsByTick) {
+      const total = counts.proposal + counts.selection + counts.consequence;
+      // Turn = proposal → selection → execute (engine, 0 calls) → render
+      // (LLM). Clean turns cost at most proposal + selection + render.
+      expect(total, `tick ${tick}`).toBeLessThanOrEqual(4);
+      // The render engine is exactly 1 call on clean turns (no retry loop).
+      expect(counts.consequence, `tick ${tick}`).toBe(1);
+    }
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(3);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+  });
+
+  it("ACCEPTANCE: garbage old-schema patches in a render response are ignored, turn stays clean", async () => {
+    const logger = new Logger({ sessionId: "accept_garbage", writeToFile: false });
+    // A render engine stuck on the pre-Phase-4 schema: prose plus garbage
+    // actorPatches/objectPatches/effects. The schema strips the unknown
+    // keys; the engine never validates them.
+    const garbageEngine: ConsequenceEngine = {
+      async resolve(): Promise<ConsequenceResult> {
+        return {
+          narrative: "U waves at N.",
+          thoughts: "Friendly.",
+          reasoning: "r",
+          actorPatches: [{ actorId: "u", x: 999, y: 999, emotion: "evil" }],
+          objectPatches: [{ objectId: "ghost", description: "x" }],
+          effects: { moved: true, spoke: false },
+        } as unknown as ConsequenceResult;
+      },
+    };
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: garbageEngine,
+      getUserAction: async () => "Wave at N.",
+    });
+    const world = makeTinyWorld();
+    const next = await runTurn(world, deps);
+    // Turn is clean: exactly one render call, accepted on attempt 1.
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(1);
+    expect(logger.store.byEvent("render_failed")).toHaveLength(0);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+    // The garbage patches changed nothing: no teleport, no emotion change.
+    const u = next.actors.find((a) => a.id === "u")!;
+    expect([u.x, u.y]).toEqual([1, 1]);
+    expect(next.history.at(-1)!.text).toBe("U: U waves at N.");
   });
 });
