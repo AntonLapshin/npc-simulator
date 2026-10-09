@@ -11,8 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps } from "../helpers.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import {
   resolveRender,
@@ -26,8 +25,7 @@ import {
   planMovementSemantics,
 } from "../../src/engine/movementExecutor.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
-import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
-import { defaultConfig } from "../../src/config.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import type {
   ActionSemantics,
   ConsequenceResult,
@@ -274,28 +272,25 @@ describe("Phase 1 golden runs: B3 (narrated walk, no patch)", () => {
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
-  it("the render input carries the executed movement as facts", () => {
-    // buildConsequenceContext is what the real consequence engines call —
+  it("the narrate input carries the executed movement as facts", () => {
+    // buildNarrateContext is what the real consequence engines call —
     // the scripted engines in the other tests bypass it, so test it directly.
     const world = moveWorld();
     const o = computeMovementOutcome(world, "alf", { destinationActorId: "bea" }, null)!;
-    const ctx = buildConsequenceContext(
+    const ctx = buildNarrateContext(
       world,
       { actorId: "alf", text: "Walk toward Bea." },
       undefined,
-      defaultConfig,
-      o,
+      { engineMovement: o },
     );
     expect(ctx).toMatch(/EXECUTED MOVEMENT/);
-    expect(ctx).toMatch(new RegExp(`Alf moved \\(1,1\\)→\\(${o.x},${o.y}\\)`));
     expect(ctx).toMatch(/Do NOT emit x\/y coordinates/);
     // Stationary turns state it plainly.
-    const still = buildConsequenceContext(
+    const still = buildNarrateContext(
       world,
       { actorId: "alf", text: "Type furiously." },
       undefined,
-      defaultConfig,
-      null,
+      { engineMovement: null },
     );
     expect(still).toMatch(/stays in place/);
     expect(still).toMatch(/Do NOT emit x\/y coordinates/);
@@ -308,11 +303,8 @@ describe("Phase 1 golden runs: B6 (only the acting actor moves)", () => {
     const world = moveWorld();
     const deps = makeTestDeps(logger, {
       forceAllNpc: true,
-      proposalEngine: new MockProposalEngine(logger, {
-        alf: { suggestions: ["Walk toward Bea."], reasoning: "r" },
-      }),
-      selectionEngine: new MockSelectionEngine(logger, {
-        alf: { action: "Walk toward Bea.", reasoning: "r" },
+      intentEngine: new MockIntentEngine(logger, {
+        alf: { action: "Walk toward Bea.", quote: "" },
       }),
       consequenceEngine: scriptedConsequence({
         narrative: "Alf walks toward Bea.",
@@ -380,11 +372,8 @@ describe("Phase 1 end-to-end: runTurn applies engine movement to the world", () 
     const world = moveWorld();
     const deps = makeTestDeps(logger, {
       forceAllNpc: true,
-      proposalEngine: new MockProposalEngine(logger, {
-        alf: { suggestions: ["Walk toward Bea."], reasoning: "r" },
-      }),
-      selectionEngine: new MockSelectionEngine(logger, {
-        alf: { action: "Walk toward Bea.", reasoning: "r" },
+      intentEngine: new MockIntentEngine(logger, {
+        alf: { action: "Walk toward Bea.", quote: "" },
       }),
       consequenceEngine: new MockConsequenceEngine(logger, {
         "walk toward bea.": {

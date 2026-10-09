@@ -15,7 +15,6 @@ import {
 import { isFallbackConsequence, resolveRender } from "../../src/engine/turnOrchestrator.js";
 import { applyRenderResult, isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
 import {
-  buildProposalContext,
   detectIdentityLeak,
   findCoreRepeat,
   getOpenQuestions,
@@ -23,6 +22,7 @@ import {
   suggestionCore,
 } from "../../src/engine/contextBuilder.js";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
+import { buildIntentPrompt } from "../../src/llm/llmIntentEngine.js";
 import { Logger, createTestLogger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld, hist, errorText, triedHist } from "../helpers.js";
 import { NOT_DONE_SENTINEL } from "../../src/types.js";
@@ -284,10 +284,10 @@ describe("exp4-9 identity anchor (ticks 8/19)", () => {
     expect(detectIdentityLeak(world, "dana", "Nod and start explaining the first task.")).toBeUndefined();
   });
 
-  it("proposal context leads with the deciding actor's identity", () => {
+  it("intent prompt leads with the deciding actor's identity", () => {
     const world = antonWorld();
-    const ctx = buildProposalContext(world, "dana");
-    expect(ctx.indexOf("You are Dana (dana)")).toBeLessThan(ctx.indexOf("Current Actor"));
+    const ctx = buildIntentPrompt(world, "dana");
+    expect(ctx.indexOf("You are Dana (dana)")).toBeLessThan(ctx.indexOf("PHYSICAL FACTS"));
     expect(ctx).toContain("You are NOT");
   });
 });

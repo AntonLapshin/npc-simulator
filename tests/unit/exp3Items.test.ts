@@ -26,7 +26,6 @@ import {
 } from "../../src/engine/validate/narrative.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
 import { suggestionCore } from "../../src/engine/contextBuilder.js";
-import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
 import {
   fuzzyMatchObjectId,
   rankDestinationObjects,
@@ -109,7 +108,7 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
     expect(errors.some((e) => e.code === "narrative.identity_theft")).toBe(true);
   });
 
-  it("end-to-end: the corrupt prose never gets applied (retry, then fallback)", async () => {
+  it("end-to-end: the corrupt prose is flagged and marked (retry, then accept-and-mark)", async () => {
     const logger = createTestLogger();
     const world = antonWorld();
     const deps = makeTestDeps(logger, {
@@ -120,7 +119,10 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
     });
     const out = await resolveRender(world, action, deps);
-    expect(out.render.narrative).not.toMatch(/new hire/i);
+    // PLAN_V2 Phase 4: the flawed paragraph is accepted and marked honest —
+    // the identity-theft flag is what carries the honesty, not a rewrite.
+    expect(out.render.narrateAcceptedDespiteViolations).toBe(true);
+    expect(logger.store.byEvent("narrate_accepted_despite_violations")).toHaveLength(1);
   });
 
   it("rejects claiming another roster actor's name ('I'm Tanya' on Dana's turn)", () => {
@@ -297,26 +299,6 @@ describe("exp3 item 6 (S2): per-intent failure memory", () => {
     const world = antonWorld();
     expect(suggestionCore(world, "Push the chair in neatly.", "dana")).toBe("push|chair");
     expect(suggestionCore(world, "Shake Anton's hand warmly.", "tanya")).toBe("shake|anton");
-  });
-
-  it("consecutiveIntentFailures counts per-intent streaks from history", () => {
-    const world = antonWorld();
-    const tanya = world.actors.find((a) => a.id === "tanya")!;
-    const fail = (text: string): string =>
-      `${tanya.name} tried: ${text} (not done)${NOT_DONE_SENTINEL}`;
-    world.history.push(
-      { text: fail("Shake Anton's hand warmly."), tick: 1, turnIndex: 0 } as never,
-      { text: fail("Offer Anton a firm handshake."), tick: 2, turnIndex: 1 } as never,
-      // Interleaved other-actor turn does not break the streak.
-      { text: "Dana: Dana reviews resumes.", tick: 3, turnIndex: 2 } as never,
-      { text: fail("Push the chair in neatly."), tick: 4, turnIndex: 3 } as never,
-    );
-    expect(consecutiveIntentFailures(world, "tanya", "shake|anton")).toBe(2);
-    expect(consecutiveIntentFailures(world, "tanya", "push|chair")).toBe(1);
-    expect(consecutiveIntentFailures(world, "tanya", "greet|anton")).toBe(0);
-    // An applied own turn breaks the streak.
-    world.history.push({ text: "Tanya: Tanya walks to the lounge.", tick: 5, turnIndex: 4 } as never);
-    expect(consecutiveIntentFailures(world, "tanya", "shake|anton")).toBe(0);
   });
 });
 

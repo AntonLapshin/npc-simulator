@@ -9,7 +9,7 @@ import {
   resolveDestinationObjectId,
 } from "../../src/engine/deterministicSemantics.js";
 import { isQuoteGroundedInAction } from "../../src/core/speech.js";
-import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { applyRenderResult, describePosition } from "../../src/engine/patchApplier.js";
 import { resolveRender } from "../../src/engine/turnOrchestrator.js";
@@ -276,7 +276,7 @@ describe("exp6-6 throughput engineering", () => {
     } as NodeJS.ProcessEnv);
     expect(cfg.maxTokensByTask.consequence).toBe(2200);
     expect(cfg.maxTokensByTask.semantic).toBe(400);
-    expect(cfg.maxTokensByTask.proposal).toBeUndefined();
+    expect(cfg.maxTokensByTask.intent).toBeUndefined();
   });
 
   it("createProviderForTask applies the per-task token budget", () => {
@@ -390,7 +390,7 @@ describe("exp6-8 pipeline naming ban + object affordance nudge", () => {
     const action = { actorId: "anton", text: "Open the laptop and start typing." };
     const outcome = executeManipulation(world, action);
     expect(outcome).not.toBeNull();
-    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, outcome);
+    const ctx = buildNarrateContext(world, action, undefined, { engineManipulation: outcome });
     expect(ctx).toContain("EXECUTED MANIPULATION");
     expect(ctx).toContain("now holds the laptop");
     expect(ctx).not.toMatch(/INCOMPLETE without its patch/);
@@ -399,7 +399,7 @@ describe("exp6-8 pipeline naming ban + object affordance nudge", () => {
   it("consequence context states no manipulation for non-manipulation actions", () => {
     const world = antonWorld();
     const action = { actorId: "anton", text: "Walk to the door." };
-    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, null);
+    const ctx = buildNarrateContext(world, action, undefined, { engineManipulation: null });
     expect(ctx).toContain("EXECUTED MANIPULATION: none");
   });
 
