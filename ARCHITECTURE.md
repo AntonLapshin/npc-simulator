@@ -118,7 +118,14 @@ extraction, verbatim containment, deterministic reinsertion) under
 `src/engine/speechExecutor.ts` (turn pre-pass, render-contract facts,
 in-loop quote backstop); the old quote-repair logic in `turnSalvage.ts`
 delegates to it, and `validate/speech.ts`'s quote parser is consolidated
-onto the core (`parseActionQuotes`).
+onto the core (`parseActionQuotes`). Phase 3 adds `src/core/objects.ts`
+(the canonical affordance kind table, `planManipulation` — pick-up /
+put-down / hand-over planned as data from the action text — the shared
+verb ontology, and engine-output invariants) under
+`src/engine/manipulationExecutor.ts` (turn pre-pass, in-loop refresh on
+the merged contact, `applyEngineManipulation`); the prop-stub repair
+(`propStubForGroundingErrors`, `repairMissingPropStub`) is deleted —
+subsumed by the executor.
 
 ## Turn pipeline
 
@@ -157,6 +164,26 @@ onto the core (`parseActionQuotes`).
      frame, replacing an invented one — the exp-3 item 3 repair, made
      pure), burning no LLM retry; the `speech.exact_quote_missing`
      validator gate stays as the backstop for paths that bypass the loop.
+   - **Manipulation pre-pass (Phase 3)** — before the attempt loop,
+     `executeManipulation` (`manipulationExecutor.ts` →
+     `src/core/objects.ts`) plans the acting actor's pick-up / put-down /
+     hand-over deterministically from the action text and the affordance
+     table: pick-up needs empty hands and a pickable object of the kind
+     within `MANIPULATION_REACH = 4` cells (no thin-air props); put-down
+     needs a held prop and records a named in-reach surface; hand-over
+     needs a held prop, a recipient (contact or text mention — never
+     "shake hands"), adjacency ≤ 2.5 cells, and the recipient's hands
+     free. More than one manipulation kind in the text plans nothing
+     (single-manipulation contract — split across turns). Per attempt,
+     the plan is refreshed against the merged semantics' contact (a
+     newly-resolved contact re-plans; a guard-failing one drops the plan),
+     then `applyEngineManipulation` **strips every model-emitted
+     objectPatch and prop patch** (logged as `model_object_patch_ignored`)
+     and merges the engine outcome (acting actor always; hand-over
+     recipient too). The consequence input carries `EXECUTED
+     MANIPULATION` facts ("Dana picked up the laptop — Dana now holds
+     the laptop") so the render narrates what actually happened; the
+     prompt forbids emitting objectPatches or `prop`.
    - The semantic judge starts once per turn, concurrently with the first
      consequence call.
    - Up to `maxRetries+1` attempts (default 3+1), each raced against the
@@ -228,6 +255,31 @@ now a pure backstop rather than a repair path. Paraphrase is no longer an
 acceptable render of a quoted turn — the backstop appends the exact quote
 deterministically instead of burning a retry. Kills B1 (invented
 dialogue).
+
+**Object manipulation** (Phase 3 — engine-owned): the model never emits
+objectPatches or `prop` patches. `src/core/objects.ts` (pure) owns the
+canonical affordance kind table (`affordanceForObject` — pickable /
+propName / surface / container / brewSource, first match wins), the
+shared verb ontology (pick-up / put-down / hand-over verbs, use verbs
+that imply holding, the "shake hands" exclusion), `planManipulation`
+(the intended mutation as data — never mutates), `nearestKindObject`
+(deterministic tie-break by object id), `detectNarrativeManipulation`
+(transfer events only — stative holds and use verbs are not events), and
+`assertManipulationInvariants`. `src/engine/manipulationExecutor.ts`
+(orchestration) runs the turn pre-pass once, refreshes the plan against
+the merged contact in-loop, and merges via `applyEngineManipulation`;
+`src/engine/objects.ts` builds the immutable snapshot from the world.
+The manipulated scene object travels with its holder (pick-up → actor's
+cell, put-down → actor's feet, hand-over → recipient's cell). Grounding
+is one-directional: the engine may execute a transfer the narrative
+never names (fine), but narrative describing a transfer the engine did
+not execute fails validation (`object.phantom_manipulation`, tier-2
+salvageable — wording miss, not world corruption). The old prop-stub
+repair, the "model forgot the physical world" retry category, and the
+object/prop patch demands are deleted. Kills prop-stub retries and
+phantom props. Non-goals: multi-step crafting / container nesting
+(single manipulation per turn, documented); object *creation* (still
+model-narrated, engine-ignored).
 
 **LLM constraint ladder** (`src/llm/complete.ts`, `src/schemas.ts`):
 Zod strict schemas for proposal/selection; a lenient "repair" tier for
@@ -493,11 +545,11 @@ were delegated to the implementers by the repo owner.
 - **F1** — `moves = tokenMoves || merged.moves` in `actionSemantics.ts`: token evidence can assert movement but never downgrade a true merged verdict; disagreements still logged; the lying comment fixed.
 - **F2** — `ValidationResult.errors` is now `Array<{code, message}>` (~60 stable snake_case codes across the validator); salvage classifiers switch on codes, not prose.
 - **F3** — `repairMissingAddressee` now runs before the acting-actor-unpatched early return in `trySalvageConsequence`.
-- **F4** — object move/resize/toggle patches require the acting actor within `OBJECT_INTERACT_RADIUS = 4` cells of the object center; description-only patches exempt.
+- **F4** — object move/resize/toggle patches require the acting actor within `OBJECT_INTERACT_RADIUS = 4` cells of the object center; description-only patches exempt. Phase 3 goes further: the model emits no object/prop patches at all — the engine executes pick-up/put-down/hand-over from affordances with proximity (4 cells), hand-over adjacency (2.5 cells), and free-hands guards; `object.phantom_manipulation` polices narrative fiction.
 - **F5** — validator rejects `goal` patches on non-acting actors (`turn_discipline.observer_goal_rewrite`); own-goal updates allowed.
 - **F6** — history entries are `{ text, perceivers }`; perceivers computed at apply time via spatial perception; `contextBuilder` filters history and the open-question scan to what the actor perceived or authored; legacy string saves normalize to globally-perceived.
 - **F7** — `EngineConfig` threaded through `contextBuilder`/`perceptionHelpers` (`cfg` param, `defaultConfig` default); `runTurn` passes the injected config. No silent default reads on the hot path.
-- **F8** — scenarios accept optional `vocabulary: { objectNouns?: string[] }` (loader-validated, schema-accepted); validators use it with office fallbacks; `office.json` / `office-anton.json` untouched.
+- **F8** — scenarios accept optional `vocabulary: { objectNouns?: string[] }` (loader-validated, schema-accepted); validators use it with office fallbacks; `office.json` / `office-anton.json` untouched. Phase 3 consolidates the manipulation ontology into one canonical kind table (`OBJECT_KIND_AFFORDANCES` in `src/core/objects.ts`) shared by the planner, the validator's phantom gate, and the executor — still hardcoded (not vocabulary-driven), but no longer triplicated.
 - **F9** — resolved by F1; narrative movement grounding unchanged (narrative must match semantics).
 - **F10** — destination cell occupied by another actor rejected (`movement.actor_collision`).
 - **F11** — `completeJson` retries with exponential backoff + jitter (`min(1000·2^attempt, 8000)ms`); 429 honors `Retry-After`, capped at 30s.
@@ -531,4 +583,4 @@ were delegated to the implementers by the repo owner.
 - **Q4** — decided: `tick` documented in `src/types.ts` as a world-global turn counter.
 - **Q5** — decided by F1 (token asserts, never downgrades).
 - **Q6** — decided by F4 (proximity/permission model for objects).
-- **Q7** — decided: strengthened `buildObjectAffordanceNudge` (STRONG/SOFT tiers + PHYSICAL REACH rule) plus object-interaction guidance in the proposal prompt.
+- **Q7** — decided: strengthened `buildObjectAffordanceNudge` (STRONG/SOFT tiers + PHYSICAL REACH rule) plus object-interaction guidance in the proposal prompt. Phase 3 deletes the nudge entirely: the engine plans manipulation from the action text, so the prompt no longer teaches the patch convention.

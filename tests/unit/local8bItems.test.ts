@@ -39,6 +39,10 @@ import { hasOwnUtterance, maskReportedSpeech } from "../../src/engine/validate/s
 import { extractDirectionHint } from "../../src/core/text.js";
 import { computeMovementOutcome, suggestStep } from "../../src/core/movement.js";
 import { resolveNamedDestination } from "../../src/engine/textHints.js";
+import {
+  applyEngineManipulation,
+  executeManipulation,
+} from "../../src/engine/manipulationExecutor.js";
 import { resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -233,13 +237,15 @@ describe("C3 deterministic memory append", () => {
 // ---------------------------------------------------------------------------
 // Items C4/C11: prop auto-hints + deterministic prop stubs + scenario props.
 // ---------------------------------------------------------------------------
-describe("C4/C11 prop support", () => {
-  it("consequenceSuffix carries prop auto-hint examples", () => {
+describe("C4/C11 prop support (Phase 3: engine-owned)", () => {
+  it("consequenceSuffix states engine-owned manipulation, not prop auto-hints", () => {
     for (const mode of ["short", "full"] as const) {
       const s = consequenceSuffix(mode, ["ana"]);
-      expect(s).toContain("PROP AUTO-HINTS");
-      expect(s).toContain('prop:"laptop"');
-      expect(s).toContain('prop:"cup"');
+      // Phase 3: the model never emits prop/object patches — the suffix
+      // says so instead of teaching the patch convention.
+      expect(s).not.toContain("PROP AUTO-HINTS");
+      expect(s).toContain("MANIPULATION IS ENGINE-OWNED");
+      expect(s).toContain("EXECUTED MANIPULATION");
     }
   });
 
@@ -279,75 +285,58 @@ describe("C4/C11 prop support", () => {
     return world;
   }
 
-  it("salvage stubs prop:laptop for typing near a laptop", () => {
+  it("executor (not salvage) plans prop:laptop for typing near a laptop", () => {
     const world = typingWorld();
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "n", text: "Sit down and type on the laptop." },
+    const outcome = executeManipulation(world, { actorId: "n", text: "Sit down and type on the laptop." });
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.kind).toBe("pick-up");
+    expect(outcome!.plan.propName).toBe("laptop");
+    const merged = applyEngineManipulation(
       {
         narrative: "N types on the laptop.",
         actorPatches: [{ actorId: "n", pose: "sit", thoughts: "Working." }],
         objectPatches: [],
         reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
+      } satisfies ConsequenceResult,
+      outcome,
     );
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.prop).toBe("laptop");
-    expect(out!.warnings).toEqual([]);
+    expect(merged.actorPatches.find((x) => x.actorId === "n")!.prop).toBe("laptop");
   });
 
-  it("salvage stubs prop:cup for grab+mug near a mug", () => {
+  it("executor plans prop:cup for grab+mug near a mug", () => {
     const world = makeTinyWorld();
     world.scene.objects.push({
       id: "n_mug", name: "N's mug", description: "A mug.",
       x: 4, y: 5, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
     });
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "n", text: "Grab the mug from the desk." },
-      {
-        narrative: "N grabs the mug.",
-        actorPatches: [{ actorId: "n", thoughts: "Coffee time." }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
-    );
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.prop).toBe("cup");
+    const outcome = executeManipulation(world, { actorId: "n", text: "Grab the mug from the desk." });
+    expect(outcome).not.toBeNull();
+    expect(outcome!.plan.propName).toBe("cup");
+    expect(outcome!.actorProps).toEqual([{ actorId: "n", prop: "cup" }]);
   });
 
-  it("no stub when no matching object is within 4 cells", () => {
+  it("no invention when no matching object is within 4 cells", () => {
     const world = makeTinyWorld();
     world.scene.objects.push({
       id: "far_laptop", name: "Far laptop", description: "A laptop.",
       x: 0, y: 0, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
     });
-    // n is at (4,4); the laptop is >4 cells away — no invention.
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "n", text: "Type on the laptop." },
-      {
-        narrative: "N types on the laptop.",
-        actorPatches: [{ actorId: "n", thoughts: "Working." }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
-    );
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.prop).toBeUndefined();
-    // The wording miss downgrades to a warning instead (tier-2 behavior).
-    expect(out!.warnings.some((w) => w.code === "object_grounding.sip_no_prop")).toBe(true);
+    // n is at (4,4); the laptop is >4 cells away — no thin-air props.
+    expect(
+      executeManipulation(world, { actorId: "n", text: "Type on the laptop." }),
+    ).toBeNull();
   });
 
-  it("no stub when the actor already holds something", () => {
+  it("no double-hold: typing while holding a cup plans nothing", () => {
     const world = typingWorld();
     world.actors.find((a) => a.id === "n")!.prop = "cup";
+    expect(
+      executeManipulation(world, { actorId: "n", text: "Type on the laptop." }),
+    ).toBeNull();
+  });
+
+  it("salvage never invents props — the executor owns them", () => {
+    const world = typingWorld();
     const out = trySalvageConsequence(
       world,
       { actorId: "n", text: "Type on the laptop." },
@@ -361,7 +350,8 @@ describe("C4/C11 prop support", () => {
       createTestLogger(),
     );
     expect(out).not.toBeNull();
-    // No prop override — already holding the cup.
+    // No prop stub: the executor (in-loop, before validation) is the only
+    // prop source. Salvage keeps patches, it never invents them.
     expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.prop).toBeUndefined();
   });
 });
