@@ -143,7 +143,10 @@ describe("exp2 #8 (S5): facing is not locomotion", () => {
       action("I walk to Dan."),
       llmMovesSemantics(),
     );
-    expect(errorText(errors)).toContain("movement.no_position_change");
+    // Phase 1: movement.no_position_change is deleted (impossible by
+    // construction — the engine always moves); unpatched locomotion is
+    // "declared without patch".
+    expect(errorText(errors)).toContain("movement.declared_without_patch");
   });
 
   it("'sit down on the chair' keeps sit handling (no exemption)", () => {

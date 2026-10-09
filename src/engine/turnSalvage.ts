@@ -2,10 +2,12 @@
 //
 // When a consequence fails validation, these functions decide whether part
 // of the turn can still advance instead of falling back to "Nothing
-// changes.": deterministic movement repair, addressee-reaction repair,
-// speech-nit downgrading (tier 1), degraded wording salvage (tier 2), and
-// the "valid-JSON-at-all-costs" format-collapse tier. Pure logic except for
-// the honest-history note bookkeeping (see getHonestHistoryNote).
+// changes.": addressee-reaction repair, speech-nit downgrading (tier 1),
+// degraded wording salvage (tier 2), and the "valid-JSON-at-all-costs"
+// format-collapse tier. Phase 1: movement is engine-owned, so salvage
+// candidates already carry the engine-computed position — there is no
+// movement-repair tier anymore. Pure logic except for the honest-history
+// note bookkeeping (see getHonestHistoryNote).
 
 import type {
   Action,
@@ -26,17 +28,6 @@ import {
   validateObserverSubject,
 } from "./validate/narrative.js";
 import { OBJECT_INTERACT_RADIUS } from "./validate/objects.js";
-import {
-  clampMoveToCap,
-  isClampableMovementFailure,
-  stepTowardPoint,
-  suggestMoveTarget,
-} from "./movementAssist.js";
-import {
-  effectiveRepairTarget,
-  vetoAwayFromTarget,
-  type NamedDestination,
-} from "./textHints.js";
 import { getAudibleActors, getVisibleActors } from "./perceptionHelpers.js";
 import {
   hasSpeechToken,
@@ -140,118 +131,6 @@ export function plainLanguageNote(warnings: ValidationError[]): string {
   }
   return phrases.length > 0 ? `partial — ${phrases.join("; ")}` : "partial";
 }
-/**
- * Deterministic movement repair for the salvage path (Phase 4): fill in (or
- * fix) the acting actor's x/y with a computed reachable position, mirroring
- * the retry-loop repair. Returns a repaired clone, or null when no valid
- * suggestion exists. Never touches prose — the caller revalidates and only
- * accepts the repair when the movement gate (and everything except
- * speech-rendering nits) passes.
- */
-function applySalvageMovementRepair(
-  world: World,
-  action: Action,
-  candidate: ConsequenceResult,
-  semantics: ActionSemantics,
-): ConsequenceResult | null {
-  if (!semantics.moves) return null;
-  // Exp-4 item 1: prefer the model's own claimed direction clamped to the
-  // cap (a 13-cell jump becomes a 6-cell step the same way) over a fresh
-  // suggestion; fall back to the destination-directed suggestion when the
-  // candidate claims no usable position.
-  const claimed = candidate.actorPatches.find((p) => p.actorId === action.actorId);
-  // Item C7 (S1): the action text steers the suggestion — "walk east" and
-  // "walk toward Ana" must not repair westward when no destination was
-  // declared.
-  let suggestion =
-    claimed?.x !== undefined && claimed?.y !== undefined
-      ? (clampMoveToCap(world, action.actorId, claimed.x, claimed.y) ??
-        suggestMoveTarget(
-          world,
-          action.actorId,
-          semantics.destinationActorId,
-          semantics.destinationObjectId,
-          action.text,
-        ))
-      : suggestMoveTarget(
-          world,
-          action.actorId,
-          semantics.destinationActorId,
-          semantics.destinationObjectId,
-          action.text,
-        );
-  // Exp-3 item 7 (S5, A3): veto a repair that steps AWAY from the
-  // narrative's named approach target — a wrong-direction repair is worse
-  // than no repair (the turn falls through to fallback instead).
-  //
-  // Exp-4 item 5 (S2): re-steer instead of giving up — a capped step
-  // TOWARD the narrative's named target keeps the salvage honest AND
-  // moving. Null only when no legal toward-step exists.
-  //
-  // Exp-5 item 6 (S2, tick-15 repro): vet and re-steer against the
-  // EFFECTIVE target — the judge's resolved destination when present,
-  // else the narrative's. The movement gates enforce the judge's
-  // semantics; trusting corrupt narrative prose over them vetoed good
-  // repairs.
-  let resteeredTarget: NamedDestination | null = null;
-  if (suggestion) {
-    const effTarget = effectiveRepairTarget(
-      world,
-      action.actorId,
-      candidate.narrative,
-      semantics,
-    );
-    const vetted =
-      effTarget !== null
-        ? vetoAwayFromTarget(world, action.actorId, suggestion, effTarget)
-        : suggestion;
-    if (!vetted) {
-      const resteered =
-        effTarget !== null
-          ? stepTowardPoint(world, action.actorId, effTarget.x, effTarget.y)
-          : null;
-      if (!resteered || effTarget === null) return null;
-      resteeredTarget = { kind: effTarget.kind, id: effTarget.id };
-      suggestion = resteered;
-    } else {
-      suggestion = vetted;
-    }
-  }
-  if (!suggestion) return null;
-  const repaired: ConsequenceResult = structuredClone(candidate);
-  const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
-  if (existing) {
-    existing.x = suggestion.x;
-    existing.y = suggestion.y;
-  } else {
-    repaired.actorPatches.push({
-      actorId: action.actorId,
-      x: suggestion.x,
-      y: suggestion.y,
-    });
-  }
-  if (repaired.effects) {
-    repaired.effects.moved = true;
-    // Exp-4 item 5 (S2): a re-steered repair declares the narrative's
-    // target, matching what the prose claims.
-    const effDestActorId =
-      resteeredTarget?.kind === "actor"
-        ? resteeredTarget.id
-        : semantics.destinationActorId;
-    const effDestObjectId =
-      resteeredTarget?.kind === "object"
-        ? resteeredTarget.id
-        : semantics.destinationObjectId;
-    if (effDestActorId !== undefined) {
-      repaired.effects.destinationActorId = effDestActorId;
-    }
-    if (effDestObjectId !== undefined) {
-      repaired.effects.destinationObjectId = effDestObjectId;
-    }
-  }
-  return repaired;
-}
-
 /**
  * F25: shared perceiver check — does `perceiverId` perceive the acting
  * actor's event (see/hear/adjacent)? Mirrors the validator's perceiver
@@ -635,9 +514,10 @@ export function trySalvageConsequence(
   }
   // Salvage preserves real effects: the acting actor must remain patched —
   // otherwise the turn's only content was hallucinated (e.g. a lone `ghost`
-  // patch) and an emptied husk is no better than the fallback. The one
-  // exception is a locomotion turn whose movement can be deterministically
-  // repaired below (same repair the retry loop applies).
+  // patch) and an emptied husk is no better than the fallback. Phase 1:
+  // locomotion turns always carry the engine-computed position patch
+  // (merged before validation), so the only unpatched-actor case left is
+  // non-movement turns.
   //
   // F3: the addressee repair runs BEFORE this early return. It exists
   // precisely for speech-only turns whose consequence left the addressee
@@ -702,34 +582,16 @@ export function trySalvageConsequence(
     evaluate(true, "valid patches kept (speech nits downgraded to warnings)");
     return withHonestNote(stripped);
   }
-  // Phase 4 "(or movement-repair them)": the turn implies locomotion but the
-  // position is missing or invalid — fill it deterministically (Exp-4 item
-  // 1: claimed over-cap jumps clamp to a partial step, not just fresh
-  // suggestions) and accept only if the full gate (or speech-only) passes
-  // on revalidation.
-  // Exp-5 item 1: tier-2 fallback below widens the accept to speech/object
-  // wording misses, so a repaired movement is no longer discarded for a
-  // dropped quote or a missing pour patch.
-  let movementBase: ConsequenceResult | null = null;
-  if (semantics.moves) {
-    const repaired = applySalvageMovementRepair(world, action, candidate, semantics);
-    if (repaired) {
-      movementBase = repaired;
-      const repairedOut = accept(repaired);
-      if (repairedOut) {
-        evaluate(true, "movement repaired (clamped/suggested) with valid patches kept");
-        return withHonestNote(repairedOut);
-      }
-    } else {
-      return evaluate(false, "locomotion implied but no valid capped step exists (surroundings blocked)");
-    }
-  }
+  // Phase 1: movement is engine-owned — salvage candidates already carry
+  // the engine-computed position (merged into the consequence before
+  // validation), so the old movement-repair tier is gone. The ladder
+  // continues with the addressee/prop repairs below.
   // Exp-5 item 1, tier 2 (degraded-but-advancing): repair the missing
-  // addressee reaction deterministically, then accept clampable movement +
+  // addressee reaction deterministically, then accept engine movement +
   // thoughts even when speech/object wording misses remain — logged as
-  // warnings, not fatal. Physics, direction/progress, contact adjacency,
-  // and observer discipline stay hard.
-  const tierBase = movementBase ?? candidate;
+  // warnings, not fatal. Physics, direction, contact adjacency, and
+  // observer discipline stay hard.
+  const tierBase = candidate;
   const withAddressee = repairMissingAddressee(world, action, tierBase, semantics, cfg);
   const propBase = withAddressee ?? tierBase;
   // Items C4/C11 (S6): deterministic prop stubs (typing→prop:laptop,
@@ -768,22 +630,13 @@ export function trySalvageConsequence(
   if (tierGateErrors.length === 0 && isTier2Salvageable(revalidation.errors)) {
     evaluate(
       true,
-      "tier-2 degraded: clampable movement + thoughts kept, speech/object wording logged as warnings",
+      "tier-2 degraded: engine movement + thoughts kept, speech/object wording logged as warnings",
     );
     return withHonestNote({ salvaged: tiered, warnings: revalidation.errors });
   }
-  if (semantics.moves) {
-    return evaluate(
-      false,
-      "movement repaired but hard gates still fail (physics/direction/contact/observer-discipline stay hard; tier-2 covers speech/object wording only)",
-      revalidation.errors,
-    );
-  }
   return evaluate(
     false,
-    isClampableMovementFailure(revalidation.errors)
-      ? "clampable movement present but repair produced no valid step"
-      : "hard gates fail (physics/contact/addressee/observer/object — tier-2 covers speech/object wording only)",
+    "hard gates fail (physics/movement/contact/addressee/observer/object — tier-2 covers speech/object wording only)",
     revalidation.errors,
   );
 }

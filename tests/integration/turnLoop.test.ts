@@ -51,29 +51,35 @@ describe("turn loop", () => {
     expect(world.history.map((e) => e.text).join("\n")).toContain("N:");
   });
 
-  it("invalid consequence retries with feedback then falls back safely", async () => {
+  it("invalid consequence retries with feedback then salvages safely", async () => {
     const logger = new Logger({ sessionId: "turn4", writeToFile: false });
+    // Phase 1: model coordinates are stripped before validation, so an
+    // out-of-bounds patch is no longer invalid. An invalid consequence is
+    // one whose narrative the engine cannot honor — here the narrative
+    // claims a walk the action never intends (no engine movement runs).
     const bad: ConsequenceResult = {
-      narrative: "Teleport!",
+      narrative: "U walks to the door.",
       actorPatches: [{ actorId: "u", x: 999, y: 999 }],
       objectPatches: [],
       reasoning: "bad",
     };
     const consequenceEngine = new MockConsequenceEngine(logger, {
-      "user does something.": bad,
+      "wave.": bad,
     });
     const deps = makeTestDeps(logger, {
       consequenceEngine,
-      getUserAction: async () => "User does something.",
+      getUserAction: async () => "Wave.",
       config: { ...(makeTestDeps(logger).config!), maxRetries: 1, autosaveEnabled: false },
     });
     const world = await runTurn(makeTinyWorld(), deps);
     expect(logger.store.byEvent("validation_failed").length).toBeGreaterThanOrEqual(1);
     expect(logger.store.byEvent("retry_started").length).toBeGreaterThanOrEqual(1);
+    // A narrative the engine cannot honor and salvage cannot repair falls
+    // back safely.
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
     // History records the attempted action (single tickless entry per turn);
     // the "Nothing changes." fallback narrative lives in the logs, not history.
-    expect(world.history[world.history.length - 1]!.text).toContain("User does something.");
+    expect(world.history[world.history.length - 1]!.text).toContain("Wave.");
     expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
   });
 

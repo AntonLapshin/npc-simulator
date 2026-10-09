@@ -143,8 +143,10 @@ describe("golden office scenario", () => {
     const ana = byId["ana"]!;
     const dan = byId["dan"]!;
 
-    // Final actor positions.
-    expect([ana.x, ana.y]).toEqual([3, 9]);
+    // Final actor positions. Phase 1: Ana's mock emits (3,9), but the model
+    // never emits coordinates — the engine computes the optimal step toward
+    // Jeff (8,8)→(3,10), strictly closer to Jeff than the model's (3,9).
+    expect([ana.x, ana.y]).toEqual([3, 10]);
     expect([jeff.x, jeff.y]).toEqual([1, 10]);
     expect([dan.x, dan.y]).toEqual([15, 8]);
 

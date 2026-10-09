@@ -5,7 +5,8 @@ import { validateConsequence } from "../../src/engine/physicalValidator.js";
 import { resolveDestinationObjectId } from "../../src/engine/deterministicSemantics.js";
 import {
   MAX_STEP_DISTANCE,
-} from "../../src/engine/movementAssist.js";
+} from "../../src/core/movement.js";
+import { computeMovementOutcome } from "../../src/core/movement.js";
 import {
   consecutiveFallbacks,
   getHonestHistoryNote,
@@ -215,38 +216,45 @@ describe("exp5-1 tier-2 salvage (ticks 6/9/12/18)", () => {
     ).toBe(false);
   });
 
-  it("tick-6 shape: over-cap walk + sit + question salvages clamped movement with warnings", () => {
+  it("tick-6 shape: engine movement + sit + question salvages with warnings", () => {
     const world = antonWorldWithProps();
     world.actors.find((a) => a.id === "anton")!.x = 16;
     world.actors.find((a) => a.id === "anton")!.y = 2;
     const logger = createTestLogger();
-    // Over-cap claim toward Tanya (9.4 cells) + sit wording + dropped question.
+    const semantics = {
+      moves: true,
+      destinationActorId: "tanya",
+      speaks: true,
+      quotedSpeech: ["Is this my spot?"],
+      addresseeActorId: "tanya",
+    };
+    // Phase 1: the orchestrator merges the engine-computed step before
+    // salvage runs — salvage keeps it (the old clamp-repair tier is
+    // deleted; salvage never fabricates coordinates).
+    const engine = computeMovementOutcome(world, "anton", { destinationActorId: "tanya" }, null)!;
     const out = trySalvageConsequence(
       world,
       { actorId: "anton", text: 'Walk to Tanya, sit, and ask "Is this my spot?"' },
       {
+        // Over-cap model claim replaced by the engine step; quote dropped.
         narrative: "Anton walks toward Tanya.",
-        actorPatches: [{ actorId: "anton", x: 5, y: 5, thoughts: "Going." }],
+        actorPatches: [{ actorId: "anton", x: engine.x, y: engine.y, thoughts: "Going." }],
         objectPatches: [],
         reasoning: "r",
       },
-      {
-        moves: true,
-        destinationActorId: "tanya",
-        speaks: true,
-        quotedSpeech: ["Is this my spot?"],
-        addresseeActorId: "tanya",
-      },
+      semantics,
       logger,
     );
     expect(out).not.toBeNull();
     const moved = out!.salvaged.actorPatches.find((p) => p.actorId === "anton")!;
+    expect(moved.x).toBe(engine.x);
+    expect(moved.y).toBe(engine.y);
     expect(Math.hypot(moved.x! - 16, moved.y! - 2)).toBeLessThanOrEqual(
       MAX_STEP_DISTANCE + 1e-9,
     );
     // Addressee reaction repaired deterministically; speech/object wording warned.
     expect(out!.salvaged.actorPatches.some((p) => p.actorId === "tanya")).toBe(true);
-    expect(errorText(out!.warnings)).toMatch(/exact words|says to sit|keeps no question/);
+    expect(errorText(out!.warnings)).toMatch(/exact words|keeps no question/);
     expect(getHonestHistoryNote(out!.salvaged)).toMatch(/partial/);
   });
 
@@ -330,7 +338,10 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
     const partialLog = logger.store.byEvent("partial_applied");
     expect(partialLog).toHaveLength(1);
     expect(JSON.stringify(partialLog[0])).toContain("salvage.quote_reinserted");
-    expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
+    // Phase 1: the scripted (2,2) is ignored — the engine computes the step.
+    const engine = computeMovementOutcome(makeTinyWorld(), "u", {}, null)!;
+    expect(next.actors.find((a) => a.id === "u")!.x).toBe(engine.x);
+    expect(next.actors.find((a) => a.id === "u")!.y).toBe(engine.y);
     // …and because the question is kept, it stays open for N.
     expect(getOpenQuestions(next, "n").length).toBe(1);
   });

@@ -68,7 +68,7 @@ export const FULLY_SPOKEN_ACTION_LINE =
 const LEGACY_SPEECH_EXAMPLE =
   "Example: {\"narrative\": \"Anton says, \\\"Morning, everyone — first day, be gentle.\\\", waving as he steps inside.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Hope they like me.\"}], \"objectPatches\": [], \"effects\": {\"moved\": false, \"spoke\": true, \"quotedSpeech\": [\"Morning, everyone — first day, be gentle.\"]}, \"reasoning\": \"Spoken greeting quoted verbatim.\"}";
 const LEGACY_MOVEMENT_EXAMPLE =
-  "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"x\": 5, \"y\": 8, \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya.\"}";
+  "Movement example: {\"narrative\": \"Anton walks toward Tanya.\", \"actorPatches\": [{\"actorId\": \"anton\", \"thoughts\": \"Trying to make a good impression.\"}], \"objectPatches\": [], \"effects\": {\"moved\": true, \"destinationActorId\": \"tanya\", \"spoke\": false, \"quotedSpeech\": []}, \"reasoning\": \"Anton moves closer to Tanya (movement is executed by the engine — no coordinates emitted).\"}";
 
 /**
  * Exp-2 item 1: positive examples built from real roster actors (see
@@ -126,9 +126,9 @@ export const STUB_BAN_LINE = stubBanLine();
 function movementExample(a: { id: string; name: string }, b: { id: string; name: string }): string {
   return (
     `Movement example: {"narrative": "${a.name} walks toward ${b.name}.", ` +
-    `"actorPatches": [{"actorId": "${a.id}", "x": 5, "y": 8, "thoughts": "Trying to make a good impression."}], ` +
+    `"actorPatches": [{"actorId": "${a.id}", "thoughts": "Trying to make a good impression."}], ` +
     `"objectPatches": [], "effects": {"moved": true, "destinationActorId": "${b.id}", "spoke": false, "quotedSpeech": []}, ` +
-    `"reasoning": "${a.name} moves closer to ${b.name}."}`
+    `"reasoning": "${a.name} moves closer to ${b.name} (movement is executed by the engine — no coordinates emitted)."}`
   );
 }
 
@@ -207,7 +207,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       "FIELD RULES (must follow exactly, or the output is rejected):",
       "actorPatches MUST be a real JSON array of objects with \"actorId\" (never \"id\"); objectPatches a real array with \"objectId\" (never \"id\"). Do NOT nest objectPatches inside actorPatches.",
       "\"reasoning\" is REQUIRED (never omit it).",
-      "EFFECTS: \"moved\" true ONLY for the acting actor's own whole-body locomotion (a position change — never for looking, glancing, asking, sipping, reviewing, typing); emit x,y IFF moved, strictly closer to any named person/landmark, at most 6 cells per turn, never inside furniture. \"spoke\" true when words are uttered; \"quotedSpeech\" copies action-text quotes character-for-character (never invent quotes). Set destination/addressee/contact ids to exact roster/landmark ids.",
+      "EFFECTS: \"moved\" true ONLY for the acting actor's own whole-body locomotion (a position change — never for looking, glancing, asking, sipping, reviewing, typing); \"spoke\" true when words are uttered; \"quotedSpeech\" copies action-text quotes character-for-character (never invent quotes). Set destination/addressee/contact ids to exact roster/landmark ids.",
+      "MOVEMENT IS ENGINE-EXECUTED: do NOT emit x/y coordinates for any actor — the engine moves the acting actor from the action text (see EXECUTED MOVEMENT in the context) and any coordinates you emit are ignored. Narrate the executed movement honestly; never describe a walk the EXECUTED MOVEMENT section doesn't show.",
       "Handshake/hug/hand-over sets contactActorId and ends adjacent (within 2.5 cells). Sit/stand sets pose. Pick up/hold/open/boot sets prop and/or objectPatches. Omitting the verb from the narrative never excuses omitting the patch.",
       "IDENTITY: act out ONLY the acting actor's role — never another character's job, pronouns, or skills.",
       "ROSTER: only the listed actors exist — never invent anyone; treat colleagues as known hired coworkers, never strangers/candidates.",
@@ -260,15 +261,13 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "EFFECTS RULE: declare what the action does in \"effects\" (machine-readable, alongside the narrative).",
     "\"moved\" is true ONLY when the acting actor's own whole-body locomotion occurs (a position change);",
     "false for in-place gestures, someone else's motion, resuming a task, or metaphor.",
-    "Emit x and y for the acting actor IFF \"moved\" is true, with a NEW reachable position reflecting that",
-    "movement (inside scene bounds, not inside a non-passable object, with a valid path from the current",
-    "position). Never stand INSIDE a desk/table rect — stand NEXT to it.",
-    "Do NOT describe movement in the narrative without also emitting the x,y change.",
-    "If the action names another actor, the new position MUST be strictly closer to that actor than the",
-    "current position, and \"destinationActorId\" MUST be that actor's exact id.",
-    "If the action names a landmark (desk, coffee machine, door, chair), the new position MUST be strictly",
-    "closer to that object's rectangle than the current position, and \"destinationObjectId\" MUST be its",
-    "exact id. Never teleport to an unrelated area or move away from the named target.",
+    "MOVEMENT IS ENGINE-EXECUTED: never emit x/y coordinates for any actor — the engine moves the acting",
+    "actor from the action text (see EXECUTED MOVEMENT in the context) and any coordinates you emit are",
+    "ignored. Narrate the executed movement honestly; never describe a walk the EXECUTED MOVEMENT section",
+    "doesn't show.",
+    "If the action names another actor, \"destinationActorId\" MUST be that actor's exact id.",
+    "If the action names a landmark (desk, coffee machine, door, chair), \"destinationObjectId\" MUST be its",
+    "exact id.",
     "\"contactActorId\" MUST be the exact roster id when the action shakes hands, hugs, high-fives, pats,",
     "kisses, or hands/passes/gives something to someone — and the acting actor MUST end adjacent (within",
     "2.5 cells) to that person.",

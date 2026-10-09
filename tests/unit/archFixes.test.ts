@@ -3,7 +3,8 @@
 import { describe, expect, it } from "vitest";
 import { validateConsequence } from "../../src/engine/physicalValidator.js";
 import { OBJECT_INTERACT_RADIUS } from "../../src/engine/validate/objects.js";
-import { isMovementOnlyFailure, isRealProgressFailure, MAX_SUGGEST_CANDIDATES, suggestMoveTarget } from "../../src/engine/movementAssist.js";
+import { MAX_SUGGEST_CANDIDATES, computeMovementOutcome } from "../../src/core/movement.js";
+import { isSpeechOnlyFailure, isTier2Salvageable } from "../../src/engine/turnSalvageGates.js";
 import { hasDisplacementToken, resolveMentionedActorId } from "../../src/engine/deterministicSemantics.js";
 import { isFallbackConsequence } from "../../src/engine/turnSalvage.js";
 import { isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
@@ -36,12 +37,16 @@ describe("F2: stable error codes", () => {
     }
   });
 
-  it("movement codes classify without substring matching", () => {
-    expect(isMovementOnlyFailure([{ code: "movement.no_position_change", message: "x" }])).toBe(true);
-    expect(isRealProgressFailure([{ code: "movement.no_progress_actor", message: "x" }])).toBe(true);
-    expect(isRealProgressFailure([{ code: "movement.no_progress_object", message: "x" }])).toBe(true);
-    expect(isRealProgressFailure([{ code: "movement.over_step_cap", message: "x" }])).toBe(false);
-    expect(isMovementOnlyFailure([{ code: "speech.dropped_words", message: "x" }])).toBe(false);
+  it("failure classification switches on stable codes, not message prose", () => {
+    // F2: salvage classifiers switch on error codes — rewording a message
+    // must not change turn behavior. (Phase 1: the movement-retry
+    // classifiers are deleted with the retry category; the surviving
+    // speech-tier classifiers still prove the pattern.)
+    expect(isSpeechOnlyFailure([{ code: "speech.dropped_words", message: "x" }])).toBe(true);
+    expect(isSpeechOnlyFailure([{ code: "movement.over_step_cap", message: "x" }])).toBe(false);
+    expect(isSpeechOnlyFailure([])).toBe(false);
+    expect(isTier2Salvageable([{ code: "speech.dropped_words", message: "x" }])).toBe(true);
+    expect(isTier2Salvageable([{ code: "actor.unknown_id", message: "x" }])).toBe(false);
   });
 });
 
@@ -137,18 +142,18 @@ describe("F10: actor-occupied destination cells", () => {
   });
 });
 
-describe("F19: bounded suggestMoveTarget", () => {
+describe("F19: bounded engine step computation", () => {
   it("exports MAX_SUGGEST_CANDIDATES = 500", () => {
     expect(MAX_SUGGEST_CANDIDATES).toBe(500);
   });
 
-  it("suggestMoveTarget scans within the cap and avoids other actors", () => {
+  it("computeMovementOutcome scans within the cap and avoids other actors", () => {
     const world = makeTinyWorld();
-    const s = suggestMoveTarget(world, "u", "n");
-    expect(s).not.toBeNull();
+    const o = computeMovementOutcome(world, "u", { destinationActorId: "n" });
+    expect(o).not.toBeNull();
     // Not on top of n.
-    expect([s!.x, s!.y]).not.toEqual([4, 4]);
-    expect(Math.hypot(s!.x - 4, s!.y - 4)).toBeLessThan(Math.hypot(1 - 4, 1 - 4));
+    expect([o!.x, o!.y]).not.toEqual([4, 4]);
+    expect(Math.hypot(o!.x - 4, o!.y - 4)).toBeLessThan(Math.hypot(1 - 4, 1 - 4));
   });
 });
 
