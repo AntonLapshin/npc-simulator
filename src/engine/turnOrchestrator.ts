@@ -341,6 +341,14 @@ export const RENDER_MAX_ATTEMPTS = 2;
  * and burn no LLM call. When rendering fails: the NPC liveness floor
  * (after N consecutive own fallbacks), else the "Nothing changes."
  * fallback.
+ *
+ * PLAN_V2 Phase 4 (v2 path only): the narrate prompt is built from the
+ * executed facts (not the intended action), and when the one retry is
+ * burned the last render is accepted and marked honest
+ * (`narrateAcceptedDespiteViolations`, event
+ * `narrate_accepted_despite_violations`) — a flawed paragraph beats a
+ * dead turn, and the (not done) family stays dead. V1 keeps the
+ * retry→liveness→fallback behavior above.
  */
 export async function resolveRender(
   world: World,
@@ -454,12 +462,17 @@ export async function resolveRender(
   const enginePose = planPose(action.text);
   const executeMs = Date.now() - executeStart;
 
+  // PLAN_V2 Phase 4: the v2 path narrates from the executed facts and
+  // accepts the render after one retry instead of falling back. The v1
+  // path never sees any of this, so v1 turns are byte-identical.
+  const isV2 = readTurnLoopV2();
+
   // PLAN_V2 Phase 3: the clamp policy — one deterministic pass over the
   // parsed intent, recorded as attempted-vs-executed for the narrate
   // input. No LLM, no retries, no correction loops: a clamped turn costs
   // exactly the same provider calls as a normal turn. V2-only — the v1
   // path never sees it, so v1 turns are byte-identical in outcome.
-  const turnClamp = readTurnLoopV2()
+  const turnClamp = isV2
     ? buildTurnClamp(world, action, plannedMovement, engineMovement, exactQuote, opts.parsedSemantics)
     : null;
   if (turnClamp !== null) {
@@ -535,6 +548,11 @@ export async function resolveRender(
               // PLAN_V2 Phase 3: the attempted-vs-executed clamp record
               // (v2 only — undefined on v1 so the prompt never sees it).
               clamp: turnClamp ?? undefined,
+              // PLAN_V2 Phase 4: the engine-executed pose for the narrate
+              // facts, and the v2 narrate-from-facts prompt switch (v1
+              // keeps the legacy consequence context untouched).
+              enginePose,
+              narrateExecutedFacts: isV2,
             }),
           timeLeft(),
         );
@@ -629,7 +647,32 @@ export async function resolveRender(
       input: { action, render, attempt },
       validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
     });
-    if (attempt >= RENDER_MAX_ATTEMPTS) break;
+    if (attempt >= RENDER_MAX_ATTEMPTS) {
+      if (isV2) {
+        // PLAN_V2 Phase 4: one retry burned — accept the flawed paragraph
+        // as honest instead of killing the turn with liveness/fallback.
+        // The (not done) family stays dead: a flawed paragraph beats a
+        // dead turn. The deterministic repairs above (quote reinsert,
+        // prefix collapse) already ran on this copy.
+        const accepted: ConsequenceResult = {
+          ...render,
+          narrateAcceptedDespiteViolations: true,
+        };
+        logger.log({
+          module: "validator",
+          event: "narrate_accepted_despite_violations",
+          tick: world.tick,
+          turnIndex: world.turnIndex,
+          actorId: action.actorId,
+          input: { action, render: accepted, attempt },
+          validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
+          error:
+            "render accepted despite prose-validation failures (retry budget spent) — marked honest, never rewritten",
+        });
+        return { render: accepted, executed, liveness: false, timings: { executeMs, renderMs: renderCallMs } };
+      }
+      break;
+    }
     feedback = renderRetryFeedback(errors, world.actors.map((a) => a.id));
     report(deps, {
       stage: "consequence_retry",
