@@ -8,7 +8,7 @@
 // internally; physically invalid output is retried by the orchestrator;
 // total failure yields the §16.5 "Nothing changes." fallback.
 
-import type { ConsequenceEngine } from "../intelligence/types.js";
+import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
@@ -72,7 +72,7 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     world: World,
     action: Action,
     feedback?: string,
-    opts?: { signal?: AbortSignal; isUserTurn?: boolean },
+    opts?: ConsequenceResolveOpts,
   ): Promise<ConsequenceResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
@@ -93,7 +93,9 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     // instruction tail (suffix), which stays last for F33 truncation
     // safety. Deterministic per action, so retries repeat it harmlessly.
     const propHint = buildPropHint(action.text, world, action.actorId);
-    const context = buildConsequenceContext(world, action, feedback);
+    // Phase 1: the render input carries the already-executed movement as
+    // facts — the model narrates what happened, never emits coordinates.
+    const context = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement);
     // Exp-6 item 2: user-turn directive leads the prompt (before the
     // world dump) so the writer treats the player's words as sacred.
     const userTurnPrefix =

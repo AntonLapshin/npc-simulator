@@ -32,20 +32,12 @@ import { applyConsequence } from "./patchApplier.js";
 import { validateConsequence } from "./physicalValidator.js";
 import { resolveActionSemantics } from "./actionSemantics.js";
 import {
-  clampMoveToCap,
-  isClampableMovementFailure,
-  isMovementOnlyFailure,
-  isRealProgressFailure,
-  stepTowardPoint,
-  suggestMoveTarget,
-} from "./movementAssist.js";
-import {
-  effectiveRepairTarget,
-  narrativeApproachTarget,
-  vetoAwayFromTarget,
-  type NamedDestination,
-} from "./textHints.js";
-import { parseActionQuotes } from "./deterministicSemantics.js";
+  applyEngineMovement,
+  executeMovement,
+  executorDestination,
+  planMovementSemantics,
+  type MovementOutcome,
+} from "./movementExecutor.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { propStubForGroundingErrors } from "./validate/objects.js";
@@ -298,93 +290,6 @@ function readEngineDiagnostics(
 
 
 /** Resolve with validation retries; applies fallback when retries are exhausted. */
-/**
- * Exp-5 item 6 (S2): honest stationary narrative for a vetoed movement
- * repair with no legal toward-step. Never claims the movement that didn't
- * happen; preserves quoted speech (it did happen); names the
- * already-reached target when adjacent so the history reads honestly
- * ("Tanya remains by Anton" — not "tried to walk and failed").
- * Pure.
- */
-export function synthesizeStationaryNarrative(
-  action: Action,
-  name: string,
-  actor: { x: number; y: number },
-  target: { x: number; y: number; kind: "actor" | "object"; id: string } | null,
-  targetLabel: string | undefined,
-): string {
-  const quotes = parseActionQuotes(action.text);
-  // "remains" (not "holds position"): the object-grounding gate reads
-  // "holds" as an object verb and would demand a prop patch.
-  let base = `${name} remains in position`;
-  if (target !== null && targetLabel !== undefined) {
-    const d = Math.hypot(actor.x - target.x, actor.y - target.y);
-    if (d <= 2.5) base += ` by ${targetLabel}`;
-  }
-  base += ".";
-  if (quotes.length > 0) {
-    base += ` ${name} says ${quotes.map((q) => `"${q}"`).join(" ")}.`;
-  }
-  return base;
-}
-
-/**
- * Exp-5 item 6 (S2): honest stationary downgrade for a vetoed movement
- * repair with no legal toward-step. The veto means no legal step toward
- * the effective target exists from the actor's cell (already adjacent, or
- * boxed in) — a world fact retries cannot change — so commit a stationary
- * turn instead of veto → retry → fallback. Keeps the attempt's
- * non-movement patches (thoughts/emotion), drops x/y, declares
- * moved=false, and synthesizes an honest stationary narrative. Returns
- * null when there is no acting-actor patch to downgrade. The caller
- * validates the result (with moves=false semantics) and runs the accept
- * gate before committing. Pure (no logging).
- */
-export function buildStationaryDowngrade(
-  world: World,
-  action: Action,
-  result: ConsequenceResult,
-  effTarget: { x: number; y: number; kind: "actor" | "object"; id: string } | null,
-): ConsequenceResult | null {
-  const actor = world.actors.find((a) => a.id === action.actorId);
-  if (!actor) return null;
-  const patch = result.actorPatches.find((p) => p.actorId === action.actorId);
-  if (!patch) return null;
-  const downgraded: ConsequenceResult = structuredClone(result);
-  const dPatch = downgraded.actorPatches.find((p) => p.actorId === action.actorId)!;
-  delete dPatch.x;
-  delete dPatch.y;
-  let targetLabel: string | undefined;
-  if (effTarget !== null) {
-    if (effTarget.kind === "actor") {
-      targetLabel = world.actors.find((a) => a.id === effTarget.id)?.name;
-    } else {
-      targetLabel = world.scene.objects.find((o) => o.id === effTarget.id)?.name;
-    }
-  }
-  downgraded.narrative = synthesizeStationaryNarrative(
-    action,
-    actor.name ?? action.actorId,
-    actor,
-    effTarget,
-    targetLabel,
-  );
-  if (downgraded.effects) {
-    downgraded.effects.moved = false;
-    delete downgraded.effects.destinationActorId;
-    delete downgraded.effects.destinationObjectId;
-    const quotes = parseActionQuotes(action.text);
-    if (quotes.length > 0) {
-      downgraded.effects.spoke = true;
-      downgraded.effects.quotedSpeech = quotes;
-    } else {
-      downgraded.effects.spoke = false;
-      downgraded.effects.quotedSpeech = [];
-    }
-  }
-  return downgraded;
-}
-
 export async function resolveWithValidation(
   world: World,
   action: Action,
@@ -444,6 +349,29 @@ export async function resolveWithValidation(
   // once per turn. undefined = not asked yet; true = veto moves.
   let locomotionVeto: boolean | undefined;
 
+  // Phase 1: engine-owned movement. Deterministic pre-pass from the action
+  // text alone (no model output): the engine — never the model — decides
+  // the acting actor's position. Computed once per turn, before the first
+  // consequence call, so the render input carries the executed movement
+  // as facts to narrate. Per attempt below, the outcome is refreshed only
+  // when the merged semantics add a destination/contact the text
+  // resolution couldn't see — never removed (merged.moves ⊇ planned moves
+  // unless the Laya veto fires, which drops it explicitly).
+  const plannedMovement = planMovementSemantics(world, action);
+  let engineMovement: MovementOutcome | null =
+    plannedMovement.moves ? executeMovement(world, action, plannedMovement) : null;
+  if (plannedMovement.moves) {
+    logger.log({
+      module: "movement",
+      event: "movement_planned",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { action, plannedMovement },
+      output: { engineMovement },
+    });
+  }
+
   // Exp-7: the outer attempt cap is consequenceMaxAttempts (default 2),
   // not maxRetries+1. Retries don't steer the model (exp-7 B2) — the
   // in-loop deterministic repairs below run on every attempt, and salvage
@@ -466,6 +394,9 @@ export async function resolveWithValidation(
           deps.consequenceEngine.resolve(world, action, feedback, {
             signal,
             isUserTurn: !deps.forceAllNpc && action.actorId === world.userActorId,
+            // Phase 1: the render call narrates the already-executed
+            // movement (facts in its input) — it never emits coordinates.
+            engineMovement,
           }),
         timeLeft(),
       );
@@ -588,6 +519,81 @@ export async function resolveWithValidation(
       }
     }
     lastSemantics = semantics;
+    // Phase 1: engine-owned movement — refresh + merge. The pre-pass
+    // outcome stands unless the merged semantics (judge/effects) add a
+    // destination/contact the deterministic text resolution couldn't see
+    // (judge-only locomotion verbs, contact turns, effects-declared ids).
+    // A Laya locomotion veto drops the pre-pass movement outright.
+    // Model-emitted coordinates are stripped from every patch (ignored,
+    // logged at debug — the B6 shape: a patch "moving" the wrong actor
+    // simply loses its coordinates); the engine outcome is applied to the
+    // acting actor only, deterministically.
+    {
+      const contactId =
+        semantics?.contactActorId !== undefined && semantics.contactActorId !== action.actorId
+          ? semantics.contactActorId
+          : undefined;
+      const needsMove = semantics?.moves === true || contactId !== undefined;
+      if (semantics === undefined) {
+        // Fail-open: no semantics resolved — keep the deterministic
+        // pre-pass outcome (the text-derived signal is the best available).
+      } else if (!needsMove) {
+        if (engineMovement !== null) {
+          logger.log({
+            module: "movement",
+            event: "movement_dropped",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action, planned: engineMovement },
+            output: { reason: "final semantics carry no locomotion (veto or stationary downgrade)" },
+          });
+        }
+        engineMovement = null;
+      } else if (semantics) {
+        const wantDest = executorDestination(semantics, action.actorId);
+        const hasDest = engineMovement?.destination ?? null;
+        const destMismatch =
+          (wantDest?.kind ?? null) !== (hasDest?.kind ?? null) ||
+          (wantDest?.id ?? null) !== (hasDest?.id ?? null);
+        if (engineMovement === null || destMismatch) {
+          const refreshed = executeMovement(world, action, semantics);
+          if (refreshed !== null) {
+            logger.log({
+              module: "movement",
+              event: engineMovement === null ? "movement_refreshed" : "movement_destination_refreshed",
+              tick: world.tick,
+              turnIndex: world.turnIndex,
+              actorId: action.actorId,
+              input: { action, semantics },
+              output: { refreshed },
+            });
+            engineMovement = refreshed;
+          }
+        }
+      }
+      result = applyEngineMovement(
+        result,
+        action.actorId,
+        engineMovement,
+        (ignoredId, x, y) => {
+          logger.log({
+            module: "movement",
+            event: "model_coordinates_ignored",
+            tick: world.tick,
+            turnIndex: world.turnIndex,
+            actorId: action.actorId,
+            input: { action },
+            output: {
+              ignoredActorId: ignoredId,
+              ignoredX: x,
+              ignoredY: y,
+              note: "model-emitted coordinates are engine-owned — ignored (debug)",
+            },
+          });
+        },
+      );
+    }
     // Exp-4 item 6 (S4): deterministic doubled-prefix repair — "Dana:
     // Dana: …" collapses to "Dana: …" instead of tripping the voice gate
     // every attempt. First-person prose is NOT auto-rewritten (too risky);
@@ -666,310 +672,6 @@ export async function resolveWithValidation(
       hardErrors: countHardErrors(errors),
       attempt,
     });
-
-    // Deterministic movement repair: small LLMs often narrate movement
-    // correctly but omit the required x/y patch on every retry. When the
-    // failure is movement-only and we can compute a valid closer position,
-    // patch it in directly instead of burning retries on a "Nothing
-    // changes." fallback. The narrative already describes the movement, so
-    // filling in coordinates preserves intent.
-    let movementHint: string | undefined;
-    if (semantics?.moves) {
-      // Item C7 (S1): the action text steers the suggestion — "walk east"
-      // must not repair westward when no destination was declared.
-      let suggestion = suggestMoveTarget(
-        world,
-        action.actorId,
-        semantics.destinationActorId,
-        semantics.destinationObjectId,
-        action.text,
-      );
-      // Exp-3 item 7 (S5, A3 — tick-28 repro): veto a repair that steps
-      // AWAY from the narrative's named approach target. Veto-only: the
-      // turn retries/salvages instead of applying corrupt movement.
-      //
-      // Exp-4 item 5 (S2): a veto without a constructive alternative froze
-      // the avatar for 27 of 30 exp-4 ticks (veto → retry → retry →
-      // fallback, zero displacement). When the veto fires, re-steer: take
-      // a capped step TOWARD the effective target instead of retrying into
-      // the same wall. Only when no legal toward-step exists does the
-      // turn commit an honest stationary downgrade (below).
-      //
-      // Exp-5 item 6 (S2): the veto and re-steer now use the EFFECTIVE
-      // target — the judge's resolved destination when present, else the
-      // narrative's (see effectiveRepairTarget). Tick-15 repro: the judge
-      // correctly resolved anton_desk while the corrupt narrative said
-      // "Tanya's desk", so the narrative-target veto killed a good repair.
-      // A judge/narrative disagreement is logged; the movement gates
-      // enforce the judge's semantics, so the repair must satisfy them.
-      let resteeredTarget: NamedDestination | null = null;
-      if (suggestion) {
-        const effTarget = effectiveRepairTarget(
-          world,
-          action.actorId,
-          result.narrative,
-          semantics,
-        );
-        const narrativeTarget = narrativeApproachTarget(
-          world,
-          action.actorId,
-          result.narrative,
-        );
-        if (
-          effTarget !== null &&
-          narrativeTarget !== null &&
-          effTarget.id !== narrativeTarget.id
-        ) {
-          logger.log({
-            module: "validator",
-            event: "repair_target_disagreement",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            output: `judge destination "${effTarget.id}" disagrees with narrative target "${narrativeTarget.id}" — trusting the judge (the movement gates enforce its semantics)`,
-          });
-        }
-        const vetted =
-          effTarget !== null
-            ? vetoAwayFromTarget(world, action.actorId, suggestion, effTarget)
-            : suggestion;
-        if (!vetted) {
-          const resteered =
-            effTarget !== null
-              ? stepTowardPoint(world, action.actorId, effTarget.x, effTarget.y)
-              : null;
-          if (resteered && effTarget !== null) {
-            resteeredTarget = { kind: effTarget.kind, id: effTarget.id };
-            logger.log({
-              module: "validator",
-              event: "movement_repair_resteered",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the effective approach target ("${effTarget.id}") — re-steered to a capped step toward it (${resteered.x}, ${resteered.y}) instead of retrying`,
-            });
-            suggestion = resteered;
-          } else {
-            logger.log({
-              module: "validator",
-              event: "movement_repair_vetoed",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              output: `repair (${suggestion.x}, ${suggestion.y}) stepped away from the effective approach target${effTarget ? ` ("${effTarget.id}")` : ""} and no legal toward-step exists — vetoed`,
-            });
-            suggestion = null;
-            // Exp-5 item 6 (S2): veto with no legal toward-step is a world
-            // fact (already adjacent, or boxed in) — retries cannot change
-            // it. Commit an honest stationary downgrade now instead of
-            // veto → retry → fallback. Falls through to retry only when
-            // the downgrade itself fails validation.
-            const downgrade = buildStationaryDowngrade(
-              world,
-              action,
-              result,
-              effTarget,
-            );
-            if (downgrade !== null) {
-              const dv = validateConsequence(
-                world,
-                downgrade,
-                action,
-                semantics ? { ...semantics, moves: false } : undefined,
-              );
-              const dg = recheckAcceptedProse(world, action, downgrade);
-              if (dv.valid && dg.length === 0) {
-                logger.log({
-                  module: "validator",
-                  event: "movement_downgraded_stationary",
-                  tick: world.tick,
-                  turnIndex: world.turnIndex,
-                  actorId: action.actorId,
-                  input: { action, result, attempt },
-                  output: { downgraded: downgrade },
-                });
-                return downgrade;
-              }
-              logger.log({
-                module: "validator",
-                event: "stationary_downgrade_rejected",
-                tick: world.tick,
-                turnIndex: world.turnIndex,
-                actorId: action.actorId,
-                output: {
-                  errors: [...dv.errors, ...dg].map((e) => `[${e.code}]`),
-                },
-                error:
-                  "stationary downgrade failed validation — falling through to retry",
-              });
-            }
-          }
-        } else {
-          suggestion = vetted;
-        }
-      }
-      if (suggestion) {
-        // Exp-4 item 5 (S2): the hint names the effective destination —
-        // the narrative's target after a re-steer, the judged one
-        // otherwise — so retry feedback steers toward the same point the
-        // repair would take.
-        const hintDestActorId =
-          resteeredTarget?.kind === "actor"
-            ? resteeredTarget.id
-            : semantics.destinationActorId;
-        const hintDestObjectId =
-          resteeredTarget?.kind === "object"
-            ? resteeredTarget.id
-            : semantics.destinationObjectId;
-        const dest = hintDestActorId
-          ? ` strictly closer to ${hintDestActorId}`
-          : hintDestObjectId
-            ? ` strictly closer to ${hintDestObjectId}`
-            : "";
-        movementHint =
-          `Movement hint: emit actorPatch {"actorId": "${action.actorId}", "x": ${suggestion.x}, "y": ${suggestion.y}, ...}` +
-          ` — position (${suggestion.x}, ${suggestion.y}) is reachable and${dest ? dest : " a valid step"} from the current position. ` +
-          `Set effects.moved=true${hintDestActorId ? ` and effects.destinationActorId="${hintDestActorId}"` : ""}${hintDestObjectId ? ` and effects.destinationObjectId="${hintDestObjectId}"` : ""}.`;
-        // F24: the in-loop repair also covers "make real progress" /
-        // token-shuffle failures — try suggestMoveTarget first, then
-        // clampMoveToCap below.
-        if (isMovementOnlyFailure(errors) || isRealProgressFailure(errors)) {
-          const repaired: ConsequenceResult = structuredClone(result);
-          const existing = repaired.actorPatches.find((p) => p.actorId === action.actorId);
-          if (existing) {
-            existing.x = suggestion.x;
-            existing.y = suggestion.y;
-          } else {
-            repaired.actorPatches.push({
-              actorId: action.actorId,
-              x: suggestion.x,
-              y: suggestion.y,
-            });
-          }
-          if (repaired.effects) {
-            repaired.effects.moved = true;
-            // Exp-4 item 5 (S2): a re-steered repair steps toward the
-            // narrative's target, not the judged one — declare that
-            // destination so the revalidation checks coherence against
-            // what the narrative actually claims.
-            const effDestActorId =
-              resteeredTarget?.kind === "actor"
-                ? resteeredTarget.id
-                : semantics.destinationActorId;
-            const effDestObjectId =
-              resteeredTarget?.kind === "object"
-                ? resteeredTarget.id
-                : semantics.destinationObjectId;
-            if (effDestActorId !== undefined) {
-              repaired.effects.destinationActorId = effDestActorId;
-            }
-            if (effDestObjectId !== undefined) {
-              repaired.effects.destinationObjectId = effDestObjectId;
-            }
-          }
-          // Re-validate against the same judged semantics (effects may now
-          // agree with the judge — either way the movement gate must pass).
-          const revalidation = validateConsequence(
-            world,
-            repaired,
-            action,
-            semantics,
-          );
-          // Exp-2 item 5 (S2): the repaired payload gets the final accept
-          // gate too — a repaired movement must not launder corrupt prose.
-          if (
-            revalidation.valid &&
-            recheckAcceptedProse(world, action, repaired).length === 0
-          ) {
-            logger.log({
-              module: "validator",
-              event: "validation_passed",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              input: { action, result: repaired, attempt, semanticsSource, semantics },
-              output: { ...revalidation, repaired: true, suggestion },
-            });
-            logger.log({
-              module: "turn",
-              event: "movement_repaired",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              input: { action, result, attempt },
-              output: { suggestion, repaired },
-            });
-            return repaired;
-          }
-        }
-      }
-      // Exp-4 item 1: the speed limit reads as a pace, not a wall. When the
-      // model claims an over-cap jump in the right direction (tick 15: the
-      // full 14-cell entrance→desk walk; tick 18: 8–12-cell strides),
-      // project ITS claimed target onto the ≤6-cell reachable set and
-      // continue next turn — instead of failing the whole turn. Accepts
-      // only when the clamped position passes the full gate on
-      // revalidation; otherwise the turn retries/salvages normally.
-      // F2: cap detection is code-based. F24: also fires for real-progress
-      // failures (suggestMoveTarget above is tried first).
-      const capHit = errors.some((e) => e.code === "movement.over_step_cap");
-      const progressHit = isRealProgressFailure(errors);
-      if ((capHit || progressHit) && isClampableMovementFailure(errors)) {
-        const claimed = result.actorPatches.find((p) => p.actorId === action.actorId);
-        const clamped =
-          claimed?.x !== undefined && claimed?.y !== undefined
-            ? clampMoveToCap(world, action.actorId, claimed.x, claimed.y)
-            : undefined;
-        if (clamped) {
-          const clampedResult: ConsequenceResult = structuredClone(result);
-          const existing = clampedResult.actorPatches.find((p) => p.actorId === action.actorId);
-          if (existing) {
-            existing.x = clamped.x;
-            existing.y = clamped.y;
-          } else {
-            clampedResult.actorPatches.push({
-              actorId: action.actorId,
-              x: clamped.x,
-              y: clamped.y,
-            });
-          }
-          if (clampedResult.effects) {
-            clampedResult.effects.moved = true;
-          }
-          const revalidation = validateConsequence(
-            world,
-            clampedResult,
-            action,
-            semantics,
-          );
-          // Exp-2 item 5 (S2): final accept gate on the clamped payload too.
-          if (
-            revalidation.valid &&
-            recheckAcceptedProse(world, action, clampedResult).length === 0
-          ) {
-            logger.log({
-              module: "validator",
-              event: "validation_passed",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              input: { action, result: clampedResult, attempt, semanticsSource, semantics },
-              output: { ...revalidation, repaired: true, clamped: true, suggestion: clamped },
-            });
-            logger.log({
-              module: "turn",
-              event: "movement_repaired",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              input: { action, result, attempt },
-              output: { suggestion: clamped, repaired: clampedResult, clamped: true },
-            });
-            return clampedResult;
-          }
-        }
-      }
-    }
 
     // Exp-4 item 10 (S6): deterministic prop-stub repair. When the ONLY
     // failures are prop-mappable grounding misses (the model narrated sip/
@@ -1072,7 +774,7 @@ export async function resolveWithValidation(
     // deterministic "most severe error first, one line" directive instead
     // of the raw multi-gate dump (which pushed small models
     // off-distribution); the targeted hints below stay as-is.
-    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${movementHint ? `\n${movementHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
+    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${objectAffordanceHint ? `\n${objectAffordanceHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
     if (attempt >= maxAttempts) break;
     // Exp-3 item 9 (S7, RULE-C): abort the retry loop early when the last
     // two attempts both failed to STRICTLY improve on the best-so-far
