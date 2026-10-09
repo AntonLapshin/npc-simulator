@@ -24,6 +24,7 @@ import {
   type MovementOutcome,
 } from "../core/movement.js";
 import { extractDirectionHint, hasDisplacementToken, maskQuotedSpans } from "../core/text.js";
+import { plannedMovementFromSemantics } from "../core/semantics.js";
 import { resolveDeterministicSemantics, resolveMentionedActorId } from "./deterministicSemantics.js";
 
 export type { MovementOutcome };
@@ -43,6 +44,14 @@ export function planMovementSemantics(
   world: World,
   action: Action,
   intent?: Intent,
+  /**
+   * PLAN_V2 Phase 2 (Laya as parser): pre-parsed ActionSemantics from the
+   * parse step. When provided it is authoritative over the deterministic
+   * text parsers below — the judge saw the same sentence. When absent
+   * the text path runs exactly as before (v1, and the fail-open fallback
+   * when Laya is down/unavailable).
+   */
+  semantics?: ActionSemantics,
 ): PlannedMovement {
   // Phase 5: a fully-typed cascade intent (kind "move" + resolved
   // targetId from the Laya proposal engine) is authoritative — it
@@ -69,6 +78,11 @@ export function planMovementSemantics(
     // Fully-typed move with targetKind "none" (wander): locomotion with
     // no destination — the step computation picks the greedy cell.
     return { moves: true };
+  }
+  // PLAN_V2 Phase 2: pre-parsed semantics skip the text parsers entirely
+  // (pure translation in src/core/semantics.ts).
+  if (semantics !== undefined) {
+    return plannedMovementFromSemantics(semantics, action.actorId);
   }
   // Stage-2 B4: quoted speech is the character talking, not the narrator
   // describing — "let's go" inside dialogue must not parse as locomotion

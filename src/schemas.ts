@@ -79,12 +79,26 @@ export const historyEntrySchema = z
   .object({
     text: z.string(),
     perceivers: z.array(z.string()),
+    // Stage-1 A4: the ground-truth action behind the entry. Optional for
+    // backward compatibility — and REQUIRED for save/load round-trips:
+    // applyRenderResult always records it, so without this the strict
+    // schema rejects every save written after the first turn.
+    actionText: z.string().optional(),
   })
   .strict();
 
 export const scenarioVocabularySchema = z
   .object({
     objectNouns: z.array(z.string()).optional(),
+  })
+  .strict();
+
+// PLAN_V2 Phase 5 (the director): one pre-authored incident. Strict — a
+// malformed entry fails fast at scenario load with a clear error.
+export const directorEventSchema = z
+  .object({
+    id: nonEmptyString,
+    text: nonEmptyString,
   })
   .strict();
 
@@ -101,6 +115,12 @@ export const scenarioSchema = z
     // F8: optional per-scenario object vocabulary (validated in detail by
     // the scenario loader; accepted here so strict parsing doesn't drop it).
     vocabulary: scenarioVocabularySchema.optional(),
+    // PLAN_V2 Phase 5: the director's ordered incident list. Absent (or
+    // empty) → the director is off and turn behavior is unchanged.
+    directorEvents: z.array(directorEventSchema).optional(),
+    // PLAN_V2 Phase 5: consecutive stale turns before an injection.
+    // Default DEFAULT_DIRECTOR_STALENESS_THRESHOLD (6) when absent.
+    directorStalenessThreshold: z.number().int().min(1).optional(),
   })
   .strict();
 
@@ -111,6 +131,11 @@ export const worldSchema = scenarioSchema
     // F6: new saves store HistoryEntry objects; legacy saves store plain
     // strings. Both are accepted and normalized on load.
     history: z.array(z.union([z.string(), historyEntrySchema])),
+    // PLAN_V2 Phase 5: director runtime state — persisted so the
+    // staleness counter and consumed-event ids survive saves.
+    directorStalenessCount: z.number().int().min(0).optional(),
+    directorEventsConsumed: z.array(nonEmptyString).optional(),
+    directorPendingIncident: directorEventSchema.optional(),
   })
   .strict();
 

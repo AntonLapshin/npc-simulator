@@ -17,6 +17,7 @@
 
 import type {
   Action,
+  ActionSemantics,
   World,
 } from "../types.js";
 import {
@@ -55,18 +56,20 @@ export type ManipulationOutcome = {
  * or a core invariant is violated (an engine bug — the caller logs it
  * loudly instead of applying a corrupt outcome).
  *
- * `contactActorId` is the merged semantics' contact when the turn loop
- * has one; otherwise the deterministic text mention is used (the
- * turn-start pre-pass).
+ * `semantics` is the pre-parsed contact from the turn loop when it has
+ * one (PLAN_V2 Phase 2: the Laya parser's contactActorId); otherwise the
+ * deterministic text mention is used (the turn-start pre-pass). When
+ * absent the text path runs exactly as before (v1, and the fail-open
+ * fallback when Laya is down/unavailable).
  */
 export function executeManipulation(
   world: World,
   action: Action,
-  contactActorId?: string,
+  semantics?: Pick<ActionSemantics, "contactActorId">,
 ): ManipulationOutcome | null {
   const snapshot = buildManipulationSnapshot(world);
   const contact =
-    contactActorId ??
+    semantics?.contactActorId ??
     resolveContactMention(snapshot.actors, action.actorId, action.text) ??
     undefined;
   const plan = planManipulation(snapshot, action.actorId, action.text, contact);

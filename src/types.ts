@@ -99,6 +99,26 @@ export type ScenarioVocabulary = {
   objectNouns?: string[];
 };
 
+/**
+ * PLAN_V2 Phase 5 (the director): one pre-authored incident the director
+ * can inject when the scene goes stale. A world fact, not a suggestion —
+ * the engine injects it into the intent prompt verbatim and records it in
+ * history, so the narrator (and the picture) treats it as real.
+ */
+export type DirectorEvent = {
+  /** Stable id — used to track consumption (each event fires at most once). */
+  id: string;
+  /** The incident as a plain world fact, e.g. "The fire alarm starts ringing." */
+  text: string;
+};
+
+/**
+ * PLAN_V2 Phase 5: default consecutive-stale-turn count before the
+ * director injects the next unconsumed event. A scenario may override it
+ * with `directorStalenessThreshold`.
+ */
+export const DEFAULT_DIRECTOR_STALENESS_THRESHOLD = 6;
+
 export type Scenario = {
   version: number;
   id: string;
@@ -110,6 +130,16 @@ export type Scenario = {
   actors: Actor[];
   /** F8: optional scenario-specific object/prop vocabulary. */
   vocabulary?: ScenarioVocabulary;
+  /**
+   * PLAN_V2 Phase 5: ordered incident list for the director. Absent (or
+   * empty) → the director is off and turn behavior is unchanged.
+   */
+  directorEvents?: DirectorEvent[];
+  /**
+   * PLAN_V2 Phase 5: consecutive stale turns before an injection.
+   * Defaults to DEFAULT_DIRECTOR_STALENESS_THRESHOLD (6).
+   */
+  directorStalenessThreshold?: number;
 };
 
 export type World = {
@@ -131,6 +161,36 @@ export type World = {
   actors: Actor[];
   /** F8: carried over from the scenario (see Scenario.vocabulary). */
   vocabulary?: ScenarioVocabulary;
+  /**
+   * PLAN_V2 Phase 5: carried over from the scenario (see
+   * Scenario.directorEvents). Absent/empty → the director is off.
+   */
+  directorEvents?: DirectorEvent[];
+  /**
+   * PLAN_V2 Phase 5: carried over from the scenario (see
+   * Scenario.directorStalenessThreshold).
+   */
+  directorStalenessThreshold?: number;
+  /**
+   * PLAN_V2 Phase 5 (the director): consecutive completed turns with no
+   * new action cores and no world-state changes. Reset to 0 on any lively
+   * turn; reaching the threshold fires the next unconsumed director event.
+   * Persisted so it survives saves (see persistence.ts).
+   */
+  directorStalenessCount?: number;
+  /**
+   * PLAN_V2 Phase 5: ids of director events already injected. Persisted
+   * so consumed events are never repeated — not even across save/load.
+   */
+  directorEventsConsumed?: string[];
+  /**
+   * PLAN_V2 Phase 5: the incident the next NPC turn's intent prompt must
+   * carry as a world fact. Set by the orchestrator when the staleness
+   * trigger fires (end of turn); consumed once by the intent-prompt
+   * builder on the next NPC turn. Persisted so a save between turns keeps
+   * it; accepted by the save schema so hand-built worlds still load.
+   */
+  directorPendingIncident?: DirectorEvent;
 };
 
 /**
@@ -268,6 +328,15 @@ export type ConsequenceResult = {
    * the flag existed.
    */
   fallback?: boolean;
+  /**
+   * PLAN_V2 Phase 4 (v2 path only): true when the render was accepted
+   * despite prose-validation failures (one retry burned). A flawed
+   * paragraph beats a dead turn — the (not done) sentinel family stays
+   * dead, so the result is marked honest rather than silently accepted
+   * or rewritten. `isFallbackConsequence` ignores this flag: the turn
+   * was rendered, not fallen back.
+   */
+  narrateAcceptedDespiteViolations?: boolean;
 };
 
 /**

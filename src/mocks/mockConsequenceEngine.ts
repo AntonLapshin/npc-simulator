@@ -1,6 +1,6 @@
 import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
-import { buildConsequenceContext } from "../engine/contextBuilder.js";
+import { buildConsequenceContext, buildNarrateContext } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 
 /**
@@ -48,14 +48,30 @@ export class MockConsequenceEngine implements ConsequenceEngine {
     // engine-dictated exact quote as the verbatim contract.
     // Phase 3: like the real engine, the mock's context carries the
     // already-executed manipulation as facts to narrate.
-    const prompt = buildConsequenceContext(
-      world,
-      action,
-      feedback,
-      undefined,
-      opts?.engineMovement,
-      opts?.exactQuote,
-      opts?.engineManipulation,
+    // PLAN_V2 Phase 3: like the real engine, the mock's context carries
+    // the attempted-vs-executed clamp record as the honest-gap facts.
+    // PLAN_V2 Phase 4: like the real engine, the mock builds the narrate
+    // prompt from the executed facts (not the intended action) when the
+    // v2 flag is set — the `consequence_started` prompt in tests then
+    // reflects the real v2 narrate input.
+    const prompt = (opts?.narrateExecutedFacts === true
+      ? buildNarrateContext(world, action, feedback, {
+          engineMovement: opts?.engineMovement,
+          exactQuote: opts?.exactQuote,
+          enginePose: opts?.enginePose,
+          engineManipulation: opts?.engineManipulation,
+          clamp: opts?.clamp,
+        })
+      : buildConsequenceContext(
+          world,
+          action,
+          feedback,
+          undefined,
+          opts?.engineMovement,
+          opts?.exactQuote,
+          opts?.engineManipulation,
+          opts?.clamp,
+        )
     );
     this.logger.log({
       module: "consequence",
