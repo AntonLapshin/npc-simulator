@@ -41,7 +41,9 @@ export const actorLookSchema = z
 
 export const actorPoseSchema = z.enum(["stand", "sit", "kneel", "doggy", "prone"]);
 
-export const actorPropSchema = z.enum(["cup", "laptop"]).nullable();
+// Phase 3: the held prop is engine-owned and scenario-open (see ActorProp
+// in src/types.ts) — any string, not just cup/laptop.
+export const actorPropSchema = z.string().nullable();
 
 export const actorSchema = z
   .object({

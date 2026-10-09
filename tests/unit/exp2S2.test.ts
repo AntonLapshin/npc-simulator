@@ -272,9 +272,9 @@ describe("coordinator follow-up: deterministic retry-feedback directive (M4)", (
   it("ranks tier-2 wording above speech nits", () => {
     const d = buildRetryDirective([
       err("speech.dropped_words", "dropped quote"),
-      err("object_grounding.sip_no_prop", "sip without prop"),
+      err("object.phantom_manipulation", "phantom pick-up"),
     ]);
-    expect(d).toContain("[object_grounding.sip_no_prop]");
+    expect(d).toContain("[object.phantom_manipulation]");
   });
 
   it("emits a single line with the fix-first directive", () => {

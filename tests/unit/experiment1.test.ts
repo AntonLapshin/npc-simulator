@@ -243,12 +243,16 @@ describe("exp1-6/7 questions cue + repetition guard", () => {
 });
 
 describe("exp1-8/9/10 anchors and nudges", () => {
-  it("consequence context carries identity, pronoun, and pose/prop/object rules", () => {
+  it("consequence context carries identity, pronoun, pose, and engine-ownership rules", () => {
     const world = makeTinyWorld();
     const ctx = buildConsequenceContext(world, { actorId: "u", text: "Sit at my desk." });
     expect(ctx).toContain("IDENTITY RULE");
     expect(ctx).toContain("PRONOUN RULE");
-    expect(ctx).toContain("POSE/PROP/OBJECT RULE");
+    // Phase 3: the POSE/PROP/OBJECT RULE is split — pose stays
+    // model-emitted, object/prop manipulation is engine-owned.
+    expect(ctx).toContain("POSE RULE");
+    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
+    expect(ctx).not.toContain("POSE/PROP/OBJECT RULE");
     expect(ctx).toContain("You are NOT");
     expect(consequenceSuffix()).toContain("pose");
     expect(consequenceSuffix()).toMatch(/pronouns/);
