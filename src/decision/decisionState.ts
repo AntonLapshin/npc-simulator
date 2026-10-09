@@ -4,6 +4,8 @@
 // Pure functions — no I/O, fully unit-tested.
 
 import type { Actor, World } from "../types.js";
+import { CONTACT_RADIUS } from "../engine/validate/movement.js";
+import { OBJECT_INTERACT_RADIUS } from "../engine/validate/objects.js";
 
 /** Hard ceiling for any built state document (chars). */
 export const STATE_CHAR_BUDGET = 1600;
@@ -142,6 +144,50 @@ export function buildJudgeState(
     landmarkNames.length > 0
       ? truncateToChars(`Places: ${landmarkNames.join(", ")}`, 400)
       : "",
+  ]);
+}
+
+/**
+ * PLAN_V2 Phase 1: the physical facts for the intent call — who stands
+ * where, who holds what, what is within reach. Positions are first-class
+ * because the intent model must ground its single action in the real
+ * scene (no invented people, objects, or positions). Reachability uses
+ * the engine's own radii (contact for actors, manipulation reach for
+ * objects), so "within reach" here means the same thing downstream.
+ * Pure and budgeted — unit-tested.
+ */
+export function buildPhysicalFacts(world: World, actorId: string): string {
+  const actor = findActor(world, actorId);
+  if (!actor) throw new Error(`buildPhysicalFacts: unknown actor "${actorId}"`);
+  const selfLine =
+    `You are ${actor.name} at (${actor.x}, ${actor.y}), pose ${actor.pose || "stand"}` +
+    `${actor.prop ? `, holding ${actor.prop}` : ""}.`;
+  const others = world.actors
+    .filter((a) => a.id !== actorId)
+    .map((a) => {
+      const d = Math.hypot(actor.x - a.x, actor.y - a.y);
+      const reach = d <= CONTACT_RADIUS ? ", within reach" : "";
+      return `- ${a.name} at (${a.x}, ${a.y}), ${d.toFixed(1)} cells away${a.prop ? `, holding ${a.prop}` : ""}${reach}`;
+    })
+    .join("\n");
+  const nearby = world.scene.objects
+    .map((o) => {
+      const cx = o.x + o.w / 2;
+      const cy = o.y + o.h / 2;
+      return { o, d: Math.hypot(actor.x - cx, actor.y - cy) };
+    })
+    .filter(({ d }) => d <= OBJECT_INTERACT_RADIUS)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 8)
+    .map(
+      ({ o, d }) =>
+        `- ${o.name} at (${o.x}, ${o.y}), ${d.toFixed(1)} cells away (within reach)`,
+    )
+    .join("\n");
+  return assemble([
+    selfLine,
+    others ? truncateToChars(`Others:\n${others}`, 500) : "",
+    nearby ? truncateToChars(`Objects within reach:\n${nearby}`, 400) : "",
   ]);
 }
 

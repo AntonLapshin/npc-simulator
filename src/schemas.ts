@@ -136,6 +136,18 @@ export const selectionResultSchema = z
   .strict();
 
 /**
+ * PLAN_V2 Phase 1: the intent call's wire shape — one action sentence +
+ * the exact quote. Shape-only here (non-empty action); the stricter pure
+ * checks (lengths, trimming) live in src/core/intent.ts.
+ */
+export const intentResultSchema = z
+  .object({
+    action: nonEmptyString,
+    quote: z.string(),
+  })
+  .strict();
+
+/**
  * F15: lenient-repair notes recorded by normalizeRenderResult. Model
  * sloppiness used to pass validation silently; every drop is now named
  * here so completeJson can log it LOUDLY via the logger (with a payload
