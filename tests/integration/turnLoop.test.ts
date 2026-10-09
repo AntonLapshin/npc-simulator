@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { runTurn, resolveRender } from "../../src/engine/turnOrchestrator.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import type { ConsequenceEngine } from "../../src/intelligence/types.js";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld } from "../helpers.js";
@@ -39,20 +38,20 @@ describe("turn loop", () => {
     expect(logger.store.byEvent("selection_completed")).toHaveLength(0);
   });
 
-  it("NPC actor uses proposal and selection", async () => {
+  it("NPC actor decides via one intent call", async () => {
     const logger = new Logger({ sessionId: "turn3", writeToFile: false });
     const deps = makeTestDeps(logger, { getUserAction: async () => "user act" });
     let world = makeTinyWorld();
-    world = await runTurn(world, deps); // user turn (proposal skipped)
+    world = await runTurn(world, deps); // user turn (intent skipped)
     world = await runTurn(world, deps); // NPC turn
-    // Only the NPC turn runs proposal/selection now.
+    // Only the NPC turn runs the intent call.
     expect(logger.store.byEvent("proposal_skipped")).toHaveLength(1);
-    expect(logger.store.byEvent("proposal_completed").length).toBeGreaterThanOrEqual(1);
-    expect(logger.store.byEvent("selection_completed").length).toBeGreaterThanOrEqual(1);
+    expect(logger.store.byEvent("intent_started")).toHaveLength(1);
+    expect(logger.store.byEvent("intent_completed").length).toBeGreaterThanOrEqual(1);
     expect(world.history.map((e) => e.text).join("\n")).toContain("N:");
   });
 
-  it("bad render fails twice then falls back safely (no salvage, no patch repairs)", async () => {
+  it("bad render fails twice then is accepted-and-marked (no salvage, no patch repairs)", async () => {
     const logger = new Logger({ sessionId: "turn4", writeToFile: false });
     // The narrative claims a walk the engine never executed — a prose
     // violation under the render contract (movement is engine-owned).
@@ -68,14 +67,11 @@ describe("turn loop", () => {
       getUserAction: async () => "Wave.",
     });
     const world = await runTurn(makeTinyWorld(), deps);
-    // Exactly one retry, then the turn falls back safely.
+    // PLAN_V2 Phase 4: exactly one retry, then the flawed paragraph is
+    // accepted and marked honest — a flawed paragraph beats a dead turn.
     expect(logger.store.byEvent("render_failed")).toHaveLength(2);
-    expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
-    // History records the attempted action as not-done (single tickless
-    // entry per turn); the "Nothing changes." fallback lives in the logs.
-    expect(world.history[world.history.length - 1]!.text).toContain("Wave.");
-    expect(world.history[world.history.length - 1]!.text).toContain("(not done)");
+    expect(logger.store.byEvent("narrate_accepted_despite_violations")).toHaveLength(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
   it("history appends a single tickless entry per turn", async () => {
@@ -128,19 +124,19 @@ describe("turn loop", () => {
     expect(logger.store.byEvent("render_accepted")).toHaveLength(1);
   });
 
-  it("engine error paths: NPC proposal failure surfaces via throw", async () => {
+  it("engine error paths: NPC intent failure surfaces via throw", async () => {
     const logger = new Logger({ sessionId: "turn8", writeToFile: false });
-    const failingProposal = {
-      async propose() {
+    const failingIntent = {
+      async intent() {
         throw new Error("provider down");
       },
     };
     const deps = makeTestDeps(logger, {
-      proposalEngine: failingProposal as unknown as MockProposalEngine,
+      intentEngine: failingIntent as unknown as MockIntentEngine,
       getUserAction: async () => "act",
     });
-    // User turns skip proposal, so advance past the user turn first and let
-    // the NPC turn hit the failing proposal engine.
+    // User turns skip intent, so advance past the user turn first and let
+    // the NPC turn hit the failing intent engine.
     let world = await runTurn(makeTinyWorld(), deps);
     await expect(runTurn(world, deps)).rejects.toThrow("provider down");
   });
@@ -148,19 +144,19 @@ describe("turn loop", () => {
   it("ACCEPTANCE: 3-turn run stays within the per-turn call budget", async () => {
     const logger = new Logger({ sessionId: "accept_calls", writeToFile: false });
     // Provider-call counting wrapper: every engine call is one provider call.
-    const callsByTick = new Map<number, { proposal: number; selection: number; consequence: number }>();
+    const callsByTick = new Map<number, { intent: number; consequence: number }>();
     const bucket = (tick: number) => {
       let b = callsByTick.get(tick);
       if (!b) {
-        b = { proposal: 0, selection: 0, consequence: 0 };
+        b = { intent: 0, consequence: 0 };
         callsByTick.set(tick, b);
       }
       return b;
     };
-    const counting = <T extends { propose?: unknown; select?: unknown; resolve?: unknown }>(
+    const counting = <T extends { intent?: unknown; resolve?: unknown }>(
       engine: T,
-      kind: "proposal" | "selection" | "consequence",
-      method: "propose" | "select" | "resolve",
+      kind: "intent" | "consequence",
+      method: "intent" | "resolve",
     ): T => {
       const orig = (engine as Record<string, (...a: never[]) => Promise<unknown>>)[method]!.bind(engine);
       (engine as Record<string, unknown>)[method] = async (...args: never[]) => {
@@ -171,8 +167,7 @@ describe("turn loop", () => {
       return engine;
     };
     const deps = makeTestDeps(logger, {
-      proposalEngine: counting(new MockProposalEngine(logger), "proposal", "propose"),
-      selectionEngine: counting(new MockSelectionEngine(logger), "selection", "select"),
+      intentEngine: counting(new MockIntentEngine(logger), "intent", "intent"),
       consequenceEngine: counting(
         new MockConsequenceEngine(logger, {
           "wave at n.": { narrative: "U waves at N.", thoughts: "Friendly.", reasoning: "r" },
@@ -188,11 +183,12 @@ describe("turn loop", () => {
 
     expect(callsByTick.size).toBe(3);
     for (const [tick, counts] of callsByTick) {
-      const total = counts.proposal + counts.selection + counts.consequence;
-      // Turn = proposal → selection → execute (engine, 0 calls) → render
-      // (LLM). Clean turns cost at most proposal + selection + render.
-      expect(total, `tick ${tick}`).toBeLessThanOrEqual(4);
-      // The render engine is exactly 1 call on clean turns (no retry loop).
+      const total = counts.intent + counts.consequence;
+      // Turn = intent (LLM, skipped on user turns) → parse (Laya, local,
+      // 0 provider calls) → execute/clamp (engine, 0 calls) → narrate (LLM).
+      // Clean turns cost at most intent + narrate = 2 provider calls.
+      expect(total, `tick ${tick}`).toBeLessThanOrEqual(2);
+      // The narrate engine is exactly 1 call on clean turns (no retry loop).
       expect(counts.consequence, `tick ${tick}`).toBe(1);
     }
     expect(logger.store.byEvent("render_accepted")).toHaveLength(3);

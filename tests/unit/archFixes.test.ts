@@ -11,7 +11,7 @@ import { isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
 import { applyRenderResult } from "../../src/engine/patchApplier.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { KNOWN_WORLD_VERSIONS, normalizeHistoryEntry, NOT_DONE_SENTINEL } from "../../src/types.js";
-import { buildConsequenceContext, historyVisibleTo } from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext, historyVisibleTo } from "../../src/engine/contextBuilder.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { accumulateTurnUsage } from "../../src/engine/turnOrchestrator.js";
 import { Logger } from "../../src/logging/logger.js";
@@ -198,23 +198,23 @@ describe("Q7 (Phase 3): engine-owned manipulation replaces the affordance nudge"
     const action = { actorId: "u", text: "Pick up the mug." };
     const outcome = executeManipulation(world, action);
     expect(outcome).not.toBeNull();
-    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, outcome);
+    const ctx = buildNarrateContext(world, action, undefined, { engineManipulation: outcome });
     expect(ctx).toContain("EXECUTED MANIPULATION");
     expect(ctx).toContain("now holds the cup");
-    expect(ctx).toContain("Do NOT emit objectPatches");
+    expect(ctx).toContain("never invent a walk, pose change, pick-up/put-down/hand-over");
   });
 
   it("consequence context states no manipulation for a non-manipulation action", () => {
     const world = makeTinyWorld();
     const action = { actorId: "u", text: "Wave hello." };
-    const ctx = buildConsequenceContext(world, action, undefined, undefined, null, null, null);
+    const ctx = buildNarrateContext(world, action, undefined, { engineManipulation: null });
     expect(ctx).toContain("EXECUTED MANIPULATION: none");
   });
 
-  it("consequence context carries the engine-ownership rule instead of patch demands", () => {
+  it("narrate context carries the engine-ownership rule instead of patch demands", () => {
     const world = makeTinyWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Wave hello." });
-    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Wave hello." }, undefined, {});
+    expect(ctx).toContain("Narrate ONLY the executed facts above");
     expect(ctx).not.toContain("INCOMPLETE without its patch");
   });
 });

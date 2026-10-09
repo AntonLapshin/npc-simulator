@@ -1,17 +1,17 @@
-// Public surface of the isolated LLM layer (Milestone 2).
+// Public surface of the isolated LLM layer.
 //
-// Everything the rest of the app needs lives here: providers
-// (hosted JoinGonka, local Laya), the three LLM engines, prompts, and
-// JSON utilities. Nothing outside src/llm/ is modified by this module —
-// engines consume World/Action types and the Context Builder only as
-// inputs, and report back through the intelligence interfaces + Logger.
+// PLAN_V2 Phase 6: proposal+selection are deleted — the v2 turn loop is
+// intent (1 LLM call) → Laya parse → engine execute/clamp → narrate
+// (1 LLM call). This module wires the two remaining LLM engines (intent +
+// consequence) plus the hosted semantic judge. Nothing outside src/llm/
+// is modified by this module — engines consume World/Action types and the
+// Context Builder only as inputs, and report back through the
+// intelligence interfaces + Logger.
 
 import type { Logger } from "../logging/logger.js";
 import type {
   ConsequenceEngine,
   IntentEngine,
-  ProposalEngine,
-  SelectionEngine,
   SemanticJudge,
 } from "../intelligence/types.js";
 import {
@@ -29,22 +29,8 @@ import {
   type LlmTask,
 } from "./provider.js";
 import { LLMConsequenceEngine } from "./llmConsequenceEngine.js";
-import { LLMProposalEngine } from "./llmProposalEngine.js";
-import { LLMSelectionEngine } from "./llmSelectionEngine.js";
 import { LLMSemanticJudge } from "./llmSemanticJudge.js";
 import { LLMIntentEngine } from "./llmIntentEngine.js";
-import { readLayaRuntimeConfig, readLlmDecisionFallback } from "../config.js";
-import {
-  createLayaClient,
-  createLayaProposalEngine,
-  createLayaSelectionEngine,
-  createLayaSemanticJudge,
-} from "../decision/wiring.js";
-import {
-  DeterministicProposalEngine,
-  DeterministicSelectionEngine,
-} from "../decision/deterministicEngines.js";
-import type { ChatComplete } from "../decision/questionPlanner.js";
 
 export type { LLMProvider, LlmBackend, LlmCallOptions, LlmTask };
 export {
@@ -72,8 +58,6 @@ export {
   resolveTaskTemperature,
 } from "./provider.js";
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
-export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
-export { LLMSelectionEngine, FALLBACK_SELECTION } from "./llmSelectionEngine.js";
 export { LLMIntentEngine, buildIntentPrompt } from "./llmIntentEngine.js";
 export type { IntentEngine } from "../intelligence/types.js";
 export { LLMSemanticJudge, buildSemanticJudgePrompt } from "./llmSemanticJudge.js";
@@ -82,42 +66,32 @@ export { buildRosterDisciplineLine, buildRosterRetryLine, rosterExampleActors } 
 export { extractJsonPayload, parseJsonObject, formatRepairPrompt } from "./json.js";
 
 export type LlmEngines = {
-  proposalEngine: ProposalEngine;
-  selectionEngine: SelectionEngine;
   consequenceEngine: ConsequenceEngine;
   semanticJudge: SemanticJudge;
   /**
-   * PLAN_V2 Phase 1: the intent call (single structured call replacing
-   * proposal+selection on the TURN_LOOP=v2 path). Simple-tier routing —
-   * the intent call is scene understanding, not hard reasoning.
+   * PLAN_V2 Phase 1: the intent call (single structured call deciding the
+   * actor's next action). Simple-tier routing — the intent call is scene
+   * understanding, not hard reasoning.
    */
   intentEngine: IntentEngine;
   /**
    * Item C2 (exp local-8b): per-turn engine routing. NPC turns use the
-   * standard tiered routing unchanged; user turns get hard-tier
-   * proposal+consequence when the capable tier is enabled and differs
-   * from the simple tier (selection is skipped for user turns anyway).
+   * standard tiered routing unchanged; user turns get the hard-tier
+   * consequence engine when the capable tier is enabled and differs from
+   * the simple tier (the intent call never runs for user turns anyway).
    * Silent fallback to the standard engines when the tiers are identical
    * or LLM_USER_CAPABLE_TIER is off.
    */
   getEnginesForTurn: (isUserTurn: boolean) => TurnEngines;
 };
 
-/** Per-turn engine set returned by getEnginesForTurn. */
+/**
+ * Per-turn engine set returned by getEnginesForTurn. The turn loop's only
+ * LLM engine is the narrator (consequence); the intent call runs on the
+ * standard simple tier for NPC turns and is skipped for user turns.
+ */
 export type TurnEngines = {
-  proposal: ProposalEngine;
-  selection: SelectionEngine;
   consequence: ConsequenceEngine;
-  judge: SemanticJudge;
-  /**
-   * Phase 4: chat completion hook for the dynamic question planner
-   * (LAYA_MODE=dynamic + LAYA_PLANNER=1). Built from the selection
-   * provider when the Laya layer is on; undefined otherwise. The planner
-   * prompt asks for enumeration, not choice, so no temperature override
-   * is applied here (per-task temperatures already skew low for
-   * selection).
-   */
-  plannerChatComplete?: ChatComplete;
 };
 
 /**
@@ -140,15 +114,15 @@ export function userCapableTierBackend(
   const flag = env["LLM_USER_CAPABLE_TIER"];
   const enabled = flag === undefined || (flag !== "0" && flag.toLowerCase() !== "false");
   if (!enabled) return undefined;
-  if (providers?.proposal !== undefined || providers?.consequence !== undefined) {
+  if (providers?.consequence !== undefined) {
     return undefined;
   }
   if (capableTierNoopReason(env, backends) !== undefined) return undefined;
   const cfg = resolveLlmEnv(env);
-  // The capable tier is the hard-task default backend (proposal is the
-  // representative hard task), honoring an explicit per-task proposal
-  // override; compared against the simple tier (selection's backend).
-  return backends?.proposal ?? resolveTaskBackend("proposal", cfg);
+  // The capable tier is the hard-task default backend (consequence is the
+  // representative hard task), honoring an explicit per-task consequence
+  // override; compared against the simple tier (intent's backend).
+  return backends?.consequence ?? resolveTaskBackend("consequence", cfg);
 }
 
 /**
@@ -160,10 +134,10 @@ export function capableTierNoopReason(
   backends?: CreateLlmEnginesOptions["backends"],
 ): string | undefined {
   const cfg = resolveLlmEnv(env);
-  const hardBackend = backends?.proposal ?? resolveTaskBackend("proposal", cfg);
-  const simpleBackend = backends?.selection ?? resolveTaskBackend("selection", cfg);
-  const hardModel = resolveTaskModel("proposal", cfg);
-  const simpleModel = resolveTaskModel("selection", cfg);
+  const hardBackend = backends?.consequence ?? resolveTaskBackend("consequence", cfg);
+  const simpleBackend = backends?.intent ?? resolveTaskBackend("intent", cfg);
+  const hardModel = resolveTaskModel("consequence", cfg);
+  const simpleModel = resolveTaskModel("intent", cfg);
   if (hardBackend === simpleBackend && hardModel === simpleModel) {
     return (
       `LLM_USER_CAPABLE_TIER is enabled but the hard tier resolves to the same provider+model as the simple tier ` +
@@ -178,7 +152,7 @@ function resolveUserCapableTier(
   logger: Logger,
   env: NodeJS.ProcessEnv,
   options: CreateLlmEnginesOptions,
-): { proposal: ProposalEngine; consequence: ConsequenceEngine } | undefined {
+): { consequence: ConsequenceEngine } | undefined {
   const hardBackend = userCapableTierBackend(env, options.backends, options.providers);
   if (hardBackend === undefined) {
     // Exp-4 item 2 (S1): the flag alone is a no-op when both tiers resolve
@@ -210,7 +184,6 @@ function resolveUserCapableTier(
   };
   const engineOptions = { maxRetries: options.maxRetries };
   return {
-    proposal: new LLMProposalEngine(logger, hardProvider(), engineOptions),
     consequence: new LLMConsequenceEngine(logger, hardProvider(), engineOptions),
   };
 }
@@ -218,15 +191,13 @@ function resolveUserCapableTier(
 export type CreateLlmEnginesOptions = {
   /** Per-task providers. Defaults to tier routing (hard → hosted, simple → local). */
   providers?: {
-    proposal?: LLMProvider;
-    selection?: LLMProvider;
+    intent?: LLMProvider;
     consequence?: LLMProvider;
     semantic?: LLMProvider;
   };
   /** Per-task backends (used when `providers` is omitted; wins over tier defaults). */
   backends?: {
-    proposal?: LlmBackend;
-    selection?: LlmBackend;
+    intent?: LlmBackend;
     consequence?: LlmBackend;
     semantic?: LlmBackend;
   };
@@ -239,9 +210,9 @@ export type CreateLlmEnginesOptions = {
  * Wire the real LLM engines with tiered routing.
  *
  * Default split — large hosted models only for hard tasks:
- *   proposal/consequence → LLM_BACKEND (default joingonka)
- *   selection/semantic  → LLM_SIMPLE_BACKEND (default ollama, local)
- * Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC},
+ *   consequence → LLM_BACKEND (default joingonka)
+ *   intent/semantic → LLM_SIMPLE_BACKEND (default ollama, local)
+ * Per-task overrides: LLM_BACKEND_{INTENT,CONSEQUENCE,SEMANTIC},
  * LLM_SIMPLE_MODEL (model override for simple tasks), or the `backends` /
  * `providers` options (explicit option wins over env).
  *
@@ -256,15 +227,9 @@ export function createLlmEngines(
 ): LlmEngines {
   const env = options.env ?? process.env;
   const providerFor = (which: LlmTask): LLMProvider => {
-    const explicit =
-      which === "semantic"
-        ? options.providers?.semantic
-        : options.providers?.[which as "proposal" | "selection" | "consequence"];
+    const explicit = options.providers?.[which as "intent" | "consequence" | "semantic"];
     if (explicit) return explicit;
-    const backendOverride =
-      which === "semantic"
-        ? options.backends?.semantic
-        : options.backends?.[which as "proposal" | "selection" | "consequence"];
+    const backendOverride = options.backends?.[which as "intent" | "consequence" | "semantic"];
     // F12: LLM_FAILOVER_BACKEND wraps the primary with failover to the
     // named backend (transport errors only — content errors stay local).
     const failoverBackend = parseBackend(env["LLM_FAILOVER_BACKEND"]);
@@ -281,62 +246,19 @@ export function createLlmEngines(
     return createProviderForTask(env, which);
   };
   const engineOptions = { maxRetries: options.maxRetries };
-  const llmProposalEngine = new LLMProposalEngine(logger, providerFor("proposal"), engineOptions);
-  // Capture the selection provider once: it backs both the chat selection
-  // engine and the dynamic planner's ChatComplete hook below.
-  const selectionProvider = providerFor("selection");
-  const chatSelectionEngine = new LLMSelectionEngine(logger, selectionProvider, engineOptions);
   const consequenceEngine = new LLMConsequenceEngine(logger, providerFor("consequence"), engineOptions);
-  const chatSemanticJudge = new LLMSemanticJudge(logger, providerFor("semantic"), engineOptions);
-  // PLAN_V2 Phase 1: the intent call rides the simple tier (same provider
-  // as selection — scene understanding on the local model, not hard
-  // reasoning on the hosted tier).
-  const intentEngine = new LLMIntentEngine(logger, selectionProvider, engineOptions);
-
-  // Phase 5: the Laya decision cascade is the DEFAULT proposal/selection
-  // path (readLayaRuntimeConfig defaults LAYA_MODE=static with the
-  // decision toggles on). When LAYA_MODE≠off, the Laya engines wrap a
-  // fallback: the LLM engines while LLM_DECISION_FALLBACK=1 (default
-  // during transition), the deterministic stubs when 0. Low cascade
-  // confidence or a Laya outage degrades to the fallback, never a crash.
-  const layaConfig = readLayaRuntimeConfig(env);
-  let proposalEngine: ProposalEngine = llmProposalEngine;
-  let selectionEngine: SelectionEngine = chatSelectionEngine;
-  let semanticJudge: SemanticJudge = chatSemanticJudge;
-  let plannerChatComplete: ChatComplete | undefined;
-  if (layaConfig.mode !== "off") {
-    const layaClient = createLayaClient(layaConfig);
-    const llmFallback = readLlmDecisionFallback(env);
-    proposalEngine = createLayaProposalEngine(
-      { client: layaClient },
-      layaConfig,
-      llmFallback ? llmProposalEngine : new DeterministicProposalEngine(),
-    );
-    if (layaConfig.toggles.selection) {
-      selectionEngine = createLayaSelectionEngine(
-        { client: layaClient },
-        layaConfig,
-        llmFallback ? chatSelectionEngine : new DeterministicSelectionEngine(),
-      );
-    }
-    if (layaConfig.toggles.judge) {
-      semanticJudge = createLayaSemanticJudge({ client: layaClient }, layaConfig);
-    }
-    plannerChatComplete = (prompt: string) => selectionProvider.complete("", prompt);
-  }
+  const semanticJudge = new LLMSemanticJudge(logger, providerFor("semantic"), engineOptions);
+  // PLAN_V2 Phase 1: the intent call rides the simple tier (scene
+  // understanding on the local model, not hard reasoning on the hosted
+  // tier).
+  const intentEngine = new LLMIntentEngine(logger, providerFor("intent"), engineOptions);
 
   const userTier = resolveUserCapableTier(logger, env, options);
   const getEnginesForTurn = (isUserTurn: boolean): TurnEngines => {
     if (isUserTurn && userTier !== undefined) {
-      return {
-        proposal: userTier.proposal,
-        selection: selectionEngine,
-        consequence: userTier.consequence,
-        judge: semanticJudge,
-        plannerChatComplete,
-      };
+      return { consequence: userTier.consequence };
     }
-    return { proposal: proposalEngine, selection: selectionEngine, consequence: consequenceEngine, judge: semanticJudge, plannerChatComplete };
+    return { consequence: consequenceEngine };
   };
-  return { proposalEngine, selectionEngine, consequenceEngine, semanticJudge, intentEngine, getEnginesForTurn };
+  return { consequenceEngine, semanticJudge, intentEngine, getEnginesForTurn };
 }

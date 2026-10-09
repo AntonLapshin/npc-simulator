@@ -3,17 +3,14 @@
 import { describe, expect, it } from "vitest";
 import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
-  buildConsequenceContext,
   buildIdentityAnchor,
-  buildProposalContext,
-  buildSelectionContext,
   getOpenQuestions,
   getRecentOwnActions,
+  buildNarrateContext,
 } from "../../src/engine/contextBuilder.js";
 import { renderTurnStory } from "../../src/logging/storyTrace.js";
 import { mockClassifyAction } from "../../src/mocks/mockSemanticJudge.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
-import { LLMProposalEngine } from "../../src/llm/llmProposalEngine.js";
 import { renderSuffix } from "../../src/llm/prompts.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import type { LLMProvider } from "../../src/llm/index.js";
@@ -182,39 +179,29 @@ describe("exp1-4 speech preservation applies to user turns too", () => {
 
 
 describe("exp1-6/7 questions cue + repetition guard", () => {
-  it("surfaces pending questions to proposal and selection", () => {
+  it("tracks pending questions until answered", () => {
     const world = makeTinyWorld();
     world.history.push(hist(world, "U: N, where is my desk?"));
     expect(getOpenQuestions(world, "n")).toHaveLength(1);
-    expect(buildProposalContext(world, "n")).toContain("where is my desk?");
-    const sel = buildSelectionContext(world, "n", ["Greet U warmly."]);
-    expect(sel).toContain("where is my desk?");
-    expect(sel).toMatch(/ANSWER/i);
   });
 
-  it("lists recent own actions with a do-not-repeat guard", () => {
+  it("lists recent own actions", () => {
     const world = makeTinyWorld();
     world.history.push(hist(world, "N: Walk over to greet U warmly."));
     world.history.push(hist(world, "N: Walk over to greet U warmly again."));
     expect(getRecentOwnActions(world, "n")).toHaveLength(2);
-    const sel = buildSelectionContext(world, "n", ["Walk over to greet U warmly."]);
-    expect(sel).toMatch(/do NOT repeat|Do not pick/i);
-    expect(sel).toContain("Walk over to greet U warmly.");
   });
 });
 
 describe("exp1-8/9/10 anchors and nudges", () => {
-  it("consequence context carries identity, pronoun, pose, and engine-ownership rules", () => {
+  it("narrate context carries identity and engine-ownership rules", () => {
     const world = makeTinyWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Sit at my desk." });
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Sit at my desk." }, undefined, {});
     expect(ctx).toContain("IDENTITY RULE");
-    expect(ctx).toContain("PRONOUN RULE");
-    // Phase 3: the POSE/PROP/OBJECT RULE is split — pose stays
-    // model-emitted, object/prop manipulation is engine-owned.
-    expect(ctx).toContain("POSE RULE");
-    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
-    expect(ctx).not.toContain("POSE/PROP/OBJECT RULE");
     expect(ctx).toContain("You are NOT");
+    // Engine ownership: narrate executed facts only, never invent actions.
+    expect(ctx).toContain("Narrate ONLY the executed facts above");
+    expect(ctx).toContain("GROUNDING RULES");
     expect(renderSuffix()).toContain("pose");
     expect(renderSuffix()).toMatch(/pronouns/i);
   });
@@ -228,34 +215,6 @@ describe("exp1-8/9/10 anchors and nudges", () => {
     expect(anchor).toContain("U (u)");
   });
 
-  it("selection context carries identity + repetition + question cues", () => {
-    const world = makeTinyWorld();
-    world.history.push(hist(world, "U: N, what is my first task?"));
-    world.history.push(hist(world, "N: Welcome to the team!"));
-    const sel = buildSelectionContext(world, "n", ["Welcome to the team!"]);
-    expect(sel).toContain("IDENTITY");
-    expect(sel).toMatch(/do NOT repeat/i);
-    expect(sel).toMatch(/ANSWER/i);
-  });
-});
-
-describe("exp1-12 proposal robustness", () => {
-  it("retries a single-suggestion set then returns a full cleaned set", async () => {
-    const logger = createTestLogger();
-    const provider = new StubProvider([
-      JSON.stringify({ suggestions: ["Only one idea."], reasoning: "thin" }),
-      JSON.stringify({
-        suggestions: ["1. Walk over and greet.", "Walk over and greet.", "  ", "Sit down and work."],
-        reasoning: "full",
-      }),
-    ]);
-    const engine = new LLMProposalEngine(logger, provider, { maxRetries: 3 });
-    const result = await engine.propose(makeTinyWorld(), "u");
-    expect(provider.calls).toHaveLength(2);
-    expect(provider.calls[1]).toMatch(/at least 2|full option set/);
-    expect(result.suggestions.length).toBeGreaterThanOrEqual(2);
-    expect(result.suggestions.every((s) => !/^\d+[.)]/.test(s))).toBe(true);
-  });
 });
 
 describe("mock judge resolves new semantic fields", () => {
