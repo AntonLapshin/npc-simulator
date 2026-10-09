@@ -1,12 +1,8 @@
 // Regression tests for experiment-4.md action items 1-10
 // (office-anton.json, 7 adaptive user turns, local 8B, ticks 0-20).
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
-import {
-  applyDeterministicGrounding,
-  isQuoteGroundedInAction,
-  resolveActionSemantics,
-} from "../../src/engine/actionSemantics.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
+import { isQuoteGroundedInAction } from "../../src/core/speech.js";
 import {
   hasSpeechToken,
   resolveDestinationObjectId,
@@ -16,12 +12,8 @@ import {
   computeMovementOutcome,
   MAX_STEP_DISTANCE,
 } from "../../src/core/movement.js";
-import {
-  isFallbackConsequence,
-  resolveWithValidation,
-  trySalvageConsequence,
-} from "../../src/engine/turnOrchestrator.js";
-import { applyConsequence, isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
+import { isFallbackConsequence, resolveRender } from "../../src/engine/turnOrchestrator.js";
+import { applyRenderResult, isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
 import {
   buildProposalContext,
   detectIdentityLeak,
@@ -37,11 +29,14 @@ import { NOT_DONE_SENTINEL } from "../../src/types.js";
 import type { ActionSemantics, ConsequenceResult, World } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
-  return { narrative, actorPatches: [], objectPatches: [], reasoning: "r" };
+  return { narrative, reasoning: "r" };
 }
 
-function stillSemantics(): ActionSemantics {
-  return { moves: false, speaks: false, quotedSpeech: [] };
+function baseFacts(over: Partial<RenderFacts> = {}): RenderFacts {
+  return {
+    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    x: 1, y: 1, engineManipulation: null, ...over,
+  };
 }
 
 /** Office-anton-shaped world: entrance spawn ~14 cells from the desks. */
@@ -83,18 +78,10 @@ describe("exp4-4 quote grounding at apostrophes (tick 5)", () => {
     expect(isQuoteGroundedInAction("Why don't we take a 10-minute break?", action)).toBe(true);
   });
 
-  it("drops truncated quotes in grounding, keeping the full action quote", () => {
-    const world = makeTinyWorld();
-    const full = "Why don't we take a 10-minute break?";
-    const { semantics, disagreements } = applyDeterministicGrounding(
-      world,
-      { actorId: "u", text: `Walk over and ask "${full}"` },
-      { moves: true, speaks: true, quotedSpeech: [full, "Why don"] },
-      { moves: true, speaks: true, quotedSpeech: [full] },
-      { moves: true, speaks: true, quotedSpeech: ["Why don"] },
-    );
-    expect(semantics!.quotedSpeech).toEqual([full]);
-    expect(disagreements.join(" ")).toMatch(/truncated quote/);
+  it("the full action quote grounds; the truncation does not", () => {
+    const action = `Walk over and ask "Why don't we take a 10-minute break?"`;
+    expect(isQuoteGroundedInAction("Why don't we take a 10-minute break?", action)).toBe(true);
+    expect(isQuoteGroundedInAction("Why don", action)).toBe(false);
   });
 });
 
@@ -107,41 +94,18 @@ describe("exp4-3 unquoted speech (tick 14)", () => {
     expect(hasSpeechToken("Glance over notes and mentally prepare questions.")).toBe(false);
   });
 
-  it("mock judge marks unquoted explanations as speech", async () => {
-    const world = makeTinyWorld();
-    const s = await new MockSemanticJudge().classify(world, {
-      actorId: "u",
-      text: "Nod and start explaining the first task.",
-    });
-    expect(s.speaks).toBe(true);
-  });
-
-  it("grounding forces speaks=true for unquoted speech verbs", async () => {
-    const world = makeTinyWorld();
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Nod and start explaining the first task." },
-      { ...baseResult("U looks up from the monitor."), actorPatches: [{ actorId: "u", thoughts: "Onboarding." }] },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: false, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    expect(resolved.semantics!.speaks).toBe(true);
-    expect(resolved.disagreements!.join(" ")).toMatch(/speaks deterministic override/);
-  });
-
   it("hollow look-up fails the speech gate once speech is detected", () => {
     const world = makeTinyWorld();
-    const v = validateConsequence(
+    // Phase 4: the restored speech.no_speech_rendered prose gate — the
+    // action carries the actor's own utterance ("explaining"), the
+    // narrative renders no speech.
+    const errors = validateRenderProse(
       world,
-      { ...baseResult("Dana looks up from his monitor, seeing Anton walk in."), actorPatches: [{ actorId: "u", thoughts: "Waiting." }] },
       { actorId: "u", text: "Nod and start explaining the first task." },
-      { moves: false, speaks: true, quotedSpeech: [] },
+      { ...baseResult("U looks up from the monitor."), thoughts: "Waiting." },
+      baseFacts(),
     );
-    expect(v.valid).toBe(false);
+    expect(errors.some((e) => e.code === "speech.no_speech_rendered")).toBe(true);
   });
 });
 
@@ -173,98 +137,37 @@ describe("exp4-5 ranked destination resolution (ticks 4/7/15/18)", () => {
   });
 });
 
-describe("exp4-7 narrowed merged-OR (ticks 3/7/10/15/17)", () => {
-  it("merged moves=true on glance text is kept (F1: token never downgrades)", async () => {
-    const world = makeTinyWorld();
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Glance over notes and mentally prepare questions." },
-      { ...baseResult("U teleports."), actorPatches: [], effects: { moved: true, spoke: false } },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: true, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    // F1: a true merged verdict stands even without a displacement token —
-    // the fixed verb ontology is not the whole language.
-    expect(resolved.semantics!.moves).toBe(true);
-    expect(resolved.disagreements!.join(" ")).toMatch(/kept from the merged verdict/);
-  });
-
-  it("deterministic moves=true survives effects+judge both claiming stillness", async () => {
-    const world = makeTinyWorld();
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Walk to N." },
-      { ...baseResult("U adjusts his tie."), actorPatches: [], effects: { moved: false, spoke: false } },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: false, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    expect(resolved.semantics!.moves).toBe(true);
-    expect(resolved.disagreements!.join(" ")).toMatch(/deterministic override/);
-  });
-
-  it("grounded destination wins over the consequence's wrong landmark (tick 10)", async () => {
-    const world = antonWorld();
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "tanya", text: "Head to Anton's desk and help him set up his laptop." },
-      {
-        ...baseResult("Tanya walks."),
-        actorPatches: [],
-        effects: { moved: true, spoke: false, destinationObjectId: "tanya_desk" },
-      },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: true, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    expect(resolved.semantics!.destinationObjectId).toBe("anton_desk");
-    expect(resolved.disagreements!.join(" ")).toMatch(/kept grounded/);
-  });
-});
 
 describe("exp4-2 reverse verb-drop (ticks 2/16)", () => {
-  it("fails effects.moved=true with no position patch (tick 2 hollow pass)", () => {
+  it("fails narrated locomotion with no engine move (tick 2 hollow pass)", () => {
     const world = antonWorld();
-    const v = validateConsequence(
+    // Phase 4: the engine is the source of truth — the model cannot
+    // self-declare moved=true, so the hollow pass surfaces as
+    // narrated-without-move.
+    const errors = validateRenderProse(
       world,
+      { actorId: "dana", text: "Scan candidates and compose the email." },
       {
         ...baseResult("Dana finishes screening, stands up, walks to the kitchen for a coffee break."),
-        actorPatches: [{ actorId: "dana", thoughts: "Unwinding." }],
-        effects: { moved: true, spoke: false },
+        thoughts: "Unwinding.",
       },
-      { actorId: "dana", text: "Scan candidates and compose the email." },
-      stillSemantics(),
+      baseFacts({ x: 15, y: 11 }),
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/no position change/);
+    expect(errors.some((e) => e.code === "movement.narrated_without_move")).toBe(true);
   });
 
-  it("fails narrated pose change with no pose patch", () => {
+  it("fails narrated pose change the engine did not plan", () => {
     const world = makeTinyWorld();
-    const v = validateConsequence(
+    const errors = validateRenderProse(
       world,
-      {
-        ...baseResult("U stands up and stretches."),
-        actorPatches: [{ actorId: "u", thoughts: "Awake." }],
-      },
       { actorId: "u", text: "Wait for the meeting to start." },
-      stillSemantics(),
+      { ...baseResult("U stands up and stretches."), thoughts: "Awake." },
+      baseFacts(),
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/pose/);
+    expect(errors.some((e) => e.code === "movement.pose_change_ungrounded")).toBe(true);
   });
 
-  it("passes posture prose and staying-negations without patches", () => {
+  it("passes posture prose and staying-negations", () => {
     const world = makeTinyWorld();
     for (const narrative of [
       "U glances over the notes, staying seated.",
@@ -272,31 +175,26 @@ describe("exp4-2 reverse verb-drop (ticks 2/16)", () => {
       "U returns to typing, focusing on the code.",
       "U stands beside the desk, waiting.",
     ]) {
-      const v = validateConsequence(
+      const errors = validateRenderProse(
         world,
-        { ...baseResult(narrative), actorPatches: [{ actorId: "u", thoughts: "Zone." }] },
         { actorId: "u", text: "Wait quietly." },
-        stillSemantics(),
+        { ...baseResult(narrative), thoughts: "Zone." },
+        baseFacts(),
       );
-      expect(errorText(v.errors)).not.toMatch(/narrative describes movement|declares moved=true/);
+      expect(errorText(errors)).not.toMatch(/narrative describes movement/);
     }
   });
 
-  it("passes narrated locomotion when the position patch backs it", () => {
+  it("passes narrated locomotion when the engine moved", () => {
     const world = makeTinyWorld();
-    const v = validateConsequence(
+    world.actors.find((a) => a.id === "n")!.name = "Nadia";
+    const errors = validateRenderProse(
       world,
-      {
-        ...baseResult("U approaches N, standing beside them."),
-        actorPatches: [
-          { actorId: "u", x: 2, y: 2, thoughts: "Going." },
-          { actorId: "n", thoughts: "Hello." },
-        ],
-      },
-      { actorId: "u", text: "Walk toward N." },
-      { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
+      { actorId: "u", text: "Walk toward Nadia." },
+      { ...baseResult("U approaches Nadia, standing beside them."), thoughts: "Going." },
+      baseFacts({ moved: true, x: 2, y: 2 }),
     );
-    expect(v).toEqual({ valid: true, errors: [] });
+    expect(errors).toEqual([]);
   });
 });
 
@@ -310,107 +208,45 @@ describe("exp4-1 clamp over-cap walks to a partial step (ticks 15/18)", () => {
     expect(Math.hypot(clamped!.x - 16, clamped!.y - 2)).toBeGreaterThan(3);
   });
 
-  it("resolveWithValidation ignores over-cap model coordinates and applies the engine step (tick-15 shape)", async () => {
+  it("resolveRender ignores model-narrated arrival and applies the engine step (tick-15 shape)", async () => {
     const logger = new Logger({ sessionId: "exp4-clamp", writeToFile: false });
     const world = antonWorld();
+    // Phase 4: the render carries no coordinates at all — the engine
+    // computes the step deterministically; the narrative is validated
+    // against the executed facts.
     const overCap: ConsequenceResult = {
       narrative: "Anton walks to his desk and sits down.",
-      actorPatches: [{ actorId: "anton", x: 4, y: 9, pose: "sit", thoughts: "Going." }],
-      objectPatches: [],
+      thoughts: "Going.",
       reasoning: "r",
-      effects: { moved: true, destinationObjectId: "anton_desk", spoke: false },
     };
     const deps = makeTestDeps(logger, {
       consequenceEngine: { resolve: async () => structuredClone(overCap) } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
-    const out = await resolveWithValidation(world, { actorId: "anton", text: "Walk to my desk and sit down." }, deps);
-    expect(out.narrative).not.toBe("Nothing changes.");
-    const moved = out.actorPatches.find((p) => p.actorId === "anton")!;
-    // Phase 1: the model's over-cap coordinates are ignored (logged at
-    // debug); the engine computes the step deterministically instead.
+    const out = await resolveRender(world, { actorId: "anton", text: "Walk to my desk and sit down." }, deps);
+    expect(out.render.narrative).not.toBe("Nothing changes.");
+    expect(out.liveness).toBe(false);
+    // The engine step is capped and strictly closer to the desk.
     const expected = computeMovementOutcome(world, "anton", { destinationObjectId: "anton_desk" }, null)!;
-    expect(moved.x).toBe(expected.x);
-    expect(moved.y).toBe(expected.y);
-    expect(Math.hypot(moved.x! - 16, moved.y! - 2)).toBeLessThanOrEqual(MAX_STEP_DISTANCE + 1e-9);
-    // Non-coordinate patch content survives the merge.
-    expect(moved.pose).toBe("sit");
-    const ignored = logger.store.byEvent("model_coordinates_ignored");
-    expect(ignored.some((e) => (e.output as { ignoredX?: number })?.ignoredX === 4)).toBe(true);
+    expect(out.executed.movement).not.toBeNull();
+    expect(out.executed.movement!.x).toBe(expected.x);
+    expect(out.executed.movement!.y).toBe(expected.y);
+    expect(Math.hypot(expected.x - 16, expected.y - 2)).toBeLessThanOrEqual(MAX_STEP_DISTANCE + 1e-9);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 });
 
-describe("exp4-8 salvage entry logging (whole run)", () => {
-  it("logs salvage_evaluated on accept and on hard-gate refusal", () => {
-    const logger = createTestLogger();
-    const world = antonWorld();
-    world.actors.find((a) => a.id === "anton")!.x = 5;
-    world.actors.find((a) => a.id === "anton")!.y = 5;
-    const action = { actorId: "anton", text: "Walk to the coffee machine." };
-    const semantics: ActionSemantics = {
-      moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [],
-    };
-    // Accept: valid movement (strictly closer to the machine) + stray patch.
-    const ok = trySalvageConsequence(
-      world, action,
-      {
-        narrative: "Anton approaches the coffee machine, standing beside it.",
-        actorPatches: [
-          { actorId: "anton", x: 3, y: 2, thoughts: "Coffee." },
-          { actorId: "jeff", thoughts: "Hi." },
-        ],
-        objectPatches: [], reasoning: "r",
-      },
-      semantics, logger,
-    );
-    expect(ok).not.toBeNull();
-    // Phase 3: phantom-manipulation prose no longer refuses — tier-2
-    // salvage advances the movement with the wording miss logged as a
-    // warning.
-    const tier2 = trySalvageConsequence(
-      world,
-      { actorId: "anton", text: "Walk to the coffee machine." },
-      {
-        narrative: "Anton picks up the mug and pours coffee.",
-        actorPatches: [{ actorId: "anton", x: 3, y: 2, thoughts: "Coffee." }],
-        objectPatches: [], reasoning: "r",
-      },
-      semantics, logger, undefined, null,
-    );
-    expect(tier2).not.toBeNull();
-    expect(errorText(tier2!.warnings)).toMatch(/object\.phantom_manipulation/);
-    // Refuse: far contact with no adjacency (adjacency stays hard).
-    const no = trySalvageConsequence(
-      world,
-      { actorId: "anton", text: "Shake Tanya's hand warmly." },
-      {
-        narrative: "Anton shakes Tanya's hand.",
-        actorPatches: [{ actorId: "anton", thoughts: "Firm grip." }],
-        objectPatches: [], reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [], contactActorId: "tanya" },
-      logger,
-    );
-    expect(no).toBeNull();
-    const evals = logger.store.byEvent("salvage_evaluated");
-    expect(evals).toHaveLength(3);
-    expect((evals[0]!.output as { eligible: boolean }).eligible).toBe(true);
-    expect((evals[1]!.output as { eligible: boolean }).eligible).toBe(true);
-    expect((evals[2]!.output as { eligible: boolean }).eligible).toBe(false);
-    expect((evals[2]!.output as { blockers: Array<{ code: string; message: string }> }).blockers.length).toBeGreaterThan(0);
-  });
-});
 
 describe("exp4-6 fallback history marked un-applied (ticks 8/16/20)", () => {
   it("marks fallback entries and detects the marker", () => {
     const world = makeTinyWorld();
     const action = { actorId: "u", text: "Nod and start explaining the first task." };
+    const noExec = { movement: null, pose: null, manipulation: null };
     // Q1: clean turns record the narrative, not the action text.
-    const applied = applyConsequence(world, baseResult("Done."), action);
+    const applied = applyRenderResult(world, action, baseResult("Done."), noExec);
     expect(applied.history.at(-1)!.text).toBe("U: Done.");
     expect(isFallbackHistoryEntry(applied.history.at(-1)!)).toBe(false);
-    const fellBack = applyConsequence(world, baseResult("Done."), action, undefined, { fallback: true });
+    const fellBack = applyRenderResult(world, action, baseResult("Done."), noExec, undefined, { fallback: true });
     // F22: the human-readable "(not done)" text is kept, but detection
     // uses the sentinel.
     expect(fellBack.history.at(-1)!.text).toBe(`U tried: ${action.text} (not done)${NOT_DONE_SENTINEL}`);
@@ -420,8 +256,8 @@ describe("exp4-6 fallback history marked un-applied (ticks 8/16/20)", () => {
   });
 
   it("isFallbackConsequence detects the canonical fallback only", () => {
-    expect(isFallbackConsequence({ narrative: "Nothing changes.", actorPatches: [], objectPatches: [], reasoning: "x" })).toBe(true);
-    expect(isFallbackConsequence({ narrative: "Nothing changes.", actorPatches: [{ actorId: "u", thoughts: "Hmm." }], objectPatches: [], reasoning: "x" })).toBe(false);
+    expect(isFallbackConsequence({ narrative: "Nothing changes.", reasoning: "x" })).toBe(true);
+    expect(isFallbackConsequence({ narrative: "Changed.", reasoning: "x" })).toBe(false);
   });
 
   it("open questions and recent actions ignore fallback attempts", () => {

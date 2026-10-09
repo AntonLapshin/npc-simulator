@@ -15,12 +15,11 @@ import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import {
-  resolveWithValidation,
+  resolveRender,
   runTurn,
 } from "../../src/engine/turnOrchestrator.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
 import {
-  applyEngineMovement,
   executedMovementFacts,
   executeMovement,
   executorDestination,
@@ -187,79 +186,6 @@ describe("executeMovement", () => {
   });
 });
 
-describe("applyEngineMovement", () => {
-  const outcome = () => computeMovementOutcome(moveWorld(), "alf", { destinationActorId: "bea" }, null)!;
-
-  it("strips model coordinates from every patch and applies the engine outcome to the acting actor", () => {
-    const ignored: Array<[string, number | undefined, number | undefined]> = [];
-    const merged = applyEngineMovement(
-      {
-        narrative: "Alf walks.",
-        actorPatches: [
-          { actorId: "alf", x: 9, y: 0, thoughts: "Teleport!" },
-          { actorId: "bea", x: 5, y: 5, thoughts: "Huh?" },
-        ],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      "alf",
-      outcome(),
-      (id, x, y) => ignored.push([id, x, y]),
-    );
-    expect(ignored).toEqual([["alf", 9, 0], ["bea", 5, 5]]);
-    const alf = merged.actorPatches.find((p) => p.actorId === "alf")!;
-    const expected = outcome();
-    expect(alf.x).toBe(expected.x);
-    expect(alf.y).toBe(expected.y);
-    const bea = merged.actorPatches.find((p) => p.actorId === "bea")!;
-    expect(bea.x).toBeUndefined();
-    expect(bea.y).toBeUndefined();
-  });
-
-  it("adds a position-only patch when the consequence did not patch the actor", () => {
-    const merged = applyEngineMovement(
-      {
-        narrative: "Alf walks.",
-        actorPatches: [],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      "alf",
-      outcome(),
-    );
-    const alf = merged.actorPatches.find((p) => p.actorId === "alf")!;
-    const expected = outcome();
-    expect(alf).toEqual({ actorId: "alf", x: expected.x, y: expected.y });
-  });
-
-  it("strips coordinates and adds nothing for a null outcome", () => {
-    const merged = applyEngineMovement(
-      {
-        narrative: "Alf types.",
-        actorPatches: [{ actorId: "alf", x: 2, y: 2, thoughts: "t" }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      "alf",
-      null,
-    );
-    const alf = merged.actorPatches.find((p) => p.actorId === "alf")!;
-    expect(alf.x).toBeUndefined();
-    expect(alf.y).toBeUndefined();
-    expect(alf.thoughts).toBe("t");
-  });
-
-  it("does not mutate the input result", () => {
-    const input: ConsequenceResult = {
-      narrative: "Alf walks.",
-      actorPatches: [{ actorId: "alf", x: 9, y: 0, thoughts: "t" }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    applyEngineMovement(input, "alf", outcome());
-    expect(input.actorPatches[0]!.x).toBe(9);
-  });
-});
 
 describe("executedMovementFacts", () => {
   it("narrates an executed move with the no-coordinates rule", () => {
@@ -280,55 +206,51 @@ describe("executedMovementFacts", () => {
 });
 
 describe("Phase 1 golden runs: B3 (narrated walk, no patch)", () => {
-  it("engine movement materializes when the render emits no x/y", async () => {
+  it("engine movement materializes when the render emits prose only", async () => {
     const logger = new Logger({ sessionId: "phase1-b3", writeToFile: false });
     const world = moveWorld();
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence({
         narrative: "Alf walks toward Bea.",
-        actorPatches: [{ actorId: "alf", thoughts: "Going to say hi." }],
-        objectPatches: [],
+        thoughts: "Going to say hi.",
         reasoning: "r",
-        effects: { moved: true, destinationActorId: "bea", spoke: false, quotedSpeech: [] },
       }),
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       world, { actorId: "alf", text: "Walk toward Bea." }, deps,
     );
-    expect(result.narrative).not.toBe("Nothing changes.");
-    const patch = result.actorPatches.find((p) => p.actorId === "alf")!;
+    expect(result.render.narrative).not.toBe("Nothing changes.");
     const expected = computeMovementOutcome(world, "alf", { destinationActorId: "bea" }, null)!;
     // Final position equals the pathfinder output — no model coordinates involved.
-    expect(patch.x).toBe(expected.x);
-    expect(patch.y).toBe(expected.y);
-    expect(Math.hypot(patch.x! - 8, patch.y! - 8)).toBeLessThan(Math.hypot(1 - 8, 1 - 8));
+    expect(result.executed.movement).not.toBeNull();
+    expect(result.executed.movement!.x).toBe(expected.x);
+    expect(result.executed.movement!.y).toBe(expected.y);
+    expect(Math.hypot(expected.x - 8, expected.y - 8)).toBeLessThan(Math.hypot(1 - 8, 1 - 8));
     expect(logger.store.byEvent("movement_planned")).toHaveLength(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
-  it("deliberately wrong model x/y is ignored — the engine position wins", async () => {
+  it("garbage coordinates in the render response are ignored — the engine position wins", async () => {
     const logger = new Logger({ sessionId: "phase1-wrongxy", writeToFile: false });
     const world = moveWorld();
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence({
         narrative: "Alf walks toward Bea.",
-        actorPatches: [{ actorId: "alf", x: 9, y: 0, thoughts: "Teleport!" }],
-        objectPatches: [],
+        thoughts: "Going to say hi.",
         reasoning: "r",
-        effects: { moved: true, destinationActorId: "bea", spoke: false, quotedSpeech: [] },
-      }),
+        actorPatches: [{ actorId: "alf", x: 9, y: 0, thoughts: "Teleport!" }],
+      } as never),
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       world, { actorId: "alf", text: "Walk toward Bea." }, deps,
     );
-    const patch = result.actorPatches.find((p) => p.actorId === "alf")!;
+    // Phase 4: old-schema keys are never read — the engine outcome stands.
     const expected = computeMovementOutcome(world, "alf", { destinationActorId: "bea" }, null)!;
-    expect(patch.x).toBe(expected.x);
-    expect(patch.y).toBe(expected.y);
-    expect([patch.x, patch.y]).not.toEqual([9, 0]);
-    const ignored = logger.store.byEvent("model_coordinates_ignored");
-    expect(ignored.length).toBeGreaterThanOrEqual(1);
-    expect(ignored[0]!.output).toMatchObject({ ignoredActorId: "alf", ignoredX: 9, ignoredY: 0 });
+    expect(result.executed.movement!.x).toBe(expected.x);
+    expect(result.executed.movement!.y).toBe(expected.y);
+    expect([expected.x, expected.y]).not.toEqual([9, 0]);
+    expect(logger.store.byEvent("render_accepted")).toHaveLength(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
   it("the render input carries the executed movement as facts", () => {
@@ -359,34 +281,33 @@ describe("Phase 1 golden runs: B3 (narrated walk, no patch)", () => {
   });
 });
 
-describe("Phase 1 golden runs: B6 (patch moves the wrong actor)", () => {
-  it("a wrong-actor patch loses its coordinates; only the acting actor moves", async () => {
+describe("Phase 1 golden runs: B6 (only the acting actor moves)", () => {
+  it("the render prose cannot relocate other actors — only the engine moves alf", async () => {
     const logger = new Logger({ sessionId: "phase1-b6", writeToFile: false });
     const world = moveWorld();
     const deps = makeTestDeps(logger, {
+      forceAllNpc: true,
+      proposalEngine: new MockProposalEngine(logger, {
+        alf: { suggestions: ["Walk toward Bea."], reasoning: "r" },
+      }),
+      selectionEngine: new MockSelectionEngine(logger, {
+        alf: { action: "Walk toward Bea.", reasoning: "r" },
+      }),
       consequenceEngine: scriptedConsequence({
         narrative: "Alf walks toward Bea.",
-        actorPatches: [
-          { actorId: "bea", x: 5, y: 5, thoughts: "Why am I moving?" },
-          { actorId: "alf", thoughts: "Walking." },
-        ],
-        objectPatches: [],
+        thoughts: "Walking.",
         reasoning: "r",
-        effects: { moved: true, destinationActorId: "bea", spoke: false, quotedSpeech: [] },
       }),
     });
-    const result = await resolveWithValidation(
-      world, { actorId: "alf", text: "Walk toward Bea." }, deps,
-    );
-    const bea = result.actorPatches.find((p) => p.actorId === "bea")!;
-    expect(bea.x).toBeUndefined();
-    expect(bea.y).toBeUndefined();
-    const alf = result.actorPatches.find((p) => p.actorId === "alf")!;
     const expected = computeMovementOutcome(world, "alf", { destinationActorId: "bea" }, null)!;
-    expect(alf.x).toBe(expected.x);
-    expect(alf.y).toBe(expected.y);
-    const ignored = logger.store.byEvent("model_coordinates_ignored");
-    expect(ignored.some((e) => (e.output as { ignoredActorId?: string })?.ignoredActorId === "bea")).toBe(true);
+    const next = await runTurn(world, deps);
+    const alf = next.actors.find((a) => a.id === "alf")!;
+    const bea = next.actors.find((a) => a.id === "bea")!;
+    expect([alf.x, alf.y]).toEqual([expected.x, expected.y]);
+    // Bea never moved: the render contract gives the model no channel to
+    // relocate other actors.
+    expect([bea.x, bea.y]).toEqual([8, 8]);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 });
 
@@ -397,19 +318,15 @@ describe("Phase 1 golden runs: stationary and contact", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence({
         narrative: "Alf stares blankly at the wall.",
-        actorPatches: [{ actorId: "alf", thoughts: "So blank." }],
-        objectPatches: [],
+        thoughts: "So blank.",
         reasoning: "r",
-        effects: { moved: false, spoke: false, quotedSpeech: [] },
       }),
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       world, { actorId: "alf", text: "Stare blankly at the wall." }, deps,
     );
-    expect(result.narrative).not.toBe("Nothing changes.");
-    const patch = result.actorPatches.find((p) => p.actorId === "alf")!;
-    expect(patch.x).toBeUndefined();
-    expect(patch.y).toBeUndefined();
+    expect(result.render.narrative).not.toBe("Nothing changes.");
+    expect(result.executed.movement).toBeNull();
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
@@ -421,21 +338,17 @@ describe("Phase 1 golden runs: stationary and contact", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence({
         narrative: "Alf shakes Bea's hand.",
-        actorPatches: [{ actorId: "alf", thoughts: "Handshake." }],
-        objectPatches: [],
+        thoughts: "Handshake.",
         reasoning: "r",
-        effects: { moved: false, spoke: false, quotedSpeech: [], contactActorId: "bea" },
       }),
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       world, { actorId: "alf", text: "Shake Bea's hand." }, deps,
     );
-    expect(result.narrative).not.toBe("Nothing changes.");
-    const patch = result.actorPatches.find((p) => p.actorId === "alf")!;
-    expect(patch.x).toBeDefined();
-    expect(patch.y).toBeDefined();
+    expect(result.render.narrative).not.toBe("Nothing changes.");
+    expect(result.executed.movement).not.toBeNull();
     // Adjacent to Bea (contact radius 2.5).
-    expect(Math.hypot(patch.x! - 4, patch.y! - 2)).toBeLessThanOrEqual(2.5);
+    expect(Math.hypot(result.executed.movement!.x - 4, result.executed.movement!.y - 2)).toBeLessThanOrEqual(2.5);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 });
@@ -455,10 +368,8 @@ describe("Phase 1 end-to-end: runTurn applies engine movement to the world", () 
       consequenceEngine: new MockConsequenceEngine(logger, {
         "walk toward bea.": {
           narrative: "Alf walks toward Bea.",
-          actorPatches: [{ actorId: "alf", thoughts: "Going." }],
-          objectPatches: [],
+          thoughts: "Going.",
           reasoning: "r",
-          effects: { moved: true, destinationActorId: "bea", spoke: false, quotedSpeech: [] },
         },
       }),
     });

@@ -25,7 +25,7 @@
 //     failure; the glance-at-test-plan substitute shares the {laptop}
 //     cluster and is banned too; an unrelated cluster is not.
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   matchObserverCoordination,
   observerNameTokens,
@@ -33,10 +33,7 @@ import {
   validateNarrativeActors,
   validateObserverSubject,
 } from "../../src/engine/validate/narrative.js";
-import {
-  findSupplementObserverSubject,
-  recheckAcceptedProse,
-} from "../../src/engine/turnSalvageGates.js";
+import { findSupplementObserverSubject } from "../../src/engine/validate/narrative.js";
 import {
   executorDestination,
   executeMovement,
@@ -116,26 +113,33 @@ function silentSemantics(): ActionSemantics {
 // Item 5 (S4): the name audit scans the narrative, never reasoning.
 // ---------------------------------------------------------------------------
 describe("exp5 item 5 (S4): narrative-only actor audit", () => {
-  it("tick-27 repro: good-quote salvage with engine-worded reasoning passes", () => {
+  it("tick-27 repro: good-quote render with engine-worded reasoning passes", () => {
     const world = officeWorld();
     const quote =
       "Thanks both for making me feel welcome. I'm going to get my laptop set up now.";
-    const candidate: ConsequenceResult = {
-      narrative: `Anton says "${quote}"`,
-      actorPatches: [{ actorId: "anton", x: 4, y: 10 }],
-      objectPatches: [],
-      // Engine-written, never canonical — must not trip the audit.
-      reasoning: "Fallback due to Consequence Engine failure.",
-      effects: { moved: false, spoke: true, quotedSpeech: [quote] },
-    };
-    expect(
-      validateNarrativeActors(world, { narrative: candidate.narrative }),
-    ).toEqual([]);
     const action: Action = {
       actorId: "anton",
       text: `I smile and say, 'Thanks both for making me feel welcome. I'm going to get my laptop set up now.'`,
     };
-    expect(recheckAcceptedProse(world, action, candidate)).toEqual([]);
+    const candidate: ConsequenceResult = {
+      narrative: `Anton says "${quote}"`,
+      // Engine-worded reasoning, never canonical — must not trip the audit.
+      reasoning: "Fallback due to Consequence Engine failure.",
+    };
+    expect(
+      validateNarrativeActors(world, { narrative: candidate.narrative }),
+    ).toEqual([]);
+    expect(
+      validateRenderProse(
+        world,
+        action,
+        candidate,
+        {
+          exactQuote: quote, moved: false, pose: null, effectivePose: "stand",
+          x: 16, y: 2, engineManipulation: null,
+        },
+      ),
+    ).toEqual([]);
   });
 
   it("still catches a genuinely unknown person in the narrative", () => {
@@ -154,16 +158,19 @@ describe("exp5 item 7 (S3): accept-path prose gates", () => {
   it("stay-action→teleport rejects on the accept path", () => {
     const world = officeWorld();
     const action: Action = { actorId: "anton", text: "Stay where you are." };
-    const result: ConsequenceResult = {
-      narrative: "Anton stays put.",
-      actorPatches: [{ actorId: "anton", x: 10, y: 10, thoughts: "Waiting." }],
-      objectPatches: [],
-      reasoning: "r",
-      effects: { moved: true, spoke: false },
-    };
-    const errors = recheckAcceptedProse(world, action, result);
+    // Phase 4: the model cannot self-declare moved=true — the engine
+    // decides, so the teleport surfaces as narrated-without-move.
+    const errors = validateRenderProse(
+      world,
+      action,
+      { narrative: "Anton walks into the conference room.", reasoning: "r" },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 16, y: 2, engineManipulation: null,
+      },
+    );
     expect(
-      errors.some((e) => e.code === "movement.unexpected_move"),
+      errors.some((e) => e.code === "movement.narrated_without_move"),
     ).toBe(true);
   });
 
@@ -222,15 +229,16 @@ describe("exp5 item 7 (S3): accept-path prose gates", () => {
         action,
       ).some((e) => e.code === "narrative.observer_as_subject"),
     ).toBe(true);
-    // And the full accept gate rejects the tick-23 narrative.
-    const result: ConsequenceResult = {
-      narrative: `Dana: ${narrative}`,
-      actorPatches: [{ actorId: "dana", thoughts: "Watching." }],
-      objectPatches: [],
-      reasoning: "r",
-      effects: { moved: false, spoke: false },
-    };
-    const errors = recheckAcceptedProse(world, action, result);
+    // And the full render validation rejects the tick-23 narrative.
+    const errors = validateRenderProse(
+      world,
+      action,
+      { narrative: `Dana: ${narrative}`, thoughts: "Watching.", reasoning: "r" },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 15, y: 11, engineManipulation: null,
+      },
+    );
     expect(
       errors.some((e) => e.code === "narrative.observer_as_subject"),
     ).toBe(true);
