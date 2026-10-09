@@ -20,6 +20,7 @@ import {
   readLayaPlausibility,
   readLayaRuntimeConfig,
   readLayaSalienceThreshold,
+  readLlmDecisionFallback,
 } from "../../src/config.js";
 import {
   classifyIntentKind,
@@ -44,23 +45,28 @@ import { makeTinyWorld } from "../helpers.js";
 // ---------------------------------------------------------------------------
 
 describe("readLayaRuntimeConfig", () => {
-  it("defaults to off with every toggle disabled", () => {
+  it("Phase 5 defaults: cascade on, decision toggles on", () => {
     const cfg = readLayaRuntimeConfig({});
-    expect(cfg.mode).toBe("off");
+    expect(cfg.mode).toBe("static");
     expect(cfg.toggles).toEqual({
-      selection: false,
+      selection: true,
       judge: false,
       triage: false,
       salience: false,
       planner: false,
-      // Exp-2-E additions: also off by default.
+      // Exp-2-E salvageSelect: machinery deleted in Phase 4 — stays off.
       salvageSelect: false,
-      locomotion: false,
-      renderability: false,
+      locomotion: true,
+      renderability: true,
     });
     expect(cfg.url).toBe("http://127.0.0.1:8000");
     expect(cfg.confidenceThreshold).toBe(0.55);
     expect(cfg.timeoutMs).toBe(5000);
+  });
+
+  it("LAYA_MODE=off restores the pure chat path", () => {
+    const cfg = readLayaRuntimeConfig({ LAYA_MODE: "off" });
+    expect(cfg.mode).toBe("off");
   });
 
   it("honors explicit env values", () => {
@@ -93,6 +99,18 @@ describe("readLayaRuntimeConfig", () => {
   });
 });
 
+describe("readLlmDecisionFallback", () => {
+  it("defaults on (LLM fallback during transition)", () => {
+    expect(readLlmDecisionFallback({})).toBe(true);
+  });
+  it("parses explicit values", () => {
+    expect(readLlmDecisionFallback({ LLM_DECISION_FALLBACK: "0" })).toBe(false);
+    expect(readLlmDecisionFallback({ LLM_DECISION_FALLBACK: "false" })).toBe(false);
+    expect(readLlmDecisionFallback({ LLM_DECISION_FALLBACK: "1" })).toBe(true);
+    expect(readLlmDecisionFallback({ LLM_DECISION_FALLBACK: "yes" })).toBe(true);
+  });
+});
+
 describe("readLayaSalienceThreshold / readLayaPlausibility", () => {
   it("defaults: threshold 3, plausibility off", () => {
     expect(readLayaSalienceThreshold({})).toBe(3);
@@ -113,18 +131,26 @@ describe("readLayaSalienceThreshold / readLayaPlausibility", () => {
 
 describe("isLayaIntentFirst", () => {
   it("requires mode≠off and the selection toggle", () => {
+    // Phase 5 defaults: static mode + selection on → intent-first is on.
     const base = readLayaRuntimeConfig({});
-    expect(isLayaIntentFirst(base)).toBe(false);
+    expect(isLayaIntentFirst(base)).toBe(true);
     const sel = readLayaRuntimeConfig({ LAYA_MODE: "static", LAYA_SELECTION: "1" });
     expect(isLayaIntentFirst(sel)).toBe(true);
-    const noSel = readLayaRuntimeConfig({ LAYA_MODE: "static" });
+    const noSel = readLayaRuntimeConfig({ LAYA_MODE: "static", LAYA_SELECTION: "0" });
     expect(isLayaIntentFirst(noSel)).toBe(false);
+    const off = readLayaRuntimeConfig({ LAYA_MODE: "off" });
+    expect(isLayaIntentFirst(off)).toBe(false);
   });
 });
 
 describe("layaWiringFromEnv", () => {
-  it("returns undefined when Laya is off (default)", () => {
-    expect(layaWiringFromEnv({ env: {} })).toBeUndefined();
+  it("returns wiring by default (Phase 5: static cascade on)", () => {
+    const wiring = layaWiringFromEnv({ env: {} });
+    expect(wiring).toBeDefined();
+    expect(wiring!.config.mode).toBe("static");
+  });
+  it("returns undefined when Laya is explicitly off", () => {
+    expect(layaWiringFromEnv({ env: { LAYA_MODE: "off" } })).toBeUndefined();
   });
 
   it("builds wiring when the mode is on", () => {
@@ -464,10 +490,20 @@ describe("createLlmEngines Laya sourcing", () => {
     expect(turn.plannerChatComplete).toBeDefined();
   });
 
-  it("keeps chat engines by default (Laya off)", () => {
+  it("uses Laya engines by default (Phase 5: cascade on)", () => {
     const engines = createLlmEngines(createTestLogger(), {
       providers: stubProviders(),
       env: {},
+    });
+    const turn = engines.getEnginesForTurn(false);
+    expect(turn.selection).toBeInstanceOf(LayaSelectionEngine);
+    expect(turn.selection).not.toBeInstanceOf(LLMSelectionEngine);
+  });
+
+  it("keeps chat engines when Laya is explicitly off", () => {
+    const engines = createLlmEngines(createTestLogger(), {
+      providers: stubProviders(),
+      env: { LAYA_MODE: "off" },
     });
     const turn = engines.getEnginesForTurn(false);
     expect(turn.selection).toBeInstanceOf(LLMSelectionEngine);
@@ -478,7 +514,7 @@ describe("createLlmEngines Laya sourcing", () => {
   it("leaves the chat selection engine when only the judge toggle is on", () => {
     const engines = createLlmEngines(createTestLogger(), {
       providers: stubProviders(),
-      env: { LAYA_MODE: "static", LAYA_JUDGE: "1" },
+      env: { LAYA_MODE: "static", LAYA_JUDGE: "1", LAYA_SELECTION: "0" },
     });
     expect(engines.getEnginesForTurn(false).selection).toBeInstanceOf(LLMSelectionEngine);
   });

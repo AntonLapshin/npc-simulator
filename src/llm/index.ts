@@ -31,12 +31,17 @@ import { LLMConsequenceEngine } from "./llmConsequenceEngine.js";
 import { LLMProposalEngine } from "./llmProposalEngine.js";
 import { LLMSelectionEngine } from "./llmSelectionEngine.js";
 import { LLMSemanticJudge } from "./llmSemanticJudge.js";
-import { readLayaRuntimeConfig } from "../config.js";
+import { readLayaRuntimeConfig, readLlmDecisionFallback } from "../config.js";
 import {
   createLayaClient,
+  createLayaProposalEngine,
   createLayaSelectionEngine,
   createLayaSemanticJudge,
 } from "../decision/wiring.js";
+import {
+  DeterministicProposalEngine,
+  DeterministicSelectionEngine,
+} from "../decision/deterministicEngines.js";
 import type { ChatComplete } from "../decision/questionPlanner.js";
 
 export type { LLMProvider, LlmBackend, LlmCallOptions, LlmTask };
@@ -266,7 +271,7 @@ export function createLlmEngines(
     return createProviderForTask(env, which);
   };
   const engineOptions = { maxRetries: options.maxRetries };
-  const proposalEngine = new LLMProposalEngine(logger, providerFor("proposal"), engineOptions);
+  const llmProposalEngine = new LLMProposalEngine(logger, providerFor("proposal"), engineOptions);
   // Capture the selection provider once: it backs both the chat selection
   // engine and the dynamic planner's ChatComplete hook below.
   const selectionProvider = providerFor("selection");
@@ -274,21 +279,30 @@ export function createLlmEngines(
   const consequenceEngine = new LLMConsequenceEngine(logger, providerFor("consequence"), engineOptions);
   const chatSemanticJudge = new LLMSemanticJudge(logger, providerFor("semantic"), engineOptions);
 
-  // Phase 3–4 (LAYA_PLAN.md): Laya decision-layer sourcing. Chat engines
-  // remain the default — readLayaRuntimeConfig is OFF unless the owner opts
-  // in via env. When LAYA_MODE≠off, the Laya engines wrap the chat engines
-  // as injected fallbacks (low confidence / Laya down → chat).
+  // Phase 5: the Laya decision cascade is the DEFAULT proposal/selection
+  // path (readLayaRuntimeConfig defaults LAYA_MODE=static with the
+  // decision toggles on). When LAYA_MODE≠off, the Laya engines wrap a
+  // fallback: the LLM engines while LLM_DECISION_FALLBACK=1 (default
+  // during transition), the deterministic stubs when 0. Low cascade
+  // confidence or a Laya outage degrades to the fallback, never a crash.
   const layaConfig = readLayaRuntimeConfig(env);
+  let proposalEngine: ProposalEngine = llmProposalEngine;
   let selectionEngine: SelectionEngine = chatSelectionEngine;
   let semanticJudge: SemanticJudge = chatSemanticJudge;
   let plannerChatComplete: ChatComplete | undefined;
   if (layaConfig.mode !== "off") {
     const layaClient = createLayaClient(layaConfig);
+    const llmFallback = readLlmDecisionFallback(env);
+    proposalEngine = createLayaProposalEngine(
+      { client: layaClient },
+      layaConfig,
+      llmFallback ? llmProposalEngine : new DeterministicProposalEngine(),
+    );
     if (layaConfig.toggles.selection) {
       selectionEngine = createLayaSelectionEngine(
         { client: layaClient },
         layaConfig,
-        chatSelectionEngine,
+        llmFallback ? chatSelectionEngine : new DeterministicSelectionEngine(),
       );
     }
     if (layaConfig.toggles.judge) {
