@@ -10,7 +10,7 @@ import {
   buildRosterDisciplineLine,
   buildRosterRetryLine,
 } from "../../src/llm/rosterDiscipline.js";
-import { consequenceSuffix } from "../../src/llm/prompts.js";
+import { renderSuffix } from "../../src/llm/prompts.js";
 import {
   createLlmEngines,
   userCapableTierBackend,
@@ -19,18 +19,11 @@ import { createTestLogger } from "../../src/logging/logger.js";
 import { defaultConfig } from "../../src/config.js";
 import { makeTinyWorld, makeTestDeps, loadOfficeScenario } from "../helpers.js";
 import {
-  applyConsequence,
+  applyRenderResult,
   describePosition,
   summarizeNarrativeForMemory,
 } from "../../src/engine/patchApplier.js";
-import {
-  countHardErrors,
-  sanitizeThoughts,
-  synthesizeActionNarrative,
-  trySalvageConsequence,
-} from "../../src/engine/turnSalvage.js";
 import { validateNarrativeActors } from "../../src/engine/validate/narrative.js";
-import { validateActionVerbCoverage } from "../../src/engine/validate/objects.js";
 import {
   hasDisplacementToken,
   maskResumedActivity,
@@ -39,11 +32,8 @@ import { hasOwnUtterance, maskReportedSpeech } from "../../src/engine/validate/s
 import { extractDirectionHint } from "../../src/core/text.js";
 import { computeMovementOutcome, suggestStep } from "../../src/core/movement.js";
 import { resolveNamedDestination } from "../../src/engine/textHints.js";
-import {
-  applyEngineManipulation,
-  executeManipulation,
-} from "../../src/engine/manipulationExecutor.js";
-import { resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
+import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
+import { resolveRender } from "../../src/engine/turnOrchestrator.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -80,18 +70,17 @@ describe("C1 roster discipline", () => {
     expect(line).toMatch(/ONLY valid actor ids/i);
   });
 
-  it("consequenceSuffix carries the discipline line when roster ids are given", () => {
-    for (const mode of ["short", "full"] as const) {
-      const s = consequenceSuffix(mode, ["jeff", "ana", "dan"]);
-      expect(s).toContain("ROSTER DISCIPLINE");
-      expect(s).toContain('"jeff", "ana", "dan"');
-      expect(s).toContain('"Anton"');
-    }
+  it("renderSuffix carries the discipline line when roster ids are given", () => {
+    const s = renderSuffix(["jeff", "ana", "dan"]);
+    expect(s).toContain("ROSTER DISCIPLINE");
+    expect(s).toContain('"jeff", "ana", "dan"');
+    expect(s).toContain('"Anton"');
   });
 
-  it("consequenceSuffix without roster ids keeps the old text", () => {
-    expect(consequenceSuffix("short")).not.toContain("ROSTER DISCIPLINE");
-    expect(consequenceSuffix("full")).not.toContain("ROSTER DISCIPLINE");
+  it("renderSuffix without roster ids still carries the discipline line", () => {
+    // Phase 4: the roster line is unconditional — empty rosters list "(none)".
+    expect(renderSuffix()).toContain("ROSTER DISCIPLINE");
+    expect(renderSuffix()).toContain("(none)");
   });
 });
 
@@ -186,50 +175,38 @@ describe("C3 deterministic memory append", () => {
     expect(summary.startsWith("Jeff: ")).toBe(true);
   });
 
-  it("applyConsequence appends a deterministic memory when the model appends none", () => {
+  it("applyRenderResult appends a deterministic memory line", () => {
     const world = makeTinyWorld();
-    const result: ConsequenceResult = {
-      narrative: "U walks toward N.",
-      actorPatches: [{ actorId: "u", thoughts: "Going." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const next = applyConsequence(world, result, { actorId: "u", text: "Walk toward N." });
+    const next = applyRenderResult(
+      world,
+      { actorId: "u", text: "Walk toward N." },
+      { narrative: "U walks toward N.", thoughts: "Going.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: null },
+    );
     const u = next.actors.find((a) => a.id === "u")!;
     expect(u.memories).toContain("U: U walks toward N.");
   });
 
-  it("skips the append when the model appended memories, on fallback, or on tail dup", () => {
+  it("skips the append on fallback or on tail dup", () => {
     const world = makeTinyWorld();
-    const withModel: ConsequenceResult = {
-      narrative: "U walks toward N.",
-      actorPatches: [{ actorId: "u", memoriesAppend: ["Model memory."] }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const next = applyConsequence(world, withModel, { actorId: "u", text: "Walk." });
-    expect(next.actors.find((a) => a.id === "u")!.memories).toEqual(["Model memory."]);
-
-    const fallback: ConsequenceResult = {
-      narrative: "Nothing changes.",
-      actorPatches: [],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const nextFallback = applyConsequence(world, fallback, { actorId: "u", text: "Walk." }, defaultConfig, {
-      fallback: true,
-    });
+    const nextFallback = applyRenderResult(
+      world,
+      { actorId: "u", text: "Walk." },
+      { narrative: "Nothing changes.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: null },
+      defaultConfig,
+      { fallback: true },
+    );
     expect(nextFallback.actors.find((a) => a.id === "u")!.memories).toEqual([]);
 
     const dupWorld = makeTinyWorld();
     dupWorld.actors.find((a) => a.id === "u")!.memories = ["U: U walks toward N."];
-    const dup: ConsequenceResult = {
-      narrative: "U walks toward N.",
-      actorPatches: [{ actorId: "u", thoughts: "Again." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const nextDup = applyConsequence(dupWorld, dup, { actorId: "u", text: "Walk." });
+    const nextDup = applyRenderResult(
+      dupWorld,
+      { actorId: "u", text: "Walk." },
+      { narrative: "U walks toward N.", thoughts: "Again.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: null },
+    );
     expect(nextDup.actors.find((a) => a.id === "u")!.memories).toEqual(["U: U walks toward N."]);
   });
 });
@@ -238,15 +215,13 @@ describe("C3 deterministic memory append", () => {
 // Items C4/C11: prop auto-hints + deterministic prop stubs + scenario props.
 // ---------------------------------------------------------------------------
 describe("C4/C11 prop support (Phase 3: engine-owned)", () => {
-  it("consequenceSuffix states engine-owned manipulation, not prop auto-hints", () => {
-    for (const mode of ["short", "full"] as const) {
-      const s = consequenceSuffix(mode, ["ana"]);
-      // Phase 3: the model never emits prop/object patches — the suffix
-      // says so instead of teaching the patch convention.
-      expect(s).not.toContain("PROP AUTO-HINTS");
-      expect(s).toContain("MANIPULATION IS ENGINE-OWNED");
-      expect(s).toContain("EXECUTED MANIPULATION");
-    }
+  it("renderSuffix states engine-owned manipulation, not prop auto-hints", () => {
+    const s = renderSuffix(["ana"]);
+    // Phase 3: the model never emits prop/object patches — the suffix
+    // says so instead of teaching the patch convention.
+    expect(s).not.toContain("PROP AUTO-HINTS");
+    expect(s).toContain("MANIPULATION ARE ENGINE-OWNED");
+    expect(s).toContain("EXECUTED MANIPULATION");
   });
 
   it("office.json has a mug by the coffee machine and laptops on desks", () => {
@@ -285,22 +260,19 @@ describe("C4/C11 prop support (Phase 3: engine-owned)", () => {
     return world;
   }
 
-  it("executor (not salvage) plans prop:laptop for typing near a laptop", () => {
+  it("executor plans prop:laptop for typing near a laptop; applyRenderResult applies it", () => {
     const world = typingWorld();
     const outcome = executeManipulation(world, { actorId: "n", text: "Sit down and type on the laptop." });
     expect(outcome).not.toBeNull();
     expect(outcome!.plan.kind).toBe("pick-up");
     expect(outcome!.plan.propName).toBe("laptop");
-    const merged = applyEngineManipulation(
-      {
-        narrative: "N types on the laptop.",
-        actorPatches: [{ actorId: "n", pose: "sit", thoughts: "Working." }],
-        objectPatches: [],
-        reasoning: "r",
-      } satisfies ConsequenceResult,
-      outcome,
+    const next = applyRenderResult(
+      world,
+      { actorId: "n", text: "Sit down and type on the laptop." },
+      { narrative: "N types on the laptop.", thoughts: "Working.", reasoning: "r" },
+      { movement: null, pose: "sit", manipulation: outcome },
     );
-    expect(merged.actorPatches.find((x) => x.actorId === "n")!.prop).toBe("laptop");
+    expect(next.actors.find((x) => x.id === "n")!.prop).toBe("laptop");
   });
 
   it("executor plans prop:cup for grab+mug near a mug", () => {
@@ -335,115 +307,11 @@ describe("C4/C11 prop support (Phase 3: engine-owned)", () => {
     ).toBeNull();
   });
 
-  it("salvage never invents props — the executor owns them", () => {
-    const world = typingWorld();
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "n", text: "Type on the laptop." },
-      {
-        narrative: "N types on the laptop.",
-        actorPatches: [{ actorId: "n", thoughts: "Working." }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
-    );
-    expect(out).not.toBeNull();
-    // No prop stub: the executor (in-loop, before validation) is the only
-    // prop source. Salvage keeps patches, it never invents them.
-    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.prop).toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------
 // Item C5 (S2): salvage re-runs the prose gates after patch-stripping.
 // ---------------------------------------------------------------------------
-describe("C5 salvage prose re-gating", () => {
-  it("synthesizeActionNarrative builds action-derived prose", () => {
-    expect(synthesizeActionNarrative({ actorId: "n", text: "Walk toward U and greet everyone." }, "N")).toBe(
-      "N: Walk toward U and greet everyone.",
-    );
-    expect(
-      synthesizeActionNarrative({ actorId: "n", text: 'Say "hello there" loudly.' }, "N"),
-    ).toBe('N says "hello there"');
-    const long = `N ${"walks ".repeat(80)}east.`;
-    expect(synthesizeActionNarrative({ actorId: "n", text: long }, "N").length).toBeLessThanOrEqual(270);
-  });
-
-  it("sanitizeThoughts replaces thoughts naming non-roster actors", () => {
-    const world = makeTinyWorld();
-    expect(sanitizeThoughts("Another day, same Liam.", world)).toBe(
-      "Staying focused on what's in front of me.",
-    );
-    expect(sanitizeThoughts("Wonder what U is doing.", world)).toBe("Wonder what U is doing.");
-    expect(sanitizeThoughts(undefined, world)).toBeUndefined();
-  });
-
-  it("countHardErrors ignores speech nits", () => {
-    expect(
-      countHardErrors([
-        { code: "speech.dropped_words", message: "x" },
-        { code: "speech.no_speech_rendered", message: "y" },
-      ]),
-    ).toBe(0);
-    expect(
-      countHardErrors([
-        { code: "speech.dropped_words", message: "x" },
-        { code: "narrative.unknown_actor", message: "y" },
-      ]),
-    ).toBe(1);
-    expect(countHardErrors([])).toBe(0);
-  });
-
-  it("trySalvageConsequence synthesizes prose instead of keeping hallucinations", () => {
-    const world = makeTinyWorld();
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "n", text: "Greet everyone on the way into the office." },
-      {
-        narrative: "Liam greets everyone on the way into the office.",
-        actorPatches: [{ actorId: "n", thoughts: "Another day, same Liam." }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
-    );
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.narrative).toBe("N: Greet everyone on the way into the office.");
-    expect(out!.salvaged.narrative).not.toContain("Liam");
-    // The implanted false memory is gone too.
-    expect(out!.salvaged.actorPatches.find((p) => p.actorId === "n")!.thoughts).toBe(
-      "Staying focused on what's in front of me.",
-    );
-  });
-
-  it("observer-as-subject prose is synthesized, not kept", () => {
-    const world = makeTinyWorld();
-    const [u, n] = world.actors;
-    u!.id = "ursula";
-    u!.name = "Ursula";
-    n!.id = "ned";
-    n!.name = "Ned";
-    world.order = ["ursula", "ned"];
-    world.userActorId = "ursula";
-    const out = trySalvageConsequence(
-      world,
-      { actorId: "ned", text: "Wave at Ursula." },
-      {
-        narrative: "Ursula waves back cheerfully.",
-        actorPatches: [{ actorId: "ned", thoughts: "Friendly." }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      createTestLogger(),
-    );
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.narrative).toBe("Ned: Wave at Ursula.");
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Item C6 (S3): narrative verb-list audit.
@@ -588,27 +456,11 @@ describe("C9 own-utterance detector", () => {
     expect(maskReportedSpeech("keep an ear open for what Jeff says next")).not.toMatch(/says/i);
   });
 
-  it("the gate no longer fires on reported speech, still fires on dropped utterances", () => {
-    const world = makeTinyWorld();
-    const norm = (narrative: string) => ({ narrative, actorPatches: [], objectPatches: [] });
-    const reported = validateActionVerbCoverage(
-      world,
-      { actorId: "n", text: "Keep an ear open for what U says next." },
-      norm("N keeps typing quietly."),
-    );
-    expect(reported.some((e) => e.code === "speech.no_speech_rendered")).toBe(false);
-
-    const dropped = validateActionVerbCoverage(
-      world,
-      { actorId: "n", text: "Thank both, then head to the desk." },
-      norm("N looks around."),
-    );
-    expect(dropped.some((e) => e.code === "speech.no_speech_rendered")).toBe(true);
-  });
 });
 
 // ---------------------------------------------------------------------------
-// Item C10 (S7): salvage the best attempt; abort retries on error growth.
+// Item C10 (S7): the single prose retry's feedback repeats the roster ids
+// on unknown-actor failures (the retry loop itself is gone in Phase 4).
 // ---------------------------------------------------------------------------
 class ScriptedConsequenceEngine implements ConsequenceEngine {
   calls = 0;
@@ -626,100 +478,30 @@ class ScriptedConsequenceEngine implements ConsequenceEngine {
   }
 }
 
-function movingEffects(): ConsequenceResult["effects"] {
-  return { moved: true, destinationActorId: "u", spoke: false, quotedSpeech: [] };
-}
-
-describe("C10 best-attempt salvage and early abort", () => {
-  it("salvages the attempt with the fewest hard errors and aborts on growth", async () => {
-    const logger = createTestLogger();
-    // u at (1,1), n at (4,4). Hard-error counts: 1, 2, 3 — two consecutive
-    // growths must abort the loop at 3 calls (not maxRetries+1 = 6).
-    const engine = new ScriptedConsequenceEngine([
-      {
-        // Attempt 1: one hard error (unknown actor in prose); the movement
-        // itself is a valid step toward u.
-        narrative: "Liam greets everyone on the way over.",
-        actorPatches: [{ actorId: "n", x: 3, y: 3, thoughts: "Going to say hi." }],
-        objectPatches: [],
-        reasoning: "r",
-        effects: movingEffects(),
-      },
-      {
-        // Attempt 2: unknown actor + moves AWAY from u.
-        narrative: "Liam greets Tanya on the way over.",
-        actorPatches: [{ actorId: "n", x: 5, y: 5, thoughts: "Going." }],
-        objectPatches: [],
-        reasoning: "r",
-        effects: movingEffects(),
-      },
-      {
-        // Attempt 3: unknown actor + away-move + observer teleport.
-        narrative: "Liam greets Tanya while John watches.",
-        actorPatches: [
-          { actorId: "n", x: 5, y: 5, thoughts: "Going." },
-          { actorId: "u", x: 2, y: 2, thoughts: "Huh." },
-        ],
-        objectPatches: [],
-        reasoning: "r",
-        effects: movingEffects(),
-      },
-    ]);
-    const deps = makeTestDeps(logger, {
-      consequenceEngine: engine,
-      // Exp-7: the default outer cap is 2 — this RULE-C test needs the
-      // headroom it was written for, so raise it explicitly.
-      config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 5, consequenceMaxAttempts: 6 },
-    });
-    const action: Action = { actorId: "n", text: "Walk toward U and greet everyone." };
-    const salvaged = await resolveWithValidation(makeTinyWorld(), action, deps);
-
-    expect(engine.calls).toBe(3);
-    expect(logger.store.events()).toContain("retry_aborted");
-    // Salvaged from attempt 1 (fewest hard errors): prose synthesized from
-    // the action text, attempt-1's engine movement kept. Phase 1: the
-    // model's (3,3) is ignored — the engine steps n toward u itself.
-    expect(salvaged.narrative).toBe("N: Walk toward U and greet everyone.");
-    expect(salvaged.narrative).not.toContain("Liam");
-    const nPatch = salvaged.actorPatches.find((p) => p.actorId === "n")!;
-    const expected = computeMovementOutcome(makeTinyWorld(), "n", { destinationActorId: "u" }, null)!;
-    expect([nPatch.x, nPatch.y]).toEqual([expected.x, expected.y]);
-  });
-
+describe("C10 prose retry feedback", () => {
   it("retry feedback repeats the roster ids on unknown-actor failures", async () => {
     const logger = createTestLogger();
     const engine = new ScriptedConsequenceEngine([
-      {
-        narrative: "Liam waves.",
-        actorPatches: [{ actorId: "n", thoughts: "Hi." }],
-        objectPatches: [],
-        reasoning: "r",
-        effects: { moved: false, spoke: false, quotedSpeech: [] },
-      },
-      {
-        narrative: "N waves.",
-        actorPatches: [{ actorId: "n", thoughts: "Hi." }],
-        objectPatches: [],
-        reasoning: "r",
-        effects: { moved: false, spoke: false, quotedSpeech: [] },
-      },
+      { narrative: "Liam waves.", thoughts: "Hi.", reasoning: "r" },
+      { narrative: "N waves.", thoughts: "Hi.", reasoning: "r" },
     ]);
     const deps = makeTestDeps(logger, {
       consequenceEngine: engine,
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       makeTinyWorld(),
       { actorId: "n", text: "Wave." },
       deps,
     );
-    expect(result.narrative).toBe("N waves.");
+    expect(result.render.narrative).toBe("N waves.");
     const feedback = engine.feedbacks[1]!;
     expect(feedback).toContain("ROSTER REPEAT");
     expect(feedback).toContain('"u"');
     expect(feedback).toContain('"n"');
   });
 });
+
 
 // ---------------------------------------------------------------------------
 // Item C12 (S8): auto-fill `state` when x/y changes without a state patch.
@@ -750,40 +532,36 @@ describe("C12 position-derived state", () => {
     expect(describePosition(world, 19, 19)).toBe("at (19, 19)");
   });
 
-  it("applyConsequence auto-fills state on a move without a state patch", () => {
+  it("applyRenderResult derives the state label from the engine movement", () => {
     const world = machineWorld();
-    const result: ConsequenceResult = {
-      narrative: "U walks to the coffee machine.",
-      actorPatches: [{ actorId: "u", x: 3, y: 3, thoughts: "Coffee." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const next = applyConsequence(world, result, { actorId: "u", text: "Walk." });
+    const next = applyRenderResult(
+      world,
+      { actorId: "u", text: "Walk." },
+      { narrative: "U walks to the coffee machine.", thoughts: "Coffee.", reasoning: "r" },
+      {
+        movement: {
+          from: { x: 1, y: 1 }, x: 3, y: 3,
+          path: [{ x: 2, y: 2 }, { x: 3, y: 3 }],
+          destination: { kind: "object", id: "coffee_machine", x: 2, y: 2 },
+        },
+        pose: null,
+        manipulation: null,
+      },
+    );
+    // Phase 4: the state label is engine-derived — the model has no state
+    // patch channel left.
     expect(next.actors.find((a) => a.id === "u")!.state).toBe("at the coffee machine");
   });
 
-  it("an explicit state patch still wins", () => {
-    const world = machineWorld();
-    const result: ConsequenceResult = {
-      narrative: "U walks to the coffee machine.",
-      actorPatches: [{ actorId: "u", x: 3, y: 3, state: "standing by the machine, waiting" }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const next = applyConsequence(world, result, { actorId: "u", text: "Walk." });
-    expect(next.actors.find((a) => a.id === "u")!.state).toBe("standing by the machine, waiting");
-  });
-
-  it("no auto-fill when the position does not change", () => {
+  it("no state change when the position does not change", () => {
     const world = machineWorld();
     const before = world.actors.find((a) => a.id === "u")!.state;
-    const result: ConsequenceResult = {
-      narrative: "U waits.",
-      actorPatches: [{ actorId: "u", x: 1, y: 1, thoughts: "Waiting." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const next = applyConsequence(world, result, { actorId: "u", text: "Wait." });
+    const next = applyRenderResult(
+      world,
+      { actorId: "u", text: "Wait." },
+      { narrative: "U waits.", thoughts: "Waiting.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: null },
+    );
     expect(next.actors.find((a) => a.id === "u")!.state).toBe(before);
   });
 });
