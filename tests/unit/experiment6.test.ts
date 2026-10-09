@@ -1,25 +1,22 @@
 // Regression tests for experiment-6.md action items 1-8
 // (office-anton.json, JoinGonka GLM 5.3 Flash, truncated at 9/21 turns).
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   findManipulatedObjects,
   normalizeQuotes,
   parseActionQuotes,
   resolveDestinationObjectId,
 } from "../../src/engine/deterministicSemantics.js";
-import { isQuoteGroundedInAction } from "../../src/engine/actionSemantics.js";
+import { isQuoteGroundedInAction } from "../../src/core/speech.js";
 import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
+import { applyRenderResult, describePosition } from "../../src/engine/patchApplier.js";
+import { resolveRender } from "../../src/engine/turnOrchestrator.js";
 import {
-  getHonestHistoryNote,
-  resolveWithValidation,
-  salvageFormatCollapse,
-} from "../../src/engine/turnOrchestrator.js";
-import {
-  CONSEQUENCE_OUTPUT_SCHEMA,
+  RENDER_OUTPUT_SCHEMA,
   LLM_SYSTEM_PROMPT,
-  consequenceSuffix,
+  renderSuffix,
 } from "../../src/llm/prompts.js";
 import {
   completeJson,
@@ -41,7 +38,7 @@ import type { LLMProvider } from "../../src/llm/provider.js";
 import type { ConsequenceEngine } from "../../src/intelligence/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
-  return { narrative, actorPatches: [], objectPatches: [], reasoning: "r" };
+  return { narrative, reasoning: "r" };
 }
 
 /** Office-anton-shaped world (mirrors experiment5.test.ts helpers). */
@@ -91,55 +88,13 @@ describe("exp6-1 destination precedence (tick 7)", () => {
     ).toBe("anton_desk");
   });
 
-  it("model-declared existing id outranks the fuzzy keyword fallback", async () => {
+  it("Phase 4: the deterministic resolver is the only destination source", () => {
+    // The model-declared/effects id channel is deleted - there is nothing
+    // left to outrank or contradict. The text-grounded resolver decides.
     const world = antonWorld();
-    const { resolveActionSemantics } = await import(
-      "../../src/engine/actionSemantics.js"
-    );
-    // "Head toward the desks" — no possessive, no named desk: the generic
-    // fallback misranks via the ownership heuristic (tanya_desk for Tanya).
-    // The model read the full world and declared anton_desk: trust it.
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "tanya", text: "Head toward the desks." },
-      {
-        ...baseResult("Tanya heads toward the desks."),
-        actorPatches: [],
-        effects: { moved: true, spoke: false, destinationObjectId: "anton_desk" },
-      },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: true, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    expect(resolved.semantics!.destinationObjectId).toBe("anton_desk");
-    expect(resolved.disagreements!.join(" ")).toMatch(/kept effects/);
-  });
-
-  it("explicit text mention still beats a contradicting effects id", async () => {
-    const world = antonWorld();
-    const { resolveActionSemantics } = await import(
-      "../../src/engine/actionSemantics.js"
-    );
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "tanya", text: "Head to Anton's desk and help him set up his laptop." },
-      {
-        ...baseResult("Tanya walks."),
-        actorPatches: [],
-        effects: { moved: true, spoke: false, destinationObjectId: "tanya_desk" },
-      },
-      {
-        async classify(): Promise<ActionSemantics> {
-          return { moves: true, speaks: false, quotedSpeech: [] };
-        },
-      },
-      createTestLogger(),
-    );
-    expect(resolved.semantics!.destinationObjectId).toBe("anton_desk");
-    expect(resolved.disagreements!.join(" ")).toMatch(/kept grounded/);
+    expect(
+      resolveDestinationObjectId(world, "Head to Anton's desk and help him set up his laptop.", "tanya"),
+    ).toBe("anton_desk");
   });
 });
 
@@ -190,7 +145,7 @@ describe("exp6-3 per-turn time budget + identical-error early abort", () => {
       userPrompt: "u",
       maxRetries: 5,
       schema: (await import("../../src/schemas.js")).consequenceResultSchema,
-      schemaText: CONSEQUENCE_OUTPUT_SCHEMA,
+      schemaText: RENDER_OUTPUT_SCHEMA,
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -201,7 +156,7 @@ describe("exp6-3 per-turn time budget + identical-error early abort", () => {
       expect(result.rawAttempts.length).toBe(result.attempts);
     }
     // The varied-strategy prompt is schema-only with a first-token constraint.
-    expect(minimalRepairPrompt(CONSEQUENCE_OUTPUT_SCHEMA)).toMatch(/Begin your response with \{/);
+    expect(minimalRepairPrompt(RENDER_OUTPUT_SCHEMA)).toMatch(/Begin your response with \{/);
   });
 
   it("parseErrorSignature collapses position numbers", () => {
@@ -210,7 +165,7 @@ describe("exp6-3 per-turn time budget + identical-error early abort", () => {
     );
   });
 
-  it("resolveWithValidation respects the turn deadline instead of hanging", async () => {
+  it("resolveRender respects the turn deadline instead of hanging", async () => {
     const logger = createTestLogger();
     const world = makeTinyWorld();
     const hangingEngine = {
@@ -221,233 +176,58 @@ describe("exp6-3 per-turn time budget + identical-error early abort", () => {
       config: { ...makeTestDeps(logger).config!, turnTimeoutMs: 80, autosaveEnabled: false },
     });
     const started = Date.now();
-    const out = await resolveWithValidation(world, { actorId: "n", text: "Wave." }, deps);
+    const out = await resolveRender(world, { actorId: "n", text: "Wave." }, deps);
     const elapsed = Date.now() - started;
     expect(elapsed).toBeLessThan(10_000);
-    expect(out.narrative).toBe("Nothing changes.");
+    expect(out.render.narrative).toBe("Nothing changes.");
     const events = logger.store.all().map((e) => e.event);
     expect(events).toContain("turn_deadline_exceeded");
   });
 });
 
-describe("exp6-4 valid-JSON-at-all-costs salvage tier", () => {
-  it("salvageFormatCollapse builds a degraded payload from collapsed output", () => {
-    const world = antonWorld();
-    const raws = [
-      'Let me analyze this. Tanya is at her desk… {"narrative": "Tanya thinks about the deadline.", "thoughts": "Need to finish this report."',
-      "no JSON object found here at all",
-    ];
-    const salvaged = salvageFormatCollapse(
+describe("exp6-5 state/pose/position coherence (tick 1, Phase 4)", () => {
+  // Phase 4: state labels, poses, and props are engine-derived in
+  // applyRenderResult — stale model-written states are impossible by
+  // construction. These tests assert the structural guarantee directly.
+  it("movement recomputes the state label (never the stale sitting state)", () => {
+    const world = antonWorld(); // tanya: pose sit, prop laptop, rich stale state
+    const tanya = world.actors.find((a) => a.id === "tanya")!;
+    expect(tanya.state).toBe("sitting at her desk and working on a laptop");
+    const next = applyRenderResult(
       world,
-      { actorId: "tanya", text: "Glance at the clock and sigh." },
-      raws,
-    );
-    expect(salvaged).not.toBeNull();
-    expect(salvaged!.narrative).not.toBe("Nothing changes.");
-    // Narrative is action-derived (never the collapsed preamble)…
-    expect(salvaged!.narrative).not.toMatch(/Let me analyze/i);
-    // …while donor thoughts are recovered.
-    expect(
-      salvaged!.actorPatches.find((p) => p.actorId === "tanya")?.thoughts,
-    ).toMatch(/finish this report/);
-    expect(getHonestHistoryNote(salvaged!)).toMatch(/format-collapse salvage/);
-  });
-
-  it("salvageFormatCollapse preserves action quotes verbatim", () => {
-    const world = antonWorld();
-    const salvaged = salvageFormatCollapse(
-      world,
-      { actorId: "anton", text: "Ask Tanya \u201cWhere is my desk?\u201d" },
-      ["total garbage, no json"],
-    );
-    expect(salvaged!.narrative).toContain("Where is my desk?");
-  });
-
-  it("salvageFormatCollapse returns null with no raw attempts", () => {
-    expect(
-      salvageFormatCollapse(antonWorld(), { actorId: "anton", text: "Wave." }, []),
-    ).toBeNull();
-  });
-
-  it("resolveWithValidation salvages a format-collapsed turn instead of falling back", async () => {
-    const logger = createTestLogger();
-    const world = antonWorld();
-    let calls = 0;
-    const collapsingEngine = {
-      resolve: async () => {
-        calls++;
-        // Engine never parses: returns the canonical fallback husk.
-        const { FALLBACK_CONSEQUENCE } = await import(
-          "../../src/llm/llmConsequenceEngine.js"
-        );
-        return structuredClone(FALLBACK_CONSEQUENCE);
-      },
-      getLastRawAttempts: () => [
-        'Let me analyze this. {"narrative": "broken", "thoughts": "Ugh, the gateway is slow."',
-      ],
-      lastResolveParsed: () => false,
-    } as unknown as ConsequenceEngine;
-    const deps = makeTestDeps(logger, {
-      consequenceEngine: collapsingEngine,
-      config: { ...makeTestDeps(logger).config!, maxRetries: 3, autosaveEnabled: false },
-    });
-    const out = await resolveWithValidation(
-      world,
-      { actorId: "tanya", text: "Glance at the clock and sigh." },
-      deps,
-    );
-    expect(out.narrative).not.toBe("Nothing changes.");
-    // Two consecutive parse failures stop the outer retry loop early —
-    // no point burning all 4 engine calls on a collapsing model.
-    expect(calls).toBe(2);
-    const events = logger.store.all().map((e) => e.event);
-    expect(events).toContain("format_salvage_applied");
-  });
-});
-
-describe("exp6-5 state/pose/position coherence (tick 1)", () => {
-  it("rejects a rich stale state when pose changes to stand", () => {
-    const world = antonWorld(); // tanya: pose sit, prop laptop, rich state
-    const v = validateConsequence(
-      world,
+      { actorId: "tanya", text: "Stand up and walk over." },
+      { narrative: "Tanya stands up and walks over.", thoughts: "Going.", reasoning: "r" },
       {
-        ...baseResult("Tanya stands up and walks over."),
-        actorPatches: [
-          { actorId: "tanya", x: 10, y: 6, pose: "stand", prop: null, thoughts: "Going." },
-        ],
-        effects: { moved: true, spoke: false },
+        movement: {
+          from: { x: 13, y: 4 }, x: 10, y: 6,
+          path: [{ x: 12, y: 5 }, { x: 10, y: 6 }],
+          destination: null,
+        },
+        pose: "stand",
+        manipulation: null,
       },
-      { actorId: "tanya", text: "Stand up, put the laptop down, and walk over." },
-      { moves: true, speaks: false, quotedSpeech: [] },
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/state still reads/);
+    const t2 = next.actors.find((a) => a.id === "tanya")!;
+    expect(t2.state).not.toBe("sitting at her desk and working on a laptop");
+    expect(t2.state).toBe(describePosition(next, 10, 6, undefined, "stand"));
+    expect(t2.pose).toBe("stand");
   });
 
-  it("rejects a stale working-on-laptop state when the prop is put down", () => {
+  it("an engine put-down clears the prop (no stale working-on-laptop state)", () => {
     const world = antonWorld();
-    const v = validateConsequence(
+    const outcome = executeManipulation(world, { actorId: "tanya", text: "Put the laptop down." });
+    expect(outcome).not.toBeNull();
+    const next = applyRenderResult(
       world,
-      {
-        ...baseResult("Tanya sets the laptop down."),
-        actorPatches: [{ actorId: "tanya", prop: null, thoughts: "Done." }],
-        effects: { moved: false, spoke: false },
-      },
       { actorId: "tanya", text: "Put the laptop down." },
-      stillSemantics(),
+      { narrative: "Tanya sets the laptop down.", thoughts: "Done.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: outcome },
     );
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/prop changed/);
-  });
-
-  it("accepts a release phrasing that already describes the put-down", () => {
-    const world = antonWorld();
-    world.actors.find((a) => a.id === "tanya")!.state = "puts the laptop on the desk";
-    const v = validateConsequence(
-      world,
-      {
-        ...baseResult("Tanya sets the laptop down."),
-        actorPatches: [{ actorId: "tanya", prop: null, thoughts: "Done." }],
-        effects: { moved: false, spoke: false },
-      },
-      { actorId: "tanya", text: "Put the laptop down." },
-      stillSemantics(),
-    );
-    expect(v.valid).toBe(true);
-  });
-
-  it("leaves a bare posture-word state alone (existing sit/settle contract)", () => {
-    const world = makeTinyWorld(); // u: state "standing"
-    const v = validateConsequence(
-      world,
-      {
-        ...baseResult("U sits down."),
-        actorPatches: [{ actorId: "u", x: 2, y: 1, pose: "sit", thoughts: "Resting." }],
-        effects: { moved: false, spoke: false },
-      },
-      { actorId: "u", text: "Sit down." },
-      stillSemantics(),
-    );
-    expect(v).toEqual({ valid: true, errors: [] });
+    expect(next.actors.find((a) => a.id === "tanya")!.prop).toBeNull();
   });
 });
 
 describe("exp6-6 throughput engineering", () => {
-  it("the semantic judge is lazy: never runs when effects are present, once per turn otherwise", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    let judgeCalls = 0;
-    let engineCalls = 0;
-    const invalidThenValid: ConsequenceResult[] = [
-      {
-        ...baseResult("U waves."),
-        actorPatches: [], // invalid: moves claimed by judge? no — make it speech-invalid instead
-        effects: { moved: false, spoke: true, quotedSpeech: ["Hello there"] },
-      },
-      {
-        ...baseResult('U says "Hello there."'),
-        actorPatches: [{ actorId: "u", thoughts: "Friendly." }],
-        effects: { moved: false, spoke: true, quotedSpeech: ["Hello there"] },
-      },
-    ];
-    const deps = makeTestDeps(logger, {
-      consequenceEngine: {
-        resolve: async () => structuredClone(invalidThenValid[Math.min(engineCalls++, 1)]!),
-      } as unknown as ConsequenceEngine,
-      semanticJudge: {
-        classify: async (): Promise<ActionSemantics> => {
-          judgeCalls++;
-          return { moves: false, speaks: true, quotedSpeech: ["Hello there"] };
-        },
-      },
-      config: { ...makeTestDeps(logger).config!, maxRetries: 3, autosaveEnabled: false },
-    });
-    const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
-    expect(out.narrative).toContain("Hello there");
-    // Phase 2: the first attempt's dropped quote is repaired by the
-    // deterministic backstop — no retry is burned for it.
-    expect(engineCalls).toBe(1);
-    // Q2: both consequences declared effects, so the judge never ran.
-    expect(judgeCalls).toBe(0);
-  });
-
-  it("the lazy judge still runs once per turn when effects are absent", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    let judgeCalls = 0;
-    let engineCalls = 0;
-    const invalidThenValid: ConsequenceResult[] = [
-      {
-        ...baseResult("U waves."),
-        actorPatches: [],
-        // no effects: judge needed for grounding
-      },
-      {
-        ...baseResult('U says "Hello there."'),
-        actorPatches: [{ actorId: "u", thoughts: "Friendly." }],
-        // no effects
-      },
-    ];
-    const deps = makeTestDeps(logger, {
-      consequenceEngine: {
-        resolve: async () => structuredClone(invalidThenValid[Math.min(engineCalls++, 1)]!),
-      } as unknown as ConsequenceEngine,
-      semanticJudge: {
-        classify: async (): Promise<ActionSemantics> => {
-          judgeCalls++;
-          return { moves: false, speaks: true, quotedSpeech: ["Hello there"] };
-        },
-      },
-      config: { ...makeTestDeps(logger).config!, maxRetries: 3, autosaveEnabled: false },
-    });
-    const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
-    expect(out.narrative).toContain("Hello there");
-    // Phase 2: the first attempt's dropped quote is repaired by the
-    // deterministic backstop — no retry is burned for it.
-    expect(engineCalls).toBe(1);
-    expect(judgeCalls).toBe(1); // …but the judge ran only once per turn
-  });
-
   it("probeLlmEndpoint reports healthy vs dead endpoints", async () => {
     const okFetch = (async () => ({ ok: true })) as unknown as typeof fetch;
     const deadFetch = (async () => {
@@ -538,9 +318,8 @@ describe("exp6-7 reasoning-leak guard", () => {
     expect(LLM_SYSTEM_PROMPT).toMatch(/Never write the words proposal, selection, consequence/);
   });
 
-  it("consequence suffixes carry the pipeline ban", () => {
-    expect(consequenceSuffix("short")).toMatch(/PIPELINE BAN/);
-    expect(consequenceSuffix("full")).toMatch(/PIPELINE BAN/);
+  it("the render suffix carries the pipeline ban", () => {
+    expect(renderSuffix()).toMatch(/PIPELINE BAN/);
   });
 
   it("jsonMode sends response_format to the gateway", async () => {
