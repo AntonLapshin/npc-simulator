@@ -31,7 +31,9 @@ export class MockConsequenceEngine implements ConsequenceEngine {
     const startedAt = Date.now();
     // Phase 1: like the real engine, the mock's context carries the
     // already-executed movement as facts to narrate.
-    const prompt = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement);
+    // Phase 2: like the real engine, the mock's context carries the
+    // engine-dictated exact quote as the verbatim contract.
+    const prompt = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement, opts?.exactQuote);
     this.logger.log({
       module: "consequence",
       event: "consequence_started",

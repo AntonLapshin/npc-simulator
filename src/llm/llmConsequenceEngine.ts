@@ -95,7 +95,9 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     const propHint = buildPropHint(action.text, world, action.actorId);
     // Phase 1: the render input carries the already-executed movement as
     // facts — the model narrates what happened, never emits coordinates.
-    const context = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement);
+    // Phase 2: the render input carries the engine-dictated exact quote —
+    // the model copies it verbatim, never invents dialogue.
+    const context = buildConsequenceContext(world, action, feedback, undefined, opts?.engineMovement, opts?.exactQuote);
     // Exp-6 item 2: user-turn directive leads the prompt (before the
     // world dump) so the writer treats the player's words as sacred.
     const userTurnPrefix =
