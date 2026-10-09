@@ -22,30 +22,19 @@ import {
   readLayaSalienceThreshold,
 } from "../../src/config.js";
 import {
-  buildPlausibilityQuestions,
-  buildTriageQuestions,
   classifyIntentKind,
-  describePatchesForPlausibility,
-  filterObserverPatches,
-  gateMemoryAppendsOnSalience,
   intentFromCascadeDecisions,
   intentFromDiagramRun,
   layaWiringFromEnv,
-  parseTriageAnswers,
-  plausibilityAdvisoryForRetry,
-  plausibilityAdvisoryNote,
   resolveIntentDiagram,
   resolveIntentDiagramDetailed,
   runIntentCascade,
   scoreAnswerToLevel,
-  stripModelMemoryAppends,
-  triageQuestionId,
   type LayaTurnWiring,
 } from "../../src/engine/layaTurn.js";
 import { clearDiagramCache } from "../../src/decision/questionPlanner.js";
 import type {
   Action,
-  ActorPatch,
   ConsequenceResult,
 } from "../../src/types.js";
 import { makeTinyWorld } from "../helpers.js";
@@ -241,49 +230,6 @@ describe("intentFromDiagramRun", () => {
 // Observer triage
 // ---------------------------------------------------------------------------
 
-describe("triage questions/answers", () => {
-  it("builds one noul per observer keyed by actor id", () => {
-    const qs = buildTriageQuestions([
-      { id: "dana", name: "Dana" },
-      { id: "anton", name: "Anton" },
-    ]);
-    expect(Object.keys(qs).sort()).toEqual(["triage_anton", "triage_dana"]);
-    expect(qs[triageQuestionId("dana")]!.type).toBe("noul");
-    expect(qs[triageQuestionId("dana")]!.instructions).toContain("Dana");
-  });
-
-  it("parses pTrue >= 0.5 as notable; missing answers are not notable", () => {
-    const notable = parseTriageAnswers(
-      {
-        triage_dana: { type: "noul", pTrue: 0.8 },
-        triage_anton: { type: "noul", pTrue: 0.2 },
-      },
-      ["dana", "anton", "ghost"],
-    );
-    expect(notable).toEqual({ dana: true, anton: false, ghost: false });
-  });
-});
-
-describe("filterObserverPatches", () => {
-  const patches: ActorPatch[] = [
-    { actorId: "dana", thoughts: "Wow.", emotion: "surprised", x: 1, y: 2 },
-    { actorId: "tanya", thoughts: "Meh." },
-    { actorId: "anton", thoughts: "Hmm." },
-  ];
-
-  it("drops thoughts/emotion for triaged-out observers only", () => {
-    const out = filterObserverPatches(patches, { dana: true, tanya: false, anton: false }, undefined);
-    expect(out[0]).toEqual(patches[0]); // notable: untouched
-    expect(out[1]).toEqual({ actorId: "tanya" }); // thoughts dropped
-    expect(out[2]).toEqual({ actorId: "anton" });
-  });
-
-  it("always keeps patches for the directly-addressed observer", () => {
-    const out = filterObserverPatches(patches, { dana: false, tanya: false, anton: false }, "anton");
-    expect(out[2]).toEqual(patches[2]);
-    expect(out[0]).toEqual({ actorId: "dana", x: 1, y: 2 }); // position kept, thoughts dropped
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Salience
@@ -305,73 +251,11 @@ describe("scoreAnswerToLevel", () => {
   });
 });
 
-describe("stripModelMemoryAppends", () => {
-  const result: ConsequenceResult = {
-    narrative: "Dana waves.",
-    actorPatches: [
-      { actorId: "dana", memoriesAppend: ["Dana waved."], beliefsAppend: ["Waving is nice."] },
-      { actorId: "anton", relationshipsAppend: ["trusts Dana"] },
-    ],
-    objectPatches: [],
-    reasoning: "r",
-  };
-
-  it("drops memoriesAppend/beliefsAppend but keeps other appends", () => {
-    const out = stripModelMemoryAppends(result);
-    expect(out.actorPatches[0]).toEqual({ actorId: "dana" });
-    expect(out.actorPatches[1]).toEqual({ actorId: "anton", relationshipsAppend: ["trusts Dana"] });
-    // input untouched
-    expect(result.actorPatches[0]!.memoriesAppend).toHaveLength(1);
-  });
-
-  it("returns the input unchanged when there is nothing to strip", () => {
-    const clean: ConsequenceResult = { ...result, actorPatches: [{ actorId: "dana" }] };
-    expect(stripModelMemoryAppends(clean)).toBe(clean);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Plausibility
 // ---------------------------------------------------------------------------
 
-describe("plausibility utils", () => {
-  const result: ConsequenceResult = {
-    narrative: "Dana teleports.",
-    actorPatches: [{ actorId: "dana", x: 99, y: 99 }],
-    objectPatches: [{ objectId: "mug", description: "now golden" }],
-    reasoning: "r",
-  };
-
-  it("labels actor position and object patches", () => {
-    expect(describePatchesForPlausibility(result)).toEqual([
-      'actor "dana" moves to (99, 99)',
-      'object "mug" description changes',
-    ]);
-    expect(describePatchesForPlausibility({
-      narrative: "x", actorPatches: [{ actorId: "a", thoughts: "t" }],
-      objectPatches: [], reasoning: "r",
-    })).toEqual([]);
-  });
-
-  it("builds one score question per label", () => {
-    const qs = buildPlausibilityQuestions(["a", "b"]);
-    expect(Object.keys(qs)).toEqual(["plaus_0", "plaus_1"]);
-    expect(qs["plaus_0"]!.type).toBe("score");
-  });
-
-  it("emits an advisory note only for scores ≤2", () => {
-    expect(
-      plausibilityAdvisoryNote([
-        { label: "actor \"dana\" moves to (99, 99)", level: 2 },
-        { label: "object \"mug\" description changes", level: 4 },
-      ]),
-    ).toContain("plausibility 2/5");
-    expect(
-      plausibilityAdvisoryNote([{ label: "x", level: 3 }]),
-    ).toBeUndefined();
-    expect(plausibilityAdvisoryNote([])).toBeUndefined();
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Diagram resolution (dynamic planner fallback)
@@ -630,13 +514,8 @@ function stubAction(): Action {
   return { actorId: "u", text: "U waves hello." };
 }
 
-function stubResult(patches: ActorPatch[] = []): ConsequenceResult {
-  return {
-    narrative: "U waves hello.",
-    actorPatches: patches,
-    objectPatches: [],
-    reasoning: "test",
-  };
+function stubResult(): ConsequenceResult {
+  return { narrative: "U waves hello.", reasoning: "test" };
 }
 
 describe("resolveIntentDiagramDetailed (S6 planner outcome)", () => {
@@ -710,129 +589,4 @@ describe("runIntentCascade planner observability (S6)", () => {
   });
 });
 
-describe("gateMemoryAppendsOnSalience observability (S6)", () => {
-  it("logs salience_scored with a no-op reason when there is nothing to gate", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    const out = await gateMemoryAppendsOnSalience(
-      stubWiring(stubScoreClient(0)),
-      world,
-      stubAction(),
-      stubResult(),
-      logger,
-    );
-    expect(out.actorPatches).toEqual([]);
-    const scored = logger.store.byEvent("salience_scored");
-    expect(scored).toHaveLength(1);
-    expect(scored[0]!.module).toBe("laya");
-    expect(scored[0]!.output).toMatchObject({
-      scored: false,
-      reason: expect.stringContaining("no model memory/belief appends"),
-    });
-  });
 
-  it("logs scored=true and gates below the threshold", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    const patches: ActorPatch[] = [
-      { actorId: "u", memoriesAppend: ["met Ana"] },
-    ];
-    const out = await gateMemoryAppendsOnSalience(
-      stubWiring(stubScoreClient(0)), // level 1 < threshold 3
-      world,
-      stubAction(),
-      stubResult(patches),
-      logger,
-    );
-    expect(out.actorPatches[0]!.memoriesAppend).toBeUndefined();
-    const scored = logger.store.byEvent("salience_scored");
-    expect(scored).toHaveLength(1);
-    expect(scored[0]!.output).toMatchObject({
-      scored: true, score: 1, threshold: 3, gated: true,
-    });
-  });
-
-  it("logs scored=true and keeps appends at/above the threshold", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    const patches: ActorPatch[] = [
-      { actorId: "u", memoriesAppend: ["met Ana"] },
-    ];
-    const out = await gateMemoryAppendsOnSalience(
-      stubWiring(stubScoreClient(4)), // level 5 >= threshold 3
-      world,
-      stubAction(),
-      stubResult(patches),
-      logger,
-    );
-    expect(out.actorPatches[0]!.memoriesAppend).toEqual(["met Ana"]);
-    expect(logger.store.byEvent("salience_scored")[0]!.output).toMatchObject({
-      scored: true, score: 5, gated: false,
-    });
-  });
-});
-
-describe("plausibilityAdvisoryForRetry observability (S6)", () => {
-  it("logs plausibility_scored with a no-op reason when there is nothing to score", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    const note = await plausibilityAdvisoryForRetry(
-      stubScoreClient(0),
-      stubAction(),
-      stubResult(),
-      { logger, tick: world.tick, turnIndex: world.turnIndex, attempt: 2 },
-    );
-    expect(note).toBeUndefined();
-    const events = logger.store.byEvent("plausibility_scored");
-    expect(events).toHaveLength(1);
-    expect(events[0]!.module).toBe("laya");
-    expect(events[0]!.input).toMatchObject({ attempt: 2 });
-    expect(events[0]!.output).toMatchObject({
-      scored: false,
-      reason: expect.stringContaining("no object/position patches"),
-    });
-  });
-
-  it("logs scored=true with the advisory outcome when patches score low", async () => {
-    const logger = createTestLogger();
-    const world = makeTinyWorld();
-    // Plausibility scores per patch label via plaus_<i> ids; answer all low.
-    const lowClient = new LayaClient({
-      baseUrl: "http://127.0.0.1:8000",
-      fetchImpl: (async (url: unknown, init?: { body?: unknown }) => {
-        const body = JSON.parse(String((init as { body: string }).body)) as {
-          questions: Record<string, unknown>;
-        };
-        const answers: Record<string, unknown> = {};
-        for (const id of Object.keys(body.questions)) answers[id] = { score: 0 };
-        return new Response(JSON.stringify({ answers }), { status: 200 });
-      }) as typeof fetch,
-    });
-    const note = await plausibilityAdvisoryForRetry(
-      lowClient,
-      stubAction(),
-      {
-        ...stubResult(),
-        actorPatches: [{ actorId: "u", x: 99, y: 99 }],
-      },
-      { logger, tick: world.tick, turnIndex: world.turnIndex },
-    );
-    expect(note).toContain("plausibility 1/5");
-    const events = logger.store.byEvent("plausibility_scored");
-    expect(events).toHaveLength(1);
-    expect(events[0]!.output).toMatchObject({
-      scored: true, patchCount: 1, lowScoreCount: 1, advisoryNote: true,
-    });
-  });
-
-  it("stays silent without obs (backward compatible)", async () => {
-    const logger = createTestLogger();
-    const note = await plausibilityAdvisoryForRetry(
-      stubScoreClient(0),
-      stubAction(),
-      stubResult(),
-    );
-    expect(note).toBeUndefined();
-    expect(logger.store.all()).toHaveLength(0);
-  });
-});

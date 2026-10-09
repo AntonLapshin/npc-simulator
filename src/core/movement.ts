@@ -93,6 +93,19 @@ export function isNonLocomotionSense(text: string): boolean {
   return isInterrogativeQuestion(text) || isFacingOnlyTurn(text);
 }
 
+/**
+ * Physical-contact verbs that imply closing distance to the named person
+ * (handshake, hug, high-five…). Pure. Phase 4: the semantic judge no
+ * longer supplies contactActorId — contact approach is detected
+ * deterministically so handshake turns still close to adjacency.
+ */
+const CONTACT_VERB_RE =
+  /\bhandshake\b|\bsh(?:ak(?:e|es|ing)|ook)\s+(?:\w+(?:'s)?\s+)?hands?\b|\bhugs?\b|\bhugged\b|\bhugging\b|\bembrace[sd]?\b|\bkiss(?:es|ed|ing)?\b|\bhigh[\s-]?fives?\b|\bfist[\s-]?bumps?\b|\bpats?\s+(?:him|her|them|\w+\s+on\s+the)\b|\bslap(?:s|ped|ping)?\b|\bpunch(?:es|ed|ing)?\b/i;
+
+export function hasContactVerb(text: string): boolean {
+  return CONTACT_VERB_RE.test(text);
+}
+
 // ---------------------------------------------------------------------------
 // Step computation.
 // ---------------------------------------------------------------------------
