@@ -40,11 +40,7 @@ import {
 import { describePosition } from "../../src/engine/patchApplier.js";
 import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
 import { LIVENESS_HISTORY_MARKER } from "../../src/engine/patchApplier.js";
-import {
-  narrativeTargetPosition,
-  vetoAwayFromNarrativeTarget,
-} from "../../src/engine/textHints.js";
-import { stepTowardPoint } from "../../src/engine/movementAssist.js";
+import { stepTowardPoint } from "../../src/core/movement.js";
 import { resolveActionSemantics } from "../../src/engine/actionSemantics.js";
 import { capableTierNoopReason } from "../../src/llm/index.js";
 import { consequenceSuffix } from "../../src/llm/prompts.js";
@@ -172,15 +168,7 @@ describe("exp4 item 6 (S4/M1): narrative voice gate", () => {
   });
 });
 
-describe("exp4 item 5 (S2): constructive movement re-steer", () => {
-  it("narrativeTargetPosition resolves the narrative's named actor", () => {
-    const world = officeWorld();
-    const tp = narrativeTargetPosition(world, "tanya", "Tanya walks over to Anton and greets him.");
-    expect(tp).not.toBeNull();
-    expect(tp!.x).toBe(16);
-    expect(tp!.y).toBe(2);
-  });
-
+describe("exp4 item 5 (S2): toward-steps as a movement toolkit", () => {
   it("stepTowardPoint returns a capped step strictly toward the target", () => {
     const world = officeWorld();
     // Anton at (16,2); target is Tanya at (8,7): ~9.4 cells away.
@@ -190,26 +178,6 @@ describe("exp4 item 5 (S2): constructive movement re-steer", () => {
     const newD = Math.hypot(step!.x - 8, step!.y - 7);
     expect(newD).toBeLessThan(oldD);
     expect(Math.hypot(step!.x - 16, step!.y - 2)).toBeLessThanOrEqual(6 + 1e-9);
-  });
-
-  it("a vetoed repair has a constructive alternative toward the narrative target", () => {
-    const world = officeWorld();
-    // Tanya at (8,7); narrative says she walks to Anton at (16,2), but the
-    // repair suggestion steps to (8,10) — away from Anton.
-    const suggestion = { x: 8, y: 10 };
-    const vetted = vetoAwayFromNarrativeTarget(
-      world,
-      "tanya",
-      "Tanya walks over to Anton and greets him.",
-      suggestion,
-    );
-    expect(vetted).toBeNull(); // veto fires
-    const tp = narrativeTargetPosition(world, "tanya", "Tanya walks over to Anton and greets him.");
-    const resteered = tp ? stepTowardPoint(world, "tanya", tp.x, tp.y) : null;
-    expect(resteered).not.toBeNull();
-    // The re-steer steps toward Anton, within the cap.
-    const oldD = Math.hypot(8 - 16, 7 - 2);
-    expect(Math.hypot(resteered!.x - 16, resteered!.y - 7 + 5)).toBeLessThan(oldD);
   });
 
   it("stepTowardPoint returns null when already adjacent (honest dead end)", () => {
