@@ -42,6 +42,32 @@ export const SELECTION_OUTPUT_SCHEMA = `{
   "reasoning": "string"
 }`;
 
+/** Expected intent-call output shape (PLAN_V2 Phase 1). */
+export const INTENT_OUTPUT_SCHEMA = `{
+  "action": "string",
+  "quote": "string"
+}`;
+
+/** Output-schema tail for the intent call (PLAN_V2 Phase 1). */
+export function intentSuffix(): string {
+  return [
+    "Output Schema",
+    "",
+    INTENT_OUTPUT_SCHEMA,
+    "",
+    "Decide the ONE thing this actor does next — in THEIR role only (never adopt another character's job, goal, or skills).",
+    "ROSTER RULE: only the actors listed in the facts above exist — never invent, address, or describe anyone else (no extra names, no interviewer, no newcomers).",
+    // Exp-3 item 4 (feeds S2): the intent feeds the engine executors, which
+    // ground movement/speech/manipulation deterministically — contact only
+    // within reach, object use only with an exact object name, movement only
+    // toward a named actor or object. One clear beat per action.
+    "RENDERABILITY: only decide actions the engine can execute: handshake/hug/hand-over/physical contact ONLY when the other person is within reach (distances are listed); pouring/picking up/opening ONLY with the exact object name from the facts; movement ONLY toward a named actor or object; speech ONLY as exact quoted words.",
+    "If the actor says anything, the quote MUST be the exact words spoken — copied word-for-word, never paraphrased.",
+    "Return JSON only, matching the schema above.",
+    "Return COMPACT single-line JSON (no pretty-print, no markdown).",
+  ].join("\n");
+}
+
 
 /**
  * Exp-2 item 3: canonical form for fully-spoken actions (the action text

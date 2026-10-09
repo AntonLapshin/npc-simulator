@@ -14,7 +14,7 @@ import { formatRepairPrompt, parseJsonObject } from "./json.js";
 import { takeConsequenceRepairNotes } from "../schemas.js";
 import { errorMessage } from "../util/errors.js";
 
-export type LlmModule = "proposal" | "selection" | "consequence" | "semantic";
+export type LlmModule = "proposal" | "selection" | "consequence" | "semantic" | "intent";
 
 export type CompleteJsonOptions<T> = {
   logger: Logger;
