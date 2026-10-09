@@ -5,6 +5,7 @@ import type { Action, ActionSemantics, EngineConfig, ValidationError, World } fr
 import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity, quotedSegments } from "./speech.js";
+import { maskQuotedSpans } from "../../core/text.js";
 import { isActorMentioned } from "../deterministicSemantics.js";
 import { distanceToRect, isNonLocomotionSense, CONTACT_RADIUS } from "./movement.js";
 import { OBJECT_INTERACT_RADIUS } from "./objects.js";
@@ -554,6 +555,63 @@ export function validateNarrativeMovementGrounding(
       code: "movement.unexpected_move",
       message: `action explicitly says to stay ("${action.text.slice(0, 60)}") but the engine moved ${action.actorId}${actor !== undefined ? ` from (${actor.x}, ${actor.y})` : ""}: a stay action never moves`,
     });
+  }
+  return errors;
+}
+
+/**
+ * Stage-1 A4: narrated locomotion destination vs the engine destination.
+ * The engine owns movement — "walks toward Dana" when the engine moved
+ * the actor toward Tanya contradicts an engine fact (same category as
+ * movement.narrated_without_move). Deliberately narrow: fires only when
+ * the engine destination is a roster actor AND the narrative explicitly
+ * pairs a locomotion verb with a DIFFERENT roster actor via a destination
+ * preposition ("toward Dana", "over to Dana"). Object destinations,
+ * pronouns, and proper nouns without a preposition are out of scope —
+ * too ambiguous to judge deterministically ("walks to the door to greet
+ * Tanya" names no direct destination; "the door" may be where Tanya is).
+ * Quoted spans are masked: dialogue is the character talking, not the
+ * narrator describing movement. Pure.
+ */
+const LOCOMOTION_WITH_DEST_RE =
+  /\b(walks?|walked|walking|goes|went|going|heads?|headed|heading|moves?|moved|moving|approach(?:es|ed|ing)?|comes?|came|coming|steps?|stepped|strolls?|hurries|rushes)\b[\w\s',-]{0,40}?\b(toward|towards|to|over\s+to|up\s+to|back\s+to)\s+([A-Z][\w'’-]*)/g;
+
+export function validateNarrativeDestinationGrounding(
+  world: World,
+  action: Action,
+  narrative: string,
+  destinationActorId: string | null,
+): ValidationError[] {
+  if (destinationActorId === null) return [];
+  const dest = world.actors.find((a) => a.id === destinationActorId);
+  if (dest === undefined) return [];
+  // Roster name → id (id, full name, first name, lowercased).
+  const nameToId = new Map<string, string>();
+  for (const a of world.actors) {
+    nameToId.set(a.id.toLowerCase(), a.id);
+    nameToId.set(a.name.toLowerCase(), a.id);
+    const first = a.name.split(/[^a-z0-9]+/i)[0];
+    if (first !== undefined && first.length >= 3) nameToId.set(first.toLowerCase(), a.id);
+  }
+  const errors: ValidationError[] = [];
+  const masked = maskQuotedSpans(narrative);
+  LOCOMOTION_WITH_DEST_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LOCOMOTION_WITH_DEST_RE.exec(masked)) !== null) {
+    // "Dana's desk" still names Dana — strip the possessive.
+    const rawName = m[3]!.replace(/['’]s$/i, "");
+    const id = nameToId.get(rawName.toLowerCase());
+    if (id === undefined || id === action.actorId || id === destinationActorId) continue;
+    const other = world.actors.find((a) => a.id === id);
+    errors.push({
+      code: "movement.destination_mismatch",
+      message:
+        `narrative sends ${action.actorId} "${m[1]} ${m[2]} ${m[3]}" ` +
+        `but the engine moved ${action.actorId} toward ${dest.name} (${dest.id})` +
+        `${other !== undefined ? `, not ${other.name} (${other.id})` : ""}: ` +
+        `narrate the executed destination — never redirect a walk the engine aimed elsewhere`,
+    });
+    break;
   }
   return errors;
 }

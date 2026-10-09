@@ -60,7 +60,7 @@ function speechResult(narrative: string): ConsequenceResult {
 
 function renderFacts(): RenderFacts {
   return {
-    exactQuote: QUOTE, moved: false, pose: null, effectivePose: "stand",
+    exactQuote: QUOTE, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 1, y: 1, engineManipulation: null,
   };
 }

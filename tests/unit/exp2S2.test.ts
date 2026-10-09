@@ -29,7 +29,7 @@ import type { ConsequenceResult, World } from "../../src/types.js";
 
 function facts(over: Partial<RenderFacts> = {}): RenderFacts {
   return {
-    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 7, y: 8, engineManipulation: null, ...over,
   };
 }
