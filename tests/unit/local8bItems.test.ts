@@ -36,11 +36,9 @@ import {
   maskResumedActivity,
 } from "../../src/engine/deterministicSemantics.js";
 import { hasOwnUtterance, maskReportedSpeech } from "../../src/engine/validate/speech.js";
-import {
-  extractDirectionHint,
-  resolveNamedDestination,
-} from "../../src/engine/textHints.js";
-import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
+import { extractDirectionHint } from "../../src/core/text.js";
+import { computeMovementOutcome, suggestStep } from "../../src/core/movement.js";
+import { resolveNamedDestination } from "../../src/engine/textHints.js";
 import { resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -520,26 +518,35 @@ describe("C7 action-text movement hints", () => {
     });
   });
 
-  it("suggestMoveTarget steers east for 'walk east' instead of west", () => {
+  it("suggestStep steers east for 'walk east' instead of west", () => {
     const world = makeTinyWorld();
     // n at (4,4) in an empty 6x6 room.
-    const s = suggestMoveTarget(world, "n", undefined, undefined, "Take a few steps east.");
+    const s = suggestStep(world, "n", null, extractDirectionHint("Take a few steps east."));
     expect(s).not.toBeNull();
     expect(s!.x).toBeGreaterThan(4);
   });
 
-  it("suggestMoveTarget resolves a named destination from text and never moves away", () => {
+  it("suggestStep resolves a named destination from text and never moves away", () => {
     const world = makeTinyWorld();
-    // u at (1,1), n at (4,4): "walk toward U" with no declared ids.
-    const s = suggestMoveTarget(world, "n", undefined, undefined, "Walk toward U.");
+    // n at (4,4); Dana added at (5,5) ("U" is a single letter and never
+    // resolves as a name — actorMentionVariants requires 2+ chars).
+    world.actors.push({
+      id: "dana", name: "Dana", persona: "Dana.", x: 5, y: 5,
+      state: "standing", emotion: "calm", goal: "g", thoughts: "",
+      memories: [], beliefs: [], relationships: [],
+    });
+    const named = resolveNamedDestination("Walk toward Dana.", world, "n");
+    expect(named).toEqual({ kind: "actor", id: "dana" });
+    const s = suggestStep(world, "n", { x: 5, y: 5 }, extractDirectionHint("Walk toward Dana."));
     expect(s).not.toBeNull();
-    const oldDist = Math.hypot(4 - 1, 4 - 1);
-    expect(Math.hypot(s!.x - 1, s!.y - 1)).toBeLessThan(oldDist);
+    const oldDist = Math.hypot(4 - 5, 4 - 5);
+    expect(Math.hypot(s!.x - 5, s!.y - 5)).toBeLessThan(oldDist);
   });
 
   it("explicit destination ids still win over text", () => {
     const world = makeTinyWorld();
-    const s = suggestMoveTarget(world, "n", "u", undefined, "Walk east.");
+    // Destination U (southwest) beats the east hint.
+    const s = suggestStep(world, "n", { x: 1, y: 1 }, extractDirectionHint("Walk east."));
     expect(s).not.toBeNull();
     // Toward U (southwest), not east.
     expect(s!.x + s!.y).toBeLessThan(8);
@@ -680,11 +687,13 @@ describe("C10 best-attempt salvage and early abort", () => {
     expect(engine.calls).toBe(3);
     expect(logger.store.events()).toContain("retry_aborted");
     // Salvaged from attempt 1 (fewest hard errors): prose synthesized from
-    // the action text, attempt-1's valid movement kept.
+    // the action text, attempt-1's engine movement kept. Phase 1: the
+    // model's (3,3) is ignored — the engine steps n toward u itself.
     expect(salvaged.narrative).toBe("N: Walk toward U and greet everyone.");
     expect(salvaged.narrative).not.toContain("Liam");
     const nPatch = salvaged.actorPatches.find((p) => p.actorId === "n")!;
-    expect([nPatch.x, nPatch.y]).toEqual([3, 3]);
+    const expected = computeMovementOutcome(makeTinyWorld(), "n", { destinationActorId: "u" }, null)!;
+    expect([nPatch.x, nPatch.y]).toEqual([expected.x, expected.y]);
   });
 
   it("retry feedback repeats the roster ids on unknown-actor failures", async () => {
