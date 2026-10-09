@@ -432,7 +432,7 @@ describe("exp-6 item 7: accept-path gates", () => {
       action("tanya", "Pick up her mug."),
       { narrative: "Tanya glances at her mug.", thoughts: "Careful.", reasoning: "r" },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 8, y: 7, engineManipulation: null,
       },
     );
@@ -446,7 +446,7 @@ describe("exp-6 item 7: accept-path gates", () => {
       action("tanya", "Approach Anton."),
       { narrative: "Tanya: approach the stranger", thoughts: "Who is that.", reasoning: "r" },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 8, y: 7, engineManipulation: null,
       },
     );

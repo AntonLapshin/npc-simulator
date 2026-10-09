@@ -91,7 +91,7 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
   // Dana near Tanya's desk (8,7): the engine already moved her there, so
   // the only failure in the prose is the identity theft itself.
   const theftFacts: RenderFacts = {
-    exactQuote: null, moved: true, pose: null, effectivePose: "stand",
+    exactQuote: null, moved: true, destinationActorId: null, pose: null, effectivePose: "stand",
     x: 8, y: 9, engineManipulation: null,
   };
 
@@ -267,7 +267,7 @@ describe("exp3-10 S8 thought grounding", () => {
         reasoning: "r",
       },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 16, y: 2, engineManipulation: null,
       },
     );
