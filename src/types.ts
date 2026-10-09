@@ -335,6 +335,15 @@ export type EngineConfig = {
    * falls through to liveness → fallback. Default 10 minutes.
    */
   turnTimeoutMs: number;
+  /**
+   * Phase 6: provider-call budget per turn. The orchestrator counts
+   * provider-backed engine invocations (proposal / selection / render)
+   * and logs a loud `budget_exceeded` warning when the count crosses this
+   * — never a hard abort (a turn that needs 5 calls to avoid a fallback
+   * is better than a fallback). Default 4: post-Phase-5 shape is ~1 on
+   * the Laya cascade path, 3–4 on the LLM-fallback path.
+   */
+  turnCallBudget: number;
 };
 
 /**
