@@ -244,13 +244,16 @@ describe("LLM consequence engine + validation retry", () => {
     expect(events).toContain("fallback_used");
   });
 
-  it("impossible movement is rejected and retried with feedback", async () => {
+  it("dishonest movement narration is rejected and retried with feedback", async () => {
     const logger = createTestLogger();
-    const teleport = JSON.stringify({
-      narrative: "U teleports across the map.",
-      actorPatches: [{ actorId: "u", x: 999, y: 999 }],
+    // Phase 1: the model never emits coordinates (they are stripped), so
+    // "impossible movement" is now a NARRATIVE lie — the story claims a
+    // walk the engine did not perform.
+    const dishonest = JSON.stringify({
+      narrative: "U walks across the room.",
+      actorPatches: [{ actorId: "u", thoughts: "Sneaky." }],
       objectPatches: [],
-      reasoning: "Teleport.",
+      reasoning: "Sneaky.",
     });
     const validTiny = JSON.stringify({
       narrative: "U stays put and looks around.",
@@ -258,7 +261,7 @@ describe("LLM consequence engine + validation retry", () => {
       objectPatches: [],
       reasoning: "No movement was needed.",
     });
-    const provider = new StubProvider([teleport, validTiny]);
+    const provider = new StubProvider([dishonest, validTiny]);
     const deps = {
       proposalEngine: new LLMProposalEngine(logger, provider),
       selectionEngine: new LLMSelectionEngine(logger, provider),
@@ -269,13 +272,13 @@ describe("LLM consequence engine + validation retry", () => {
 
     const result = await resolveWithValidation(
       makeTinyWorld(),
-      { actorId: "u", text: "Teleport." },
+      { actorId: "u", text: "Look around." },
       deps,
     );
 
     // Second attempt was valid, so no fallback was needed.
     expect(result.narrative).toContain("looks around");
-    expect(provider.calls[1]!.user).toMatch(/outside scene bounds|no valid path/i);
+    expect(provider.calls[1]!.user).toMatch(/describes movement|no position change/i);
   });
 });
 

@@ -76,9 +76,11 @@ proposals ground on what happened, not on the wish.
 ### P6. Degraded-but-advancing
 
 The turn loop prefers partial progress over giving up: retry with targeted
-feedback → deterministic movement/addressee repair → salvage tiers → liveness
+feedback → deterministic addressee/prop repair → salvage tiers → liveness
 floor → fallback. Per-turn outcomes are accounted as clean / salvaged /
-liveness / fallback (`turnOutcomes.ts`).
+liveness / fallback (`turnOutcomes.ts`). Movement is NOT repaired — it is
+engine-owned (see "Movement physics" below): the engine computes the step
+before the loop, so there is no movement failure left to repair.
 
 ### P7. Tiered intelligence routing
 
@@ -99,6 +101,20 @@ Visibility/audibility = Euclidean radius 12 + line-of-sight through
 one-line digest under char budgets, so per-turn tokens stay flat while the
 stored world keeps full detail up to caps.
 
+### P9. Pure core, thin engine (Phase 1)
+
+`src/core/` holds **pure functions only**: deterministic, no I/O, no argument
+mutation (new values are returned), no LLM calls, no `Date.now()` /
+`Math.random()` (randomness is injected as a parameter). `src/engine/` holds
+business logic and orchestration — world mutation, sequencing, LLM calls — and
+delegates the pure logic to `src/core/`, staying thin. Every core module has an
+exhaustive unit test file under `tests/unit/core/` (branch coverage enumerated
+by hand — no coverage tool is installed). Phase 1 establishes the pattern with
+`src/core/movement.ts` (destination resolution, step computation, invariants),
+`src/core/text.ts` (text predicates), `src/core/geometry.ts` and
+`src/core/pathfinding.ts` (moved verbatim out of `src/engine/`; the old paths
+are re-export shims).
+
 ## Turn pipeline
 
 `runTurn(world, deps)`:
@@ -112,27 +128,40 @@ stored world keeps full detail up to caps.
    candidate or the `"Stay where you are and observe the situation."`
    fallback).
 3. **Consequence resolution** — `resolveWithValidation`:
+   - **Movement pre-pass (Phase 1)** — before the attempt loop,
+     `planMovementSemantics` resolves movement intent deterministically from
+     the action text, and `executeMovement` (`movementExecutor.ts` →
+     `src/core/movement.ts`) computes the engine step: destination from
+     semantics (`destinationActorId` → `destinationObjectId` →
+     `contactActorId`, contact promoted so handshakes close distance),
+     pathfind via 4-directional A*, final cell returned with the path.
+     `null` for stationary intents. Every model-emitted x/y is **stripped**
+     from every patch (logged as `model_coordinates_ignored`); the engine
+     outcome is merged into the acting actor's patch only. The consequence
+     input carries `EXECUTED MOVEMENT` facts ("Anton moved (2,3)→(5,6), now
+     1 cell from Tanya") so the render narrates what actually happened; the
+     prompt forbids emitting coordinates.
    - The semantic judge starts once per turn, concurrently with the first
      consequence call.
    - Up to `maxRetries+1` attempts (default 3+1), each raced against the
      remaining `turnTimeoutMs` wall budget (default 600 s; Exp-6 item 3).
      Engine exceptions → feedback retry.
    - Per attempt: `resolveActionSemantics` (effects + judge → merged →
-     deterministically grounded; disagreements logged) →
-     `validateConsequence` → pass returns; fail logs and builds targeted retry
-     feedback (movement hint with computed coordinates, prose-only hint,
-     object-affordance nudge).
-   - **In-loop deterministic repairs** (no retry burned): movement-only
-     failure → `suggestMoveTarget` position filled in and revalidated;
-     over-cap failure → `clampMoveToCap` projection and revalidation.
+     deterministically grounded; disagreements logged) → engine movement
+     refresh (only when merged semantics add a destination/contact the
+     text pass couldn't see; dropped on a Laya veto) → merge (strip model
+     x/y, apply engine x/y) → `validateConsequence` → pass returns; fail
+     logs and builds targeted retry feedback (prose-only hint,
+     object-affordance nudge — no movement hints anymore).
    - Two consecutive *unparseable* outputs → stop retrying early
      (format-collapse tier): `salvageFormatCollapse` builds a thoughts-only
      payload (Exp-6 item 4). Identical parse errors are detected by signature
      (`parseErrorSignature`, digit-collapsing) and abort early instead of
      burning remaining calls.
    - Post-loop: `trySalvageConsequence` (strip hallucinated-id patches →
-     deterministic movement repair → deterministic addressee stub → tier-1
-     speech-nit downgrade → tier-2 speech/object-wording downgrade).
+     deterministic addressee stub → prop stub → tier-1 speech-nit downgrade
+     → tier-2 speech/object-wording downgrade). Salvage never fabricates
+     movement — candidates already carry the engine position.
    - `buildLivenessConsequence` when `consecutiveFallbacks ≥
      livenessFallbackThreshold` (default 3; NPC turns only) — a deterministic
      minimal applied turn so dialogue can advance by words when bodies cannot.
@@ -154,11 +183,18 @@ preservation, movement intent, destination object, contact adjacency ≤2.5,
 addressee patch, acting-actor presence, state coherence, action-verb coverage,
 observer-subject).
 
-**Movement physics** (`movementAssist.ts`, `validate/movement.ts`): per-turn
-cap 6 cells (half perception radius); path existence via 4-directional A* on an
-integer grid (`pathfinding.ts`); named destinations must get *strictly closer*
-plus *real progress* (≥ min(oldDist/2, 6) when >8 cells away); arrival prose
-must end within 4 cells of the landmark.
+**Movement physics** (Phase 1 — engine-owned): the model never emits
+coordinates. `src/core/movement.ts` (pure) resolves the destination and
+computes the step; `src/engine/movementExecutor.ts` (orchestration) runs it
+once per turn and merges the result. Per-turn cap 6 cells (half perception
+radius); path existence via 4-directional A* on an integer grid
+(`src/core/pathfinding.ts`); directed steps must get *strictly closer* to the
+named destination — the engine always takes the closest legal cell within the
+cap, so real progress holds by construction (no token shuffles possible);
+arrival prose must end within 4 cells of the landmark. Validator movement
+checks are engine-output invariants (`assertMovementInvariants`), not retry
+triggers: `movement.no_position_change`, `movement.position_unchanged`,
+`movement.no_progress_actor`, and `movement.no_progress_object` are deleted.
 
 **LLM constraint ladder** (`src/llm/complete.ts`, `src/schemas.ts`):
 Zod strict schemas for proposal/selection; a lenient "repair" tier for
