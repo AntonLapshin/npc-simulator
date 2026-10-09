@@ -11,7 +11,7 @@
 import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
 import { consequenceResultSchema } from "../schemas.js";
-import { buildConsequenceContext } from "../engine/contextBuilder.js";
+import { buildConsequenceContext, buildNarrateContext } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
 import { LLM_SYSTEM_PROMPT, RENDER_OUTPUT_SCHEMA, renderSuffix } from "./prompts.js";
@@ -52,12 +52,28 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     "movement honestly from their text. Their speech outranks any example phrasing in these instructions.";
 
   /**
+   * PLAN_V2 Phase 4: user-turn directive for the narrate-from-facts
+   * prompt. The new prompt carries no action text, so the directive
+   * points at the executed facts instead: the human's quoted words
+   * (EXACT QUOTE) are verbatim ground truth; what happened is what the
+   * engine executed.
+   */
+  static readonly V2_USER_TURN_DIRECTIVE =
+    "USER TURN: the human player typed this turn's action — it is ground truth, not a suggestion. " +
+    "Their quoted words (EXACT QUOTE above) are verbatim; the executed facts above are what happened. " +
+    "Narrate both honestly (never substitute a generic greeting or different dialogue).";
+
+  /**
    * Phase 4: one render call. The executed facts (movement, exact quote,
    * manipulation) arrive via opts — computed by the turn orchestrator
    * before this call — and are surfaced to the model as the source of
    * truth to narrate. Old-schema keys (actorPatches/objectPatches/
    * effects) in the response are stripped by the schema and named in the
    * lenient-repair log — ignored, never validated.
+   *
+   * PLAN_V2 Phase 4: on the v2 path (`opts.narrateExecutedFacts`) the
+   * context is `buildNarrateContext` — the executed facts, not the
+   * intended action — instead of the legacy `buildConsequenceContext`.
    */
   async resolve(
     world: World,
@@ -70,19 +86,36 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     // Item C1: pass the real roster ids so the suffix carries the
     // roster-discipline line (retrieval beats recall for small models).
     const suffix = renderSuffix(world.actors.map((a) => a.id));
-    const context = buildConsequenceContext(
-      world,
-      action,
-      feedback,
-      undefined,
-      opts?.engineMovement,
-      opts?.exactQuote,
-      opts?.engineManipulation,
-    );
+    // PLAN_V2 Phase 4: on the v2 path the narrate prompt is built from
+    // the executed facts (not the intended action); v1 keeps the legacy
+    // consequence context untouched.
+    const narrateFacts = opts?.narrateExecutedFacts === true;
+    const context = narrateFacts
+      ? buildNarrateContext(world, action, feedback, {
+          engineMovement: opts?.engineMovement,
+          exactQuote: opts?.exactQuote,
+          enginePose: opts?.enginePose,
+          engineManipulation: opts?.engineManipulation,
+          clamp: opts?.clamp,
+        })
+      : buildConsequenceContext(
+          world,
+          action,
+          feedback,
+          undefined,
+          opts?.engineMovement,
+          opts?.exactQuote,
+          opts?.engineManipulation,
+          opts?.clamp,
+        );
     // Exp-6 item 2: user-turn directive leads the prompt (before the
     // world dump) so the writer treats the player's words as sacred.
+    // PLAN_V2 Phase 4: the v2 narrate prompt carries no action text, so
+    // user turns get the facts-pointing variant of the directive.
     const userTurnPrefix =
-      opts?.isUserTurn === true ? `${LLMConsequenceEngine.USER_TURN_DIRECTIVE}\n\n` : "";
+      opts?.isUserTurn === true
+        ? `${narrateFacts ? LLMConsequenceEngine.V2_USER_TURN_DIRECTIVE : LLMConsequenceEngine.USER_TURN_DIRECTIVE}\n\n`
+        : "";
     const userPrompt = `${userTurnPrefix}${context}\n\n${suffix}`;
 
     const result = await completeJson({

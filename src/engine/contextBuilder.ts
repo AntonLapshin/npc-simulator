@@ -20,6 +20,8 @@ import { LIVENESS_HISTORY_MARKER } from "./patchApplier.js";
 import { executedMovementFacts, type MovementOutcome } from "./movementExecutor.js";
 import { exactQuoteFacts } from "./speechExecutor.js";
 import { executedManipulationFacts, type ManipulationOutcome } from "./manipulationExecutor.js";
+import { describeClamp, type TurnClamp } from "../core/clamp.js";
+import type { PlannedPose } from "../core/text.js";
 
 function formatList(items: string[]): string {
   return items.length > 0 ? items.map((m) => `- ${m}`).join("\n") : "(none)";
@@ -1148,6 +1150,11 @@ export function buildConsequenceContext(
   // honestly instead of emitting objectPatches/prop patches.
   // Undefined = unknown (older callers); null = no manipulation executed.
   engineManipulation?: ManipulationOutcome | null,
+  // PLAN_V2 Phase 3: the turn's attempted-vs-executed clamp record — the
+  // honest gap the render call narrates (a failed reach is a story beat,
+  // not an error to hide). Undefined = unknown (v1 / older callers — no
+  // block); null = computed, no gap.
+  clamp?: TurnClamp | null,
 ): string {
   const actor = getActorById(world, action.actorId);
   const perceivers = getPerceivingActors(world, action, cfg);
@@ -1173,6 +1180,9 @@ export function buildConsequenceContext(
     ...(engineManipulation !== undefined
       ? executedManipulationFacts(world, action.actorId, engineManipulation)
       : []),
+    // PLAN_V2 Phase 3: attempted-vs-executed — the engine's honest gap
+    // for this turn (only when a channel clamped something).
+    ...(clamp !== undefined && clamp !== null ? describeClamp(world, action.actorId, clamp) : []),
     `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
     `Landmarks (move targets — resolve "my desk", "coffee machine", "door" to an id below): ${world.scene.objects.length > 0 ? world.scene.objects.map((o) => `${o.name} (${o.id}) at (${o.x}, ${o.y}, ${o.w}x${o.h})`).join(" | ") : "(none)"}`,
     "MOVEMENT IS ENGINE-EXECUTED: the EXECUTED MOVEMENT section above is what already happened this turn — narrate it honestly and never invent coordinates. Do not emit x/y for any actor (any coordinates you emit are ignored).",
@@ -1233,6 +1243,137 @@ export function buildConsequenceContext(
     "Patch ONLY affected actors/objects (listed perceivers + observably changed objects) — never re-emit unchanged walls/furniture.",
     "Add memories, beliefs, and relationships when relevant.",
     "Use concise natural-language strings.",
+    "Return COMPACT single-line JSON only.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Fact lines describing the engine-executed pose for the narrate input,
+ * mirroring `executedMovementFacts` / `exactQuoteFacts` /
+ * `executedManipulationFacts`. Pure.
+ */
+export function executedPoseFacts(
+  world: World,
+  actorId: string,
+  pose: PlannedPose | null,
+): string[] {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const name = actor?.name ?? actorId;
+  if (pose === null) {
+    return [
+      `EXECUTED POSE: no pose change — ${name} remains ${actor?.pose ?? "standing"}.`,
+    ];
+  }
+  return [
+    `EXECUTED POSE (the engine already changed the acting actor's pose — narrate exactly this):`,
+    `${name} is now ${pose === "sit" ? "sitting" : "standing"}.`,
+    "Do not invent other pose changes.",
+  ];
+}
+
+/**
+ * PLAN_V2 Phase 4: the executed facts assembled for the narrate input —
+ * what the engine actually did this turn, plus the attempted-vs-executed
+ * gap when a channel clamped. Mirrors `ConsequenceResolveOpts` (undefined
+ * = unknown / older callers; null = computed, nothing there).
+ */
+export type NarrateContextFacts = {
+  engineMovement?: MovementOutcome | null;
+  exactQuote?: string | null;
+  enginePose?: PlannedPose | null;
+  engineManipulation?: ManipulationOutcome | null;
+  clamp?: TurnClamp | null;
+};
+
+/**
+ * PLAN_V2 Phase 4: the narrate prompt. The input is the EXECUTED-FACTS
+ * block (what the engine actually did + the ATTEMPTED-vs-EXECUTED gap
+ * block when a clamp fired) — NOT the intended action. The prompt tells
+ * the narrator "these facts are final; narrate what happened."
+ *
+ * Deliberately leaner than `buildConsequenceContext`: no action text,
+ * no patch/emission rules (the render contract is prose-only), no
+ * per-turn history (the echo attractor). What remains is the facts, the
+ * grounding rules, and the closed-world roster — enough to narrate one
+ * honest paragraph, nothing to invent from.
+ */
+export function buildNarrateContext(
+  world: World,
+  action: Action,
+  feedback: string | undefined,
+  facts: NarrateContextFacts,
+): string {
+  const actor = getActorById(world, action.actorId);
+  const actorName = actor?.name ?? action.actorId;
+  const lines = [
+    "NARRATE THE EXECUTED FACTS",
+    "",
+    "These facts are FINAL — the engine already executed this turn. Your job is to narrate WHAT HAPPENED,",
+    "not what was intended, imagined, or wished for. A failed attempt listed below is a story beat:",
+    "narrate the attempt AND its honest outcome (she reaches for his hand, but he's across the room).",
+    "Never smooth a failure into success, never drop it silently, and never emit (not done).",
+    "",
+    actor !== undefined
+      ? `Acting actor: ${actor.name} (${actor.id}, ${actorPronouns(actor)}) — final position (${actor.x}, ${actor.y}).`
+      : `Acting actor: ${action.actorId} (unknown).`,
+    "",
+    // The executed facts — the narrator's only source of truth.
+    ...(facts.engineMovement !== undefined
+      ? executedMovementFacts(world, action.actorId, facts.engineMovement)
+      : []),
+    ...(facts.exactQuote !== undefined
+      ? exactQuoteFacts(world, action.actorId, facts.exactQuote)
+      : []),
+    ...(facts.engineManipulation !== undefined
+      ? executedManipulationFacts(world, action.actorId, facts.engineManipulation)
+      : []),
+    ...(facts.enginePose !== undefined
+      ? executedPoseFacts(world, action.actorId, facts.enginePose)
+      : []),
+    // PLAN_V2 Phase 3: the honest gap — narrate the attempt that fell short.
+    ...(facts.clamp !== undefined && facts.clamp !== null
+      ? describeClamp(world, action.actorId, facts.clamp)
+      : []),
+    "",
+    "GROUNDING RULES (keep the prose honest):",
+    "- Third person only. Describe ONLY the acting actor's directly observable behavior.",
+    "- Never describe another actor perceiving, hearing, speaking, moving, glancing, or reacting — even passively.",
+    "  Observers react in their own thoughts, on their own turns; their visible response is never yours to narrate.",
+    "- Narrate ONLY the executed facts above — never invent a walk, pose change, pick-up/put-down/hand-over,",
+    "  or quoted dialogue the facts don't show.",
+    "- Speech: when an EXACT QUOTE is listed above, the narrative MUST contain it character-for-character.",
+    "  Copy it verbatim — never paraphrase, alter, truncate, or invent other dialogue.",
+    "",
+    `All actor positions: ${world.actors.length > 0 ? world.actors.map((a) => `${a.name} (${a.id}) at (${a.x}, ${a.y})`).join(" | ") : "(none)"}`,
+    "",
+    `IDENTITY RULE: ${buildIdentityAnchor(world, action.actorId)} Act out YOUR role only.`,
+    "",
+    `ROSTER RULE: ${buildRosterAnchor(world)}`,
+    "",
+    buildRelationshipRefresh(world, action.actorId),
+  ];
+  if (feedback !== undefined && feedback !== "") {
+    lines.push("", "Validation Feedback (previous output was invalid)", "", feedback);
+  }
+  lines.push(
+    "",
+    // PLAN_V2 Phase 5 (the director): the style guide — instructions for
+    // eventful narration, copied from the PLAN_V2 appendix draft. It tells
+    // the narrator how to *handle* drama, not when to invent it; the
+    // deterministic staleness trigger decides when incidents arrive.
+    "DIRECTOR STYLE GUIDE (how to handle drama — never invent it):",
+    "",
+    "You are narrating a living scene, not transcribing one. Favor the specific over the generic: a chipped mug, not \"a cup\". " +
+      "Let small frictions surface — interruptions, misunderstandings, unfinished sentences. " +
+      "When a director incident arrives, treat it as real and let every character react in character; do not resolve it in the same paragraph it appears. " +
+      "Never summarize feelings instead of showing them. " +
+      "Never let three consecutive turns pass with everyone merely being polite — if the facts give you nothing, say what the room feels like. " +
+      "The world facts are final: narrate what happened, not what should have.",
+    "",
+    "Task",
+    "",
+    `Narrate what ${actorName} observably did this turn, grounded strictly in the executed facts above.`,
     "Return COMPACT single-line JSON only.",
   );
   return lines.join("\n");

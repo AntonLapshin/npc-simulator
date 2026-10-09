@@ -10,6 +10,8 @@ import type { MovementOutcome } from "../engine/movementExecutor.js";
 import type { ManipulationOutcome } from "../engine/manipulationExecutor.js";
 import type { Intent } from "../decision/decisionTypes.js";
 import type { IntentResult } from "../core/intent.js";
+import type { TurnClamp } from "../core/clamp.js";
+import type { PlannedPose } from "../core/text.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -112,6 +114,30 @@ export type ConsequenceResolveOpts = {
    * (older callers).
    */
   engineManipulation?: ManipulationOutcome | null;
+  /**
+   * PLAN_V2 Phase 3: the turn's attempted-vs-executed clamp record (v2
+   * only). Engines surface it to the model as the honest-gap facts to
+   * narrate — "she reaches for his hand, but he's across the room" —
+   * instead of silent drops or (not done) sentinels. Null = computed, no
+   * gap; undefined = unknown (v1 and older callers — no clamp block in
+   * the prompt).
+   */
+  clamp?: TurnClamp | null;
+  /**
+   * PLAN_V2 Phase 4: engine-executed pose for this turn (computed by the
+   * turn orchestrator before the render call). Engines surface it as the
+   * executed-pose fact to narrate. Null = no pose change; undefined =
+   * unknown (older callers).
+   */
+  enginePose?: PlannedPose | null;
+  /**
+   * PLAN_V2 Phase 4: true on the v2 path — the narrate prompt is built
+   * from the executed facts (not the intended action), and the
+   * orchestrator accepts the render after one retry instead of falling
+   * back. Unset/false = the legacy consequence prompt and the
+   * retry→liveness→fallback behavior (v1, unchanged).
+   */
+  narrateExecutedFacts?: boolean;
 };
 
 export interface ConsequenceEngine {

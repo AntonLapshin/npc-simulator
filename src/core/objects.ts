@@ -379,14 +379,73 @@ export function nearBrewSource(snapshot: ManipulationSnapshot, actor: CoreActor)
  * - A manipulation the guards reject → null (not attempted, not
  *   faked — the phantom-manipulation gate then polices the narrative).
  */
-export function planManipulation(
+/**
+ * PLAN_V2 Phase 3: why a manipulation the action implied was not
+ * executed. Machine-readable so the clamp policy can record the honest
+ * attempted-vs-executed gap (no re-asking the LLM, no retries).
+ */
+export type ManipulationRejectReason =
+  | "unknown-actor"
+  | "ambiguous"
+  | "hands-full"
+  | "nothing-held"
+  | "no-such-object"
+  | "object-too-far"
+  | "no-recipient"
+  | "recipient-too-far"
+  | "recipient-hands-full";
+
+/**
+ * PLAN_V2 Phase 3: what the engine decided about this turn's implied
+ * manipulation — the plan, a rejection (with the reason and the nouns
+ * the honest record needs), or nothing implied at all. Pure.
+ */
+export type ManipulationDiagnosis =
+  | { kind: "executed"; plan: ManipulationPlan }
+  | {
+      kind: "rejected";
+      /** The implied kind (null when the action named none, or named several). */
+      implied: ManipulationKind | null;
+      reason: ManipulationRejectReason;
+      /** Canonical prop name the action reached for (null when none named). */
+      subject: string | null;
+      /** What the actor is already holding (for the hands-full phrase). */
+      heldProp: string | null;
+      /** Hand-over recipient, when one resolved. */
+      targetActorId?: string;
+      /** Cells to the rejected object/recipient (null when not measurable). */
+      distance: number | null;
+    }
+  | { kind: "none" };
+
+/**
+ * Diagnose one turn's implied manipulation: plan it, or say exactly why
+ * it cannot execute. `planManipulation` is the thin wrapper that keeps
+ * the historical plan-or-null contract (byte-identical behavior).
+ */
+export function diagnoseManipulation(
   snapshot: ManipulationSnapshot,
   actorId: string,
   actionText: string,
   contactActorId?: string,
-): ManipulationPlan | null {
+): ManipulationDiagnosis {
+  const noPlan = (
+    implied: ManipulationKind | null,
+    reason: ManipulationRejectReason,
+    subject: string | null,
+    heldProp: string | null,
+    extra: { targetActorId?: string; distance?: number | null } = {},
+  ): ManipulationDiagnosis => ({
+    kind: "rejected",
+    implied,
+    reason,
+    subject,
+    heldProp,
+    ...(extra.targetActorId !== undefined ? { targetActorId: extra.targetActorId } : {}),
+    distance: extra.distance ?? null,
+  });
   const actor = snapshot.actors.find((a) => a.id === actorId);
-  if (!actor) return null;
+  if (!actor) return noPlan(null, "unknown-actor", null, null);
   const text = actionText.replace(CARRY_ON_RE, " ");
 
   const handOverMention = resolveContactMention(snapshot.actors, actorId, text);
@@ -409,64 +468,126 @@ export function planManipulation(
   ].filter((k): k is ManipulationKind => k !== null);
   // Single-manipulation contract: contradictory end states ("pick up the
   // mug and hand it to Ana") are not executed — split them across turns.
-  if (kinds.length !== 1) return null;
+  if (kinds.length === 0) return { kind: "none" };
+  if (kinds.length !== 1)
+    return noPlan(null, "ambiguous", null, actor.prop ?? null);
   const kind = kinds[0]!;
+  const heldProp = actor.prop ?? null;
 
   if (kind === "pick-up") {
     // Already holding something: nothing to pick up.
-    if ((actor.prop ?? null) !== null) return null;
+    if (heldProp !== null) return noPlan(kind, "hands-full", null, heldProp);
     const propName = pickUpPropName(text, snapshot, actor);
-    if (propName === null) return null;
+    if (propName === null) return noPlan(kind, "no-such-object", null, heldProp);
     const object = pickUpObject(text, snapshot, actor, propName);
+    if (object === null) {
+      // The honest record needs the difference between "the cup exists
+      // but is across the room" and "there is no cup at all".
+      const mentioned = snapshot.objects.filter(
+        (o) => o.affordance.pickable && mentionsObject(text, o),
+      );
+      const pool =
+        mentioned.length > 0
+          ? mentioned
+          : snapshot.objects.filter(
+              (o) => o.affordance.pickable && o.affordance.propName === propName,
+            );
+      let nearest: number | null = null;
+      for (const o of pool) {
+        const d = distanceToObjectCenter(actor, o);
+        if (nearest === null || d < nearest) nearest = d;
+      }
+      return noPlan(
+        kind,
+        pool.length > 0 ? "object-too-far" : "no-such-object",
+        propName,
+        heldProp,
+        { distance: nearest },
+      );
+    }
     // No matching pickable object within reach — the engine never
     // invents props out of thin air.
-    if (object === null) return null;
     return {
-      kind,
-      actorId,
-      objectId: object.id,
-      propName,
-      rule: `pick-up:${pickUpRule(text, object.id)}`,
+      kind: "executed",
+      plan: {
+        kind,
+        actorId,
+        objectId: object.id,
+        propName,
+        rule: `pick-up:${pickUpRule(text, object.id)}`,
+      },
     };
   }
 
   if (kind === "put-down") {
-    const held = actor.prop ?? null;
-    if (held === null) return null;
+    if (heldProp === null) return noPlan(kind, "nothing-held", null, heldProp);
     const object =
-      heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, held);
+      heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, heldProp);
     const surface = putDownSurface(text, snapshot, actor);
     return {
-      kind,
-      actorId,
-      objectId: object?.id ?? null,
-      propName: held,
-      ...(surface !== null ? { surfaceId: surface.id } : {}),
-      rule: `put-down:held(${held})${surface !== null ? `+surface(${surface.id})` : ""}`,
+      kind: "executed",
+      plan: {
+        kind,
+        actorId,
+        objectId: object?.id ?? null,
+        propName: heldProp,
+        ...(surface !== null ? { surfaceId: surface.id } : {}),
+        rule: `put-down:held(${heldProp})${surface !== null ? `+surface(${surface.id})` : ""}`,
+      },
     };
   }
 
   // hand-over
-  const held = actor.prop ?? null;
-  if (held === null) return null;
   const recipientId = contactActorId ?? handOverMention;
-  if (recipientId === null || recipientId === undefined) return null;
-  const recipient = snapshot.actors.find((a) => a.id === recipientId);
-  if (!recipient || recipient.id === actorId) return null;
-  if (Math.hypot(actor.x - recipient.x, actor.y - recipient.y) > HAND_OVER_REACH + 1e-9)
-    return null;
+  const recipient =
+    recipientId !== null && recipientId !== undefined
+      ? snapshot.actors.find((a) => a.id === recipientId)
+      : undefined;
+  const validRecipient =
+    recipient !== undefined && recipient.id !== actorId ? recipient : undefined;
+  if (heldProp === null)
+    return noPlan(kind, "nothing-held", null, heldProp, {
+      ...(validRecipient !== undefined ? { targetActorId: validRecipient.id } : {}),
+    });
+  if (recipientId === null || recipientId === undefined)
+    return noPlan(kind, "no-recipient", heldProp, heldProp);
+  if (validRecipient === undefined)
+    return noPlan(kind, "no-recipient", heldProp, heldProp);
+  const dist = Math.hypot(actor.x - validRecipient.x, actor.y - validRecipient.y);
+  if (dist > HAND_OVER_REACH + 1e-9)
+    return noPlan(kind, "recipient-too-far", heldProp, heldProp, {
+      targetActorId: validRecipient.id,
+      distance: dist,
+    });
   // The recipient's hands must be free — the engine never stacks props.
-  if ((recipient.prop ?? null) !== null) return null;
+  if ((validRecipient.prop ?? null) !== null)
+    return noPlan(kind, "recipient-hands-full", heldProp, heldProp, {
+      targetActorId: validRecipient.id,
+      distance: dist,
+    });
   const object =
-    heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, held);
+    heldSceneObject(snapshot, actor) ?? nearestKindObject(snapshot, actor, heldProp);
   return {
-    kind,
-    actorId,
-    objectId: object?.id ?? null,
-    propName: held,
-    targetActorId: recipient.id,
-    rule: `hand-over:held(${held})->${recipient.id}`,
+    kind: "executed",
+    plan: {
+      kind,
+      actorId,
+      objectId: object?.id ?? null,
+      propName: heldProp,
+      targetActorId: validRecipient.id,
+      rule: `hand-over:held(${heldProp})->${validRecipient.id}`,
+    },
   };
+}
+
+export function planManipulation(
+  snapshot: ManipulationSnapshot,
+  actorId: string,
+  actionText: string,
+  contactActorId?: string,
+): ManipulationPlan | null {
+  const diagnosis = diagnoseManipulation(snapshot, actorId, actionText, contactActorId);
+  return diagnosis.kind === "executed" ? diagnosis.plan : null;
 }
 
 /** Canonical prop name for a pick-up intent, or null when the text implies none. Pure. */
