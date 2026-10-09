@@ -87,6 +87,28 @@ describe("buildIntentPrompt", () => {
   it("throws for an unknown actor (the engine converts this to the fallback)", () => {
     expect(() => buildIntentPrompt(makeTinyWorld(), "ghost")).toThrow();
   });
+
+  it("carries a pending director incident as a world fact, and omits the block otherwise", () => {
+    const plain = buildIntentPrompt(makeTinyWorld(), "n");
+    expect(plain).not.toContain("WORLD FACT");
+
+    const world = makeTinyWorld();
+    world.directorPendingIncident = {
+      id: "alarm",
+      text: "The fire alarm starts ringing.",
+    };
+    const prompt = buildIntentPrompt(world, "n");
+    expect(prompt).toContain("WORLD FACT — NEW INCIDENT:");
+    expect(prompt).toContain("The fire alarm starts ringing.");
+    // The incident lands between the physical facts and the history, so
+    // the actor grounds in the scene first, then the drama.
+    const factIdx = prompt.indexOf("PHYSICAL FACTS");
+    const incidentIdx = prompt.indexOf("WORLD FACT — NEW INCIDENT:");
+    const historyIdx = prompt.indexOf("WHAT JUST HAPPENED:");
+    expect(factIdx).toBeGreaterThan(-1);
+    expect(incidentIdx).toBeGreaterThan(factIdx);
+    expect(historyIdx).toBeGreaterThan(incidentIdx);
+  });
 });
 
 describe("LLMIntentEngine", () => {

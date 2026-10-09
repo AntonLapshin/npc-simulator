@@ -58,6 +58,20 @@ export function buildIntentPrompt(
     "PHYSICAL FACTS (the real scene right now):",
     "",
     buildPhysicalFacts(world, actorId),
+    // PLAN_V2 Phase 5 (the director): the injected incident is a world
+    // fact — the engine decided drama happens; the actor decides how to
+    // engage with it.
+    ...(world.directorPendingIncident !== undefined
+      ? [
+          "",
+          "WORLD FACT — NEW INCIDENT:",
+          "",
+          world.directorPendingIncident.text,
+          "",
+          "Treat this as a real event happening in the scene right now — every character would notice it. " +
+            "Your action should engage with it in character rather than ignoring it.",
+        ]
+      : []),
     "",
     "WHAT JUST HAPPENED:",
     "",

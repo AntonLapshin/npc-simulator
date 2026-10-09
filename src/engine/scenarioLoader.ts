@@ -96,6 +96,17 @@ function loadScenarioInner(raw: unknown, logger?: Logger): World {
     objectIds.add(o.id);
   }
 
+  // PLAN_V2 Phase 5: the director's incident list must be unambiguous —
+  // a duplicated event id would make "consumed" tracking meaningless.
+  // (Shape — non-empty id/text — is enforced by the zod schema above.)
+  if (scenario.directorEvents !== undefined) {
+    const eventIds = new Set<string>();
+    for (const e of scenario.directorEvents) {
+      if (eventIds.has(e.id)) fail(`duplicate director event id: ${e.id}`);
+      eventIds.add(e.id);
+    }
+  }
+
   if (!actorIds.has(scenario.userActorId)) fail(`userActorId does not exist: ${scenario.userActorId}`);
 
   for (const id of scenario.order) {

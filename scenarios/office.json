@@ -3,6 +3,16 @@
   "id": "office",
   "title": "Office: Jeff is a new coworker",
   "narrative": "Jeff enters the door to the office.",
+  "directorEvents": [
+    {
+      "id": "fire-alarm-test",
+      "text": "The fire alarm begins its scheduled test — a loud pulsing tone fills the whole office."
+    },
+    {
+      "id": "courier-package",
+      "text": "A courier arrives at the office door carrying a large unlabeled cardboard box."
+    }
+  ],
   "userActorId": "jeff",
   "order": ["jeff", "ana", "dan"],
   "scene": {

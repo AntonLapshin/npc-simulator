@@ -109,4 +109,69 @@ describe("scenarioLoader", () => {
     ];
     expect(() => loadScenario(s)).toThrow(/outside scene/);
   });
+
+  it("loads directorEvents and a custom staleness threshold", () => {
+    const s = baseScenario();
+    const world = loadScenario({
+      ...s,
+      directorEvents: [
+        { id: "alarm", text: "The fire alarm starts ringing." },
+        { id: "courier", text: "A courier arrives." },
+      ],
+      directorStalenessThreshold: 3,
+    });
+    expect(world.directorEvents).toHaveLength(2);
+    expect(world.directorEvents![0]).toEqual({
+      id: "alarm",
+      text: "The fire alarm starts ringing.",
+    });
+    expect(world.directorStalenessThreshold).toBe(3);
+  });
+
+  it("leaves the director off when directorEvents is absent", () => {
+    const world = loadScenario(baseScenario());
+    expect(world.directorEvents).toBeUndefined();
+    expect(world.directorStalenessThreshold).toBeUndefined();
+  });
+
+  it("rejects duplicate director event ids", () => {
+    const s = baseScenario();
+    expect(() =>
+      loadScenario({
+        ...s,
+        directorEvents: [
+          { id: "alarm", text: "One." },
+          { id: "alarm", text: "Two." },
+        ],
+      }),
+    ).toThrow(/duplicate director event id: alarm/);
+  });
+
+  it("rejects malformed director events and thresholds (fail fast)", () => {
+    const s = baseScenario();
+    // empty id / empty text
+    expect(() =>
+      loadScenario({ ...s, directorEvents: [{ id: "", text: "x" }] }),
+    ).toThrow();
+    expect(() =>
+      loadScenario({ ...s, directorEvents: [{ id: "e", text: "" }] }),
+    ).toThrow();
+    // non-string text
+    expect(() =>
+      loadScenario({ ...s, directorEvents: [{ id: "e", text: 42 }] }),
+    ).toThrow();
+    // threshold below 1
+    expect(() =>
+      loadScenario({ ...s, directorStalenessThreshold: 0 }),
+    ).toThrow();
+  });
+
+  it("loads the office scenario's example director events", () => {
+    const world = loadOfficeScenario();
+    expect(world.directorEvents).toHaveLength(2);
+    expect(world.directorEvents!.map((e) => e.id)).toEqual([
+      "fire-alarm-test",
+      "courier-package",
+    ]);
+  });
 });
