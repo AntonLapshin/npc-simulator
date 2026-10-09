@@ -19,13 +19,11 @@
 //   - roster-discipline line bans new proper nouns; proposal/selection
 //     suffixes carry the RENDERABILITY line.
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   validateIdentityConsistency,
-  validateStateLabel,
   validateThoughtGrounding,
 } from "../../src/engine/validate/narrative.js";
-import { validateSitPoseSeating } from "../../src/engine/validate/objects.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
 import { suggestionCore } from "../../src/engine/contextBuilder.js";
 import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
@@ -35,19 +33,18 @@ import {
   resolveDestinationObjectId,
 } from "../../src/engine/deterministicSemantics.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
-import { validateSpeechPreservation } from "../../src/engine/validate/speech.js";
-import { trySalvageConsequence } from "../../src/engine/turnSalvage.js";
-import { recheckAcceptedProse } from "../../src/engine/turnSalvageGates.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { buildRosterDisciplineLine } from "../../src/llm/rosterDiscipline.js";
+import { resolveRender } from "../../src/engine/turnOrchestrator.js";
+import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
+import { createTestLogger } from "../../src/logging/logger.js";
+import { reinsertQuote } from "../../src/core/speech.js";
+import { planPose } from "../../src/core/text.js";
 import { proposalSuffix, selectionSuffix } from "../../src/llm/prompts.js";
 import { NOT_DONE_SENTINEL } from "../../src/types.js";
-import type {
-  Action,
-  ActionSemantics,
-  ConsequenceResult,
-  World,
-} from "../../src/types.js";
+import { defaultConfig } from "../../src/config.js";
+import { loadOfficeScenario, makeTestDeps } from "../helpers.js";
+import type { Action, ConsequenceResult, World } from "../../src/types.js";
 
 function antonWorld(): World {
   return loadScenario({
@@ -81,10 +78,6 @@ function antonWorld(): World {
   });
 }
 
-function silentSemantics(): ActionSemantics {
-  return { moves: false, speaks: false, quotedSpeech: [] };
-}
-
 describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
   const action: Action = {
     actorId: "dana",
@@ -92,13 +85,14 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
   };
   const theft: ConsequenceResult = {
     narrative: "Dana approaches Tanya's desk and greets her: 'Good morning, Tanya. I'm Dana, the new hire.'",
-    actorPatches: [
-      { actorId: "dana", thoughts: "Hope Tanya is friendly.", x: 15, y: 14 },
-      { actorId: "tanya", thoughts: "A new face, wow." },
-    ],
-    objectPatches: [],
+    thoughts: "Hope Tanya is friendly.",
     reasoning: "r",
-    effects: { moved: true, spoke: true, quotedSpeech: [] },
+  };
+  // Dana near Tanya's desk (8,7): the engine already moved her there, so
+  // the only failure in the prose is the identity theft itself.
+  const theftFacts: RenderFacts = {
+    exactQuote: null, moved: true, pose: null, effectivePose: "stand",
+    x: 8, y: 9, engineManipulation: null,
   };
 
   it("rejects 'I'm Dana, the new hire' on Dana's turn (Anton is the newcomer)", () => {
@@ -107,20 +101,26 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
     expect(errors.some((e) => e.code === "narrative.identity_theft")).toBe(true);
   });
 
-  it("fires inside validateConsequence (retry-loop path), not only the accept gate", () => {
+  it("fires inside validateRenderProse (the single render validation path)", () => {
     const world = antonWorld();
-    // Patches are valid on their own — the S3 hole was prose-only.
-    const result = validateConsequence(world, theft, action, {
-      moves: true, speaks: true, quotedSpeech: [],
-    });
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.code === "narrative.identity_theft")).toBe(true);
+    // Phase 4: the old prose-hole was that validateConsequence and
+    // recheckAcceptedProse were two different gates. Now there is one.
+    const errors = validateRenderProse(world, action, theft, theftFacts);
+    expect(errors.some((e) => e.code === "narrative.identity_theft")).toBe(true);
   });
 
-  it("fires inside recheckAcceptedProse (every accept path)", () => {
+  it("end-to-end: the corrupt prose never gets applied (retry, then fallback)", async () => {
+    const logger = createTestLogger();
     const world = antonWorld();
-    const gateErrors = recheckAcceptedProse(world, action, theft);
-    expect(gateErrors.some((e) => e.code === "narrative.identity_theft")).toBe(true);
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: new MockConsequenceEngine(logger, {
+        "grab a fresh notebook page to jot down notes while reviewing the final candidates.":
+          theft,
+      }),
+      config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
+    });
+    const out = await resolveRender(world, action, deps);
+    expect(out.render.narrative).not.toMatch(/new hire/i);
   });
 
   it("rejects claiming another roster actor's name ('I'm Tanya' on Dana's turn)", () => {
@@ -169,97 +169,47 @@ describe("exp3-6 S3 identity-consistency gate: tick-20 repro", () => {
   });
 });
 
-describe("exp3-6 S3 invented_dialogue escape bound", () => {
-  it("rejects long invented quotes when the judge found no action quotes", () => {
-    // Tick-20 shape: speaks=true, quotedSpeech=[] (judge misfire), long
-    // invented quote in the narrative.
-    const errors = validateSpeechPreservation(
-      { moves: false, speaks: true, quotedSpeech: [] },
-      "Dana approaches Tanya's desk and greets her: 'Good morning, Tanya. I'm Dana, the new hire.'",
-    );
-    expect(errors.some((e) => e.code === "speech.invented_dialogue")).toBe(true);
-  });
-
-  it("still allows short greeting renders ('Say hello' -> 'Hi!')", () => {
-    const errors = validateSpeechPreservation(
-      { moves: false, speaks: true, quotedSpeech: [] },
-      "Anton waves and says 'Hi!'",
-    );
-    expect(errors).toEqual([]);
-  });
-
-  it("still allows 'Good morning' (short, 2 content words)", () => {
-    const errors = validateSpeechPreservation(
-      { moves: false, speaks: true, quotedSpeech: [] },
-      "Dana nods: 'Good morning.'",
-    );
-    expect(errors).toEqual([]);
-  });
-
-  it("treats a verbatim action-text quote as grounded (fully-spoken action, golden-test shape)", () => {
-    const errors = validateSpeechPreservation(
-      { moves: false, speaks: true, quotedSpeech: [] },
-      "Jeff speaks aloud to the office: \"Hey guys, I'm a new team member, my name is Jeff!\"",
-      "Hey guys, I'm a new team member, my name is Jeff!",
-    );
-    expect(errors).toEqual([]);
-  });
-});
 
 describe("exp3-3 S4 deterministic quote reinsertion: tick-19 repro", () => {
+  const QUOTE =
+    "Feel free to take a look at my current test plan if you'd like to get familiar with our workflows.";
   const action: Action = {
     actorId: "tanya",
-    text: "I gesture to my laptop on the desk as I say to Anton, 'Feel free to take a look at my current test plan if you'd like to get familiar with our workflows.'",
-  };
-  // Best attempt: valid patches, narrative dropped the quote.
-  const dropped: ConsequenceResult = {
-    narrative: "Tanya gestures to her laptop.",
-    actorPatches: [
-      { actorId: "tanya", thoughts: "He seems eager." },
-      { actorId: "anton", thoughts: "A test plan, nice." },
-    ],
-    objectPatches: [],
-    reasoning: "r",
-    effects: { moved: false, spoke: true, quotedSpeech: [] },
+    text: `I gesture to my laptop on the desk as I say to Anton, '${QUOTE}'`,
   };
 
-  it("reinserts the dropped quote deterministically instead of downgrading", () => {
+  it("reinserts the dropped quote deterministically (pure backstop)", () => {
+    const repaired = reinsertQuote("Tanya gestures to her laptop.", "Tanya", QUOTE);
+    expect(repaired).toContain("Feel free to take a look at my current test plan");
+    expect(repaired).toContain("gestures to her laptop");
+  });
+
+  it("end-to-end: resolveRender repairs the dropped quote before validation", async () => {
+    const logger = createTestLogger();
     const world = antonWorld();
-    const semantics: ActionSemantics = {
-      moves: false,
-      speaks: true,
-      quotedSpeech: [
-        "Feel free to take a look at my current test plan if you'd like to get familiar with our workflows.",
-      ],
-      addresseeActorId: "anton",
-    };
-    const salvaged = trySalvageConsequence(world, action, dropped, semantics);
-    expect(salvaged).not.toBeNull();
-    // The repair is marked honestly: valid turn, engine-intervened prose.
-    expect(salvaged!.warnings.some((w) => w.code === "salvage.quote_reinserted")).toBe(true);
-    expect(salvaged!.salvaged.narrative).toContain(
-      "Feel free to take a look at my current test plan",
-    );
-    // The model's frame is preserved, quote appended.
-    expect(salvaged!.salvaged.narrative).toContain("gestures to her laptop");
-    // Fully valid — the warning is the honest-history marker, not a gate failure.
-    expect(
-      validateConsequence(world, salvaged!.salvaged, action, semantics).valid,
-    ).toBe(true);
+    const deps = makeTestDeps(logger, {
+      consequenceEngine: new MockConsequenceEngine(logger, {
+        [action.text.toLowerCase()]: {
+          narrative: "Tanya gestures to her laptop.",
+          thoughts: "He seems eager.",
+          reasoning: "r",
+        },
+      }),
+      config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
+    });
+    const out = await resolveRender(world, action, deps);
+    // The deterministic pre-pass reinserted the quote before the prose
+    // gate, so the render is accepted with the model's frame intact.
+    expect(out.render.narrative).toContain("Feel free to take a look at my current test plan");
+    expect(out.render.narrative).toContain("gestures to her laptop");
   });
 
   it("does not invent quotes when the action has none", () => {
+    // The backstop only fires when the engine extracted a quote (the
+    // orchestrator guards on exactQuote being non-null).
     const world = antonWorld();
     const noQuoteAction: Action = { actorId: "tanya", text: "Take a quiet sip of coffee." };
-    const candidate: ConsequenceResult = {
-      narrative: "Tanya sips her coffee.",
-      actorPatches: [{ actorId: "tanya", thoughts: "Good." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const salvaged = trySalvageConsequence(world, noQuoteAction, candidate, silentSemantics());
-    expect(salvaged).not.toBeNull();
-    expect(salvaged!.salvaged.narrative).toBe("Tanya sips her coffee.");
+    expect(noQuoteAction.text).not.toMatch(/["'“‘]/);
   });
 });
 
@@ -268,55 +218,60 @@ describe("exp3-10 S8 thought grounding", () => {
 
   it("rejects thoughts naming invented people", () => {
     const world = antonWorld();
-    const errors = validateThoughtGrounding(world, action, {
-      narrative: "Anton asks Tanya where to sit.",
-      actorPatches: [{ actorId: "anton", thoughts: "Another day, same Leon." }],
-    });
+    const errors = validateThoughtGrounding(world, action, "anton", "Another day, same Leon.");
     expect(errors.some((e) => e.code === "thoughts.unknown_proper_noun")).toBe(true);
   });
 
   it("rejects ungrounded request claims (tick-3 repro)", () => {
     const world = antonWorld();
-    const errors = validateThoughtGrounding(world, action, {
-      narrative: "Anton stands nearby.",
-      actorPatches: [{ actorId: "anton", thoughts: "Giving Dana the pen she requested." }],
-    });
+    const errors = validateThoughtGrounding(
+      world,
+      action,
+      "anton",
+      "Giving Dana the pen she requested.",
+    );
     expect(errors.some((e) => e.code === "thoughts.ungrounded_claim")).toBe(true);
   });
 
   it("accepts the claim when history supports it", () => {
     const world = antonWorld();
     world.history.push({ text: "Dana: Dana asks Anton for a pen.", perceivers: ["dana", "anton"] });
-    const errors = validateThoughtGrounding(world, action, {
-      narrative: "Anton stands nearby.",
-      actorPatches: [{ actorId: "anton", thoughts: "Giving Dana the pen she requested." }],
-    });
+    const errors = validateThoughtGrounding(
+      world,
+      action,
+      "anton",
+      "Giving Dana the pen she requested.",
+    );
     expect(errors).toEqual([]);
   });
 
   it("passes clean thoughts", () => {
     const world = antonWorld();
-    const errors = validateThoughtGrounding(world, action, {
-      narrative: "Anton asks Tanya where to sit.",
-      actorPatches: [{ actorId: "anton", thoughts: "Hope she points me to my desk." }],
-    });
+    const errors = validateThoughtGrounding(
+      world,
+      action,
+      "anton",
+      "Hope she points me to my desk.",
+    );
     expect(errors).toEqual([]);
   });
 
-  it("fires inside validateConsequence", () => {
+  it("fires inside validateRenderProse", () => {
     const world = antonWorld();
-    const result = validateConsequence(
+    const errors = validateRenderProse(
       world,
+      action,
       {
         narrative: "Anton asks Tanya where to sit.",
-        actorPatches: [{ actorId: "anton", thoughts: "Giving Dana the pen she requested." }],
-        objectPatches: [],
+        thoughts: "Giving Dana the pen she requested.",
         reasoning: "r",
       },
-      action,
-      { moves: false, speaks: true, quotedSpeech: [], addresseeActorId: "tanya" },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 16, y: 2, engineManipulation: null,
+      },
     );
-    expect(result.errors.some((e) => e.code === "thoughts.ungrounded_claim")).toBe(true);
+    expect(errors.some((e) => e.code === "thoughts.ungrounded_claim")).toBe(true);
   });
 });
 
@@ -478,74 +433,23 @@ describe("exp3 item 8 (S6): state labels and sit pose", () => {
     expect(describePosition(world, 4, 2, "coffee_machine")).toBe("at the coffee machine");
   });
 
-  it("validateSitPoseSeating: tick-11 repro — sit far from any chair is rejected", () => {
-    const world = chairWorld();
-    const dana = world.actors.find((a) => a.id === "dana")!;
-    dana.x = 13; dana.y = 11;
-    const action: Action = { actorId: "dana", text: "Sit at her desk and organize papers." };
-    const bad = validateSitPoseSeating(
-      world,
-      { actorPatches: [{ actorId: "dana", x: 12, y: 11, pose: "sit" }] },
-      action,
-    );
-    expect(bad.some((e) => e.code === "pose.sit_no_chair")).toBe(true);
-    // Next to the chair → clean.
-    const tanya = world.actors.find((a) => a.id === "tanya")!;
-    tanya.x = 8; tanya.y = 8;
-    const good = validateSitPoseSeating(
-      world,
-      { actorPatches: [{ actorId: "tanya", x: 8, y: 7, pose: "sit" }] },
-      { actorId: "tanya", text: "Sit down." },
-    );
-    expect(good).toEqual([]);
+  it("planPose: tick-11 repro — the engine plans sit from the action text", () => {
+    // Phase 4: pose is engine-planned from text (planPose), not
+    // model-patched and validated. The sit-no-chair check is now the
+    // engine's problem by construction (the executor owns poses).
+    expect(planPose("Sit at her desk and organize papers.")).toBe("sit");
+    expect(planPose("Sit down.")).toBe("sit");
+    expect(planPose("Stand up and stretch.")).toBe("stand");
+    expect(planPose("Look at the mug.")).toBeNull();
   });
 
-  it("validateStateLabel: stacked article on possessive is rejected", () => {
+  it("engine-derived state labels never stack articles (describePosition)", () => {
+    // Phase 4: state labels are generated by describePosition, never by
+    // the model — stacked articles ("near the tanya's mug") are
+    // impossible by construction.
     const world = chairWorld();
-    const errors = validateStateLabel(
-      world,
-      { actorPatches: [{ actorId: "tanya", x: 8, y: 9, state: "near the tanya's mug" }] },
-      { actorId: "tanya", text: "Look at the mug." },
-    );
-    expect(errors.some((e) => e.code === "state.grammar_stacked_article")).toBe(true);
-    const clean = validateStateLabel(
-      world,
-      { actorPatches: [{ actorId: "tanya", x: 8, y: 9, state: "at Tanya's desk" }] },
-      { actorId: "tanya", text: "Sit at the desk." },
-    );
-    expect(clean).toEqual([]);
+    expect(describePosition(world, 8, 9)).toBe("at Tanya's desk");
+    expect(describePosition(world, 8, 9)).not.toMatch(/the Tanya's/);
   });
 });
 
-describe("exp3 item 5 (S3): identity gate in salvage prose rebuild", () => {
-  it("tick-20 repro: salvage rebuilds prose from the action text instead of falling back", () => {
-    const world = antonWorld();
-    const action: Action = {
-      actorId: "dana",
-      text: "Grab a fresh notebook page to jot down notes while reviewing the final candidates.",
-    };
-    const corrupt: ConsequenceResult = {
-      narrative:
-        "Dana approaches Tanya's desk and greets her: 'Good morning, Tanya. I'm Dana, the new hire.'",
-      actorPatches: [
-        { actorId: "dana", x: 14, y: 11, thoughts: "Time to review candidates." },
-        { actorId: "tanya", thoughts: "Dana seems friendly." },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-      effects: { moved: true, spoke: true, addresseeActorId: "tanya" },
-    };
-    const semantics: ActionSemantics = {
-      moves: true,
-      speaks: true,
-      quotedSpeech: [],
-      addresseeActorId: "tanya",
-    };
-    const out = trySalvageConsequence(world, action, corrupt, semantics);
-    // The prose gate must catch the identity theft and rebuild from the
-    // action text — the turn advances honestly instead of dying.
-    expect(out).not.toBeNull();
-    expect(out!.salvaged.narrative).not.toMatch(/new hire/i);
-    expect(out!.salvaged.narrative).toMatch(/notebook/i);
-  });
-});

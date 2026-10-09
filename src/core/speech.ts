@@ -86,3 +86,30 @@ export function reinsertQuote(
     frame.length > 0 && frameQuotes.every((q) => quoteCovers(quote, q));
   return cleanFrame ? `${frame} ${sentence}` : sentence;
 }
+
+/**
+ * Exp-3 item 1 / Exp-4 item 4: is a quote grounded in the ACTION text?
+ * A quote counts only when it is a (normalized) substring of the action
+ * text. A substring that ends mid-word ("Why don" for "Why don't we...")
+ * is a truncation, not ground truth — both ends of the match must sit on
+ * a word boundary. Pure.
+ */
+function normActionText(s: string): string {
+  return normalizeQuotes(s).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+export function isQuoteGroundedInAction(quote: string, actionText: string): boolean {
+  const q = normActionText(quote);
+  if (q.length === 0) return false;
+  const hay = normActionText(actionText);
+  const idx = hay.indexOf(q);
+  if (idx === -1) return false;
+  const isWordChar = (c: string): boolean => /[a-z0-9']/i.test(c);
+  const before = idx > 0 ? hay[idx - 1]! : "";
+  const after = idx + q.length < hay.length ? hay[idx + q.length]! : "";
+  if (before !== "" && isWordChar(before) && q.length > 0 && isWordChar(q[0]!)) return false;
+  if (after !== "" && isWordChar(after) && q.length > 0 && isWordChar(q[q.length - 1]!)) {
+    return false;
+  }
+  return true;
+}

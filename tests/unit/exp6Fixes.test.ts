@@ -38,7 +38,7 @@ import { describe, expect, it, afterEach } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { consequenceSuffix, STUB_BAN_LINE } from "../../src/llm/prompts.js";
+import { renderSuffix, STUB_BAN_LINE } from "../../src/llm/prompts.js";
 import { LLMConsequenceEngine } from "../../src/llm/llmConsequenceEngine.js";
 import { filterUnrenderableSuggestions } from "../../src/llm/llmProposalEngine.js";
 import {
@@ -55,10 +55,9 @@ import type { LLMProvider } from "../../src/llm/index.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import {
   thirdPersonFallbackText,
-  validateInventedContact,
   validateRelationshipLabel,
 } from "../../src/engine/validate/narrative.js";
-import { recheckAcceptedProse, shouldAbortRetries } from "../../src/engine/turnSalvageGates.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import { suggestionCore } from "../../src/engine/contextBuilder.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
@@ -131,35 +130,29 @@ const action = (actorId: string, text: string): Action => ({ actorId, text });
 
 describe("exp-6 item 1: greeting-stub attractor", () => {
   it("no longer uses 'greets the office' as the example narrative", () => {
-    const short = consequenceSuffix("short", ["anton", "tanya"]);
-    const full = consequenceSuffix("full", ["anton", "tanya"]);
+    const s = renderSuffix(["anton", "tanya"]);
     // The STUB-BAN negative example quotes the attractor by design;
     // the *positive* example must not be the copyable greeting shape.
-    expect(short).not.toContain('narrative": "Anton greets the office.');
-    expect(full).not.toContain('narrative": "Anton greets the office.');
-    expect(short).not.toMatch(/"narrative": "[A-Za-z]+ greets the office\."/);
-    expect(full).not.toMatch(/"narrative": "[A-Za-z]+ greets the office\."/);
+    expect(s).not.toContain('narrative": "Anton greets the office.');
+    expect(s).not.toMatch(/"narrative": "[A-Za-z]+ greets the office\."/);
   });
 
-  it("names the attractor shape in a STUB-BAN line in both modes", () => {
+  it("names the attractor shape in a STUB-BAN line", () => {
     expect(STUB_BAN_LINE).toContain("greets the office");
-    expect(consequenceSuffix("short", ["anton"])).toContain("STUB-BAN");
-    expect(consequenceSuffix("full", ["anton"])).toContain("STUB-BAN");
+    expect(renderSuffix(["anton"])).toContain("STUB-BAN");
   });
 
-  it("the speech example quotes verbatim (quotedSpeech populated)", () => {
-    const short = consequenceSuffix("short", ["anton", "tanya"]);
-    expect(short).toContain("quotedSpeech");
-    expect(short).toMatch(/"quotedSpeech": \["Morning, everyone/);
+  it("the render prompt demands verbatim quotes (SPEECH IS ENGINE-OWNED)", () => {
+    const s = renderSuffix(["anton", "tanya"]);
+    expect(s).toContain("SPEECH IS ENGINE-OWNED");
+    expect(s).toMatch(/character-for-character/i);
   });
 });
 
 describe("exp-6 item 2: user-turn directive", () => {
   const validJson = JSON.stringify({
     narrative: "Anton waves.",
-    actorPatches: [{ actorId: "anton", thoughts: "Hi." }],
-    objectPatches: [],
-    effects: { moved: false, spoke: false, quotedSpeech: [] },
+    thoughts: "Hi.",
     reasoning: "test",
   });
 
@@ -405,13 +398,9 @@ describe("exp-6 item 6: model-aware timeouts", () => {
 });
 
 describe("exp-6 item 7: accept-path gates", () => {
-  const strangerResult = (narrative: string): ConsequenceResult => ({
-    narrative,
-    actorPatches: [{ actorId: "tanya", thoughts: "Who is that." }],
-    objectPatches: [],
-    effects: { moved: false, spoke: false, quotedSpeech: [] },
-    reasoning: "test",
-  });
+  // Phase 4: the accept gate is validateRenderProse. The invented-contact
+  // patch validator (object.invented_contact) is deleted with the patch
+  // channel — there are no objectPatches left to invent contact on.
 
   it("tick-10 repro: 'approach the stranger' fails for a known coworker", () => {
     const world = officeWorld();
@@ -433,82 +422,35 @@ describe("exp-6 item 7: accept-path gates", () => {
     expect(errors).toEqual([]);
   });
 
-  it("tick-13 repro: invented cross-actor contact on a description patch fails", () => {
+  it("tick-13 repro (Phase 4): no objectPatch channel, nothing to invent contact on", () => {
+    // The coffee-stain failure needed a model-emitted description patch.
+    // Phase 4 deletes the whole channel — the render schema has no
+    // objectPatches field, so this failure is impossible by construction.
     const world = officeWorld();
-    // Anton at (3,3) — 7+ cells from tanya_papers at (7,9).
-    const errors = validateInventedContact(
+    const errors = validateRenderProse(
       world,
-      {
-        objectPatches: [
-          {
-            objectId: "tanya_papers",
-            description: "Tanya's papers now have a coffee stain from Anton's cup",
-          },
-        ],
-      },
       action("tanya", "Pick up her mug."),
-    );
-    expect(errors.map((e) => e.code)).toEqual(["object.invented_contact"]);
-  });
-
-  it("a nearby actor's contact is not invented", () => {
-    const world = officeWorld();
-    world.actors.find((a) => a.id === "anton")!.x = 7;
-    world.actors.find((a) => a.id === "anton")!.y = 8; // adjacent to tanya_papers (7,9)
-    const errors = validateInventedContact(
-      world,
+      { narrative: "Tanya glances at her mug.", thoughts: "Careful.", reasoning: "r" },
       {
-        objectPatches: [
-          {
-            objectId: "tanya_papers",
-            description: "Tanya's papers now have a coffee stain from Anton's cup",
-          },
-        ],
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 8, y: 7, engineManipulation: null,
       },
-      action("tanya", "Pick up her mug."),
     );
     expect(errors).toEqual([]);
   });
 
-  it("the acting actor's own contact is exempt", () => {
+  it("validateRenderProse catches the stranger receipt on the accept path", () => {
     const world = officeWorld();
-    const errors = validateInventedContact(
-      world,
-      {
-        objectPatches: [
-          {
-            objectId: "tanya_papers",
-            description: "Tanya spilled her own coffee on the papers, leaving a stain",
-          },
-        ],
-      },
-      action("tanya", "Pick up her mug."),
-    );
-    expect(errors).toEqual([]);
-  });
-
-  it("recheckAcceptedProse catches both receipts on the accept path", () => {
-    const world = officeWorld();
-    const stranger = recheckAcceptedProse(
+    const stranger = validateRenderProse(
       world,
       action("tanya", "Approach Anton."),
-      strangerResult("Tanya: approach the stranger"),
+      { narrative: "Tanya: approach the stranger", thoughts: "Who is that.", reasoning: "r" },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 8, y: 7, engineManipulation: null,
+      },
     );
     expect(stranger.map((e) => e.code)).toContain("narrative.stranger_label");
-
-    const stain = recheckAcceptedProse(world, action("tanya", "Pick up her mug."), {
-      narrative: "Tanya picks up her mug.",
-      actorPatches: [{ actorId: "tanya", thoughts: "Careful." }],
-      objectPatches: [
-        {
-          objectId: "tanya_papers",
-          description: "Tanya's papers now have a coffee stain from Anton's cup",
-        },
-      ],
-      effects: { moved: false, spoke: false, quotedSpeech: [] },
-      reasoning: "test",
-    });
-    expect(stain.map((e) => e.code)).toContain("object.invented_contact");
   });
 });
 
@@ -585,26 +527,6 @@ describe("exp-6 item 10: cell-verified state labels", () => {
   });
 });
 
-describe("exp-6 item 11: RULE-C early abort", () => {
-  it("aborts a growing tail (exp-6 divergence shape)", () => {
-    expect(shouldAbortRetries([2, 4, 5], 4)).toBe(true);
-    expect(shouldAbortRetries([3, 5, 6], 5)).toBe(true);
-  });
-
-  it("aborts a flat non-improving tail", () => {
-    expect(shouldAbortRetries([2, 2, 2], 4)).toBe(true);
-  });
-
-  it("keeps going when the latest attempt improved", () => {
-    expect(shouldAbortRetries([5, 4, 3], 4)).toBe(false);
-    expect(shouldAbortRetries([5, 3, 4], 5)).toBe(false);
-  });
-
-  it("needs at least 3 attempts and respects maxRetries", () => {
-    expect(shouldAbortRetries([2, 4], 4)).toBe(false);
-    expect(shouldAbortRetries([2, 4, 5, 6], 3)).toBe(false);
-  });
-});
 
 describe("exp-6 item 12 (Phase 3): typing→laptop needs a nearby laptop", () => {
   it("executor plans laptop when one is nearby", () => {

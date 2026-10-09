@@ -1,12 +1,12 @@
-// Real Consequence Engine backed by an LLM (Milestone 2, §16.2).
+// Render engine backed by an LLM (Phase 4 of the renderer architecture).
 //
-// Interprets free-form action text against the FULL objective world and
-// returns narrative + actor/object patches. The optional `feedback`
-// carries validation errors from a previous attempt (§16.5 / turn
-// orchestrator retry loop) and is embedded in the context, so the model
-// can correct unknown ids or impossible movement. Parse failures retry
-// internally; physically invalid output is retried by the orchestrator;
-// total failure yields the §16.5 "Nothing changes." fallback.
+// Prose in, prose out: the engine has already executed this turn's
+// movement, speech quote, manipulation, and pose (Phases 1–3) — the model
+// narrates the executed facts, never emits patches or coordinates. The
+// optional `feedback` carries prose-validation errors from a rejected
+// first attempt and is embedded in the context; parse failures retry
+// internally via completeJson; total failure yields the "Nothing changes."
+// fallback.
 
 import type { ConsequenceEngine, ConsequenceResolveOpts } from "../intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../types.js";
@@ -14,13 +14,11 @@ import { consequenceResultSchema } from "../schemas.js";
 import { buildConsequenceContext } from "../engine/contextBuilder.js";
 import type { Logger } from "../logging/logger.js";
 import type { LLMProvider } from "./provider.js";
-import { LLM_SYSTEM_PROMPT, CONSEQUENCE_OUTPUT_SCHEMA, consequenceSuffix } from "./prompts.js";
+import { LLM_SYSTEM_PROMPT, RENDER_OUTPUT_SCHEMA, renderSuffix } from "./prompts.js";
 import { completeJson } from "./complete.js";
 
 export const FALLBACK_CONSEQUENCE: ConsequenceResult = {
   narrative: "Nothing changes.",
-  actorPatches: [],
-  objectPatches: [],
   reasoning: "Fallback due to engine failure.",
 };
 
@@ -37,23 +35,6 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
   ) {}
 
   /**
-   * Exp-6 item 4: diagnostics for the "valid-JSON-at-all-costs" salvage
-   * tier. The turn orchestrator reads these after resolve() to tell a
-   * format collapse (nothing ever parsed) apart from a parsed-but-invalid
-   * result. Empty when the last call parsed cleanly.
-   */
-  private lastRawAttempts: string[] = [];
-  private lastParsed = false;
-
-  public getLastRawAttempts(): string[] {
-    return [...this.lastRawAttempts];
-  }
-
-  public lastResolveParsed(): boolean {
-    return this.lastParsed;
-  }
-
-  /**
    * Exp-6 item 2 (S3): user-turn directive. User turns bypass the
    * proposal/selection pipeline entirely — the action text IS the human
    * player's own words, not a suggestion to improve. Say so up front so
@@ -67,6 +48,14 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
     "narrative (never substitute a generic greeting or different dialogue); narrate their " +
     "movement honestly from their text. Their speech outranks any example phrasing in these instructions.";
 
+  /**
+   * Phase 4: one render call. The executed facts (movement, exact quote,
+   * manipulation) arrive via opts — computed by the turn orchestrator
+   * before this call — and are surfaced to the model as the source of
+   * truth to narrate. Old-schema keys (actorPatches/objectPatches/
+   * effects) in the response are stripped by the schema and named in the
+   * lenient-repair log — ignored, never validated.
+   */
   async resolve(
     world: World,
     action: Action,
@@ -75,23 +64,9 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
   ): Promise<ConsequenceResult> {
     const startedAt = Date.now();
     const maxRetries = this.options.maxRetries ?? 3;
-    // Exp-3 item 12: first attempts get the short core prompt (identity +
-    // roster + movement + speech + turn discipline + minimal field rules);
-    // retries get the full rule text plus validation feedback, where the
-    // rarely-firing rules (arrival radius, mask lists) actually help.
     // Item C1: pass the real roster ids so the suffix carries the
     // roster-discipline line (retrieval beats recall for small models).
-    const suffix = consequenceSuffix(
-      feedback ? "full" : "short",
-      world.actors.map((a) => a.id),
-    );
-    // Phase 1: the render input carries the already-executed movement as
-    // facts — the model narrates what happened, never emits coordinates.
-    // Phase 2: the render input carries the engine-dictated exact quote —
-    // the model copies it verbatim, never invents dialogue.
-    // Phase 3: the render input carries the already-executed manipulation
-    // as facts — the model narrates what happened, never emits
-    // objectPatches or prop patches.
+    const suffix = renderSuffix(world.actors.map((a) => a.id));
     const context = buildConsequenceContext(
       world,
       action,
@@ -119,20 +94,17 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
       input: { action, feedback },
       maxRetries,
       schema: consequenceResultSchema,
-      schemaText: CONSEQUENCE_OUTPUT_SCHEMA,
+      schemaText: RENDER_OUTPUT_SCHEMA,
       // F33: protected instruction tail — kept intact if the input cap
       // truncates the world-dump portion of the prompt.
       suffix,
       // F28: turn-deadline signal — aborts the hung provider call on timeout.
       signal: opts?.signal,
       repairHint:
-        "Field rules: actorPatches must be an array of {\"actorId\": ...} (never \"id\", never a quoted string); " +
-        "objectPatches must be an array of {\"objectId\": ...} (never \"id\", never a quoted string); " +
-        "\"reasoning\" is required; do not nest objectPatches inside actorPatches.",
+        "Field rules: the render contract is prose-only — return ONLY " +
+        '"narrative", "thoughts", "emotion", and "reasoning". Never emit ' +
+        "actorPatches, objectPatches, effects, coordinates, or prop changes.",
     });
-    this.lastParsed = result.ok;
-    this.lastRawAttempts = result.ok ? [] : [...result.rawAttempts];
-
     if (!result.ok) {
       this.logger.log({
         module: "consequence",
@@ -148,7 +120,9 @@ export class LLMConsequenceEngine implements ConsequenceEngine {
         error: `fallback: ${result.error}`,
         durationMs: Date.now() - startedAt,
       });
-      return structuredClone(FALLBACK_CONSEQUENCE);
+      const fallback = structuredClone(FALLBACK_CONSEQUENCE);
+      fallback.fallback = true;
+      return fallback;
     }
 
     this.logger.log({

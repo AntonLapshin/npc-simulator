@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
 import { LLMSemanticJudge } from "../../src/llm/llmSemanticJudge.js";
-import {
-  effectsToSemantics,
-  resolveActionSemantics,
-} from "../../src/engine/actionSemantics.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { makeTinyWorld } from "../helpers.js";
 import type { LLMProvider } from "../../src/llm/provider.js";
@@ -63,110 +59,6 @@ describe("MockSemanticJudge", () => {
   });
 });
 
-describe("resolveActionSemantics", () => {
-  it("merges self-declared effects with an independent judge classification", async () => {
-    const world = makeTinyWorld();
-    const logger = createTestLogger();
-    let calls = 0;
-    const judge = {
-      async classify(_w: World, _a: Action): Promise<ActionSemantics> {
-        calls++;
-        return { moves: false, speaks: false, quotedSpeech: [] };
-      },
-    };
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Walk." },
-      {
-        narrative: "U walks.",
-        actorPatches: [],
-        objectPatches: [],
-        reasoning: "r",
-        effects: { moved: true, spoke: false, destinationActorId: "n" },
-      },
-      judge,
-      logger,
-    );
-    expect(calls).toBe(1);
-    expect(resolved).toEqual({
-      source: "effects",
-      semantics: { moves: true, destinationActorId: "n", speaks: false, quotedSpeech: [] },
-      disagreements: ["moves conflict: effects=true judge=false (kept deterministic token=true)"],
-    });
-    expect(logger.store.events()).toContain("semantic_resolved");
-    expect(logger.store.events()).toContain("judge_vs_effects_disagreement");
-  });
-
-  it("widens lying effects via the judge (merged source)", async () => {
-    const world = makeTinyWorld();
-    const logger = createTestLogger();
-    // Consequence claims nothing happened for a "walk toward N" action —
-    // the independent classification must restore the movement requirement.
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Walk toward N, my friend." },
-      {
-        narrative: "U adjusts his tie.",
-        actorPatches: [{ actorId: "u", thoughts: "Sharp." }],
-        objectPatches: [],
-        reasoning: "r",
-        effects: { moved: false, spoke: false },
-      },
-      new MockSemanticJudge(),
-      logger,
-    );
-    expect(resolved.source).toBe("merged");
-    expect(resolved.semantics).toMatchObject({ moves: true });
-  });
-
-  it("asks the judge when effects are absent", async () => {
-    const world = makeTinyWorld();
-    const logger = createTestLogger();
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Walk to the door." },
-      { narrative: "U walks.", actorPatches: [], objectPatches: [], reasoning: "r" },
-      new MockSemanticJudge(),
-      logger,
-    );
-    expect(resolved.source).toBe("judge");
-    expect(resolved.semantics).toMatchObject({ moves: true });
-  });
-
-  it("fails open to physics-only when the judge is unavailable", async () => {
-    const world = makeTinyWorld();
-    const logger = createTestLogger();
-    const failing = {
-      async classify(): Promise<ActionSemantics> {
-        throw new Error("provider down");
-      },
-    };
-    const resolved = await resolveActionSemantics(
-      world,
-      { actorId: "u", text: "Walk." },
-      { narrative: "U walks.", actorPatches: [], objectPatches: [], reasoning: "r" },
-      failing,
-      logger,
-    );
-    expect(resolved).toEqual({ source: "fail-open", semantics: undefined, disagreements: [] });
-    expect(logger.store.events()).toContain("semantic_failed");
-  });
-
-  it("projects effects deterministically", () => {
-    expect(
-      effectsToSemantics({ narrative: "x", actorPatches: [], objectPatches: [], reasoning: "r" }),
-    ).toBeUndefined();
-    expect(
-      effectsToSemantics({
-        narrative: "x",
-        actorPatches: [],
-        objectPatches: [],
-        reasoning: "r",
-        effects: { moved: false, spoke: true, quotedSpeech: ["Hi"] },
-      }),
-    ).toEqual({ moves: false, speaks: true, quotedSpeech: ["Hi"] });
-  });
-});
 
 describe("LLMSemanticJudge", () => {
   it("classifies via the LLM and logs semantic_completed", async () => {

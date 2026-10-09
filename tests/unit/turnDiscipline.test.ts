@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
-import { applyConsequence } from "../../src/engine/patchApplier.js";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { applyRenderResult } from "../../src/engine/patchApplier.js";
+import { validateRenderProse } from "../../src/engine/validate/render.js";
 import {
   buildConsequenceContext,
   buildProposalContext,
@@ -14,14 +14,10 @@ import { Logger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import type { ConsequenceResult } from "../../src/types.js";
 
-function observerMoveResult(): ConsequenceResult {
+function observerSubjectResult(): ConsequenceResult {
   return {
-    narrative: "U waves. N walks over and says hello back.",
-    actorPatches: [
-      { actorId: "u", thoughts: "I greeted the room." },
-      { actorId: "n", x: 2, y: 2, state: "walking over to U", thoughts: "Oh, hello!" },
-    ],
-    objectPatches: [],
+    narrative: "Nadia walks over and says hello back.",
+    thoughts: "That went well.",
     reasoning: "observer acts out of turn",
   };
 }
@@ -34,21 +30,18 @@ describe("thoughts field", () => {
     }
   });
 
-  it("patchApplier replaces thoughts", () => {
+  it("applyRenderResult replaces the acting actor's thoughts from prose", () => {
     const world = makeTinyWorld();
-    const next = applyConsequence(
+    const next = applyRenderResult(
       world,
-      {
-        narrative: "U speaks.",
-        actorPatches: [{ actorId: "n", thoughts: "Oh, someone spoke!" }],
-        objectPatches: [],
-        reasoning: "r",
-      },
       { actorId: "u", text: "Hi!" },
+      { narrative: "U speaks.", thoughts: "Hope that landed.", reasoning: "r" },
+      { movement: null, pose: null, manipulation: null },
     );
-    expect(next.actors.find((a) => a.id === "n")!.thoughts).toBe("Oh, someone spoke!");
-    // Acting actor untouched when no patch mentions it.
-    expect(next.actors.find((a) => a.id === "u")!.thoughts).toBe("");
+    expect(next.actors.find((a) => a.id === "u")!.thoughts).toBe("Hope that landed.");
+    // Observers are never touched by the prose: their response belongs to
+    // their own turn.
+    expect(next.actors.find((a) => a.id === "n")!.thoughts).toBe("");
   });
 
   it("proposal and selection contexts include the actor's thoughts", () => {
@@ -61,51 +54,45 @@ describe("thoughts field", () => {
 });
 
 describe("turn discipline", () => {
-  it("rejects observer movement and state changes, accepts internal reactions", () => {
+  it("rejects observer-as-subject prose, accepts acting-actor prose", () => {
     const world = makeTinyWorld();
+    world.actors.find((a) => a.id === "n")!.name = "Nadia";
     const action = { actorId: "u", text: "Hi!" };
-
-    const bad = validateConsequence(world, observerMoveResult(), action);
-    expect(bad.valid).toBe(false);
-    expect(errorText(bad.errors)).toMatch(/only the acting actor/);
-
-    const observerStateOnly: ConsequenceResult = {
-      narrative: "U waves.",
-      actorPatches: [{ actorId: "n", state: "waving back" }],
-      objectPatches: [],
-      reasoning: "r",
+    const facts = {
+      exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+      x: 1, y: 1, engineManipulation: null,
     };
-    expect(validateConsequence(world, observerStateOnly, action).valid).toBe(false);
 
-    const internalOnly: ConsequenceResult = {
-      narrative: "U waves across the room. N hears it.",
-      actorPatches: [
-        {
-          actorId: "n",
-          thoughts: "Oh, U is greeting everyone. I am busy though.",
-          emotion: "distracted",
-          memoriesAppend: ["Heard U greet the room."],
-          beliefsAppend: ["U is friendly."],
-        },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    expect(validateConsequence(world, internalOnly, action)).toEqual({ valid: true, errors: [] });
+    const bad = validateRenderProse(world, action, observerSubjectResult(), facts);
+    expect(bad.length).toBeGreaterThan(0);
+    expect(errorText(bad)).toMatch(/narrative\.observer_as_subject/);
+
+    const good = validateRenderProse(
+      world,
+      action,
+      { narrative: "U waves at Nadia.", thoughts: "Friendly." },
+      facts,
+    );
+    expect(good).toEqual([]);
   });
 
-  it("still allows the acting actor to move and change state", () => {
+  it("still allows the engine to move the acting actor", () => {
     const world = makeTinyWorld();
-    const result: ConsequenceResult = {
-      narrative: "U walks across the room.",
-      actorPatches: [{ actorId: "u", x: 2, y: 1, state: "walking", thoughts: "Going to say hi." }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    expect(validateConsequence(world, result, { actorId: "u", text: "Walk." })).toEqual({
-      valid: true,
-      errors: [],
-    });
+    const next = applyRenderResult(
+      world,
+      { actorId: "u", text: "Walk." },
+      { narrative: "U walks across the room.", reasoning: "r" },
+      {
+        movement: {
+          from: { x: 1, y: 1 }, x: 2, y: 1,
+          path: [{ x: 2, y: 1 }],
+          destination: null,
+        },
+        pose: null,
+        manipulation: null,
+      },
+    );
+    expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
   });
 
   it("consequence context instructs observers to use thoughts, not actions", () => {
@@ -120,16 +107,20 @@ describe("turn discipline", () => {
   it("an out-of-turn observer action triggers retry then fallback", async () => {
     const logger = new Logger({ sessionId: "discipline", writeToFile: false });
     const consequenceEngine = new MockConsequenceEngine(logger, {
-      "hi!": observerMoveResult(),
+      "hi!": observerSubjectResult(),
     });
     const deps = makeTestDeps(logger, {
       consequenceEngine,
       getUserAction: async () => "Hi!",
     });
-    const world = await runTurn(makeTinyWorld(), deps);
-    expect(logger.store.byEvent("validation_failed").length).toBeGreaterThanOrEqual(1);
+    // Single-letter names never trigger the observer-subject gate
+    // (false-positive guard), so the observer gets a full name.
+    const renamed = makeTinyWorld();
+    renamed.actors.find((a) => a.id === "n")!.name = "Nadia";
+    const final = await runTurn(renamed, deps);
+    expect(logger.store.byEvent("render_failed").length).toBeGreaterThanOrEqual(1);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    expect(world.history[world.history.length - 1]!.text).toContain("Hi!");
+    expect(final.history[final.history.length - 1]!.text).toContain("Hi!");
     expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
   });
 });

@@ -1,8 +1,7 @@
 import type { Action, Actor, ConsequenceResult, EngineConfig, World } from "../types.js";
 import { defaultConfig } from "../config.js";
 import type { Logger } from "../logging/logger.js";
-import { applyConsequence } from "./patchApplier.js";
-import type { ApplyConsequenceOptions } from "./patchApplier.js";
+import { applyRenderResult, type ApplyRenderOptions, type ExecutedTurn } from "./patchApplier.js";
 
 export function cloneWorld(world: World): World {
   return structuredClone(world);
@@ -52,24 +51,25 @@ export class WorldStore {
   }
 
   /**
-   * F26: accepts and forwards ApplyConsequenceOptions (fallback marking,
-   * honest-history notes) — the store is usable for the real turn loop,
-   * not just unmarked applies.
+   * F26: accepts and forwards ApplyRenderOptions (fallback marking,
+   * honest-history notes, liveness) — the store is usable for the real
+   * turn loop, not just unmarked applies.
    */
-  applyConsequence(
-    result: ConsequenceResult,
+  applyRenderResult(
+    render: ConsequenceResult,
     action: Action,
-    opts: ApplyConsequenceOptions = {},
+    executed: ExecutedTurn,
+    opts: ApplyRenderOptions = {},
   ): World {
     const before = this.world;
-    this.world = applyConsequence(before, result, action, this.config, opts);
+    this.world = applyRenderResult(before, action, render, executed, this.config, opts);
     this.logger?.log({
       module: "world",
       event: "patch_applied",
       tick: this.world.tick,
       turnIndex: this.world.turnIndex,
       actorId: action.actorId,
-      input: { consequence: result, action },
+      input: { render, executed, action },
       output: { historyTail: this.world.history.slice(-1) },
     });
     return this.getWorld();

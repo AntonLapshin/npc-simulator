@@ -20,7 +20,7 @@ import {
   summarizeListForPrompt,
   worldMemoryBytes,
 } from "../../src/engine/contextBuilder.js";
-import { applyConsequence } from "../../src/engine/patchApplier.js";
+import { applyRenderResult } from "../../src/engine/patchApplier.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { Logger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
@@ -222,27 +222,22 @@ describe("phase5 per-actor newcomer refresh (Exp-2 item 13)", () => {
 });
 
 describe("phase5 memory caps and growth metrics", () => {
-  it("trims beliefs/relationships at the new caps, memories unchanged", () => {
+  it("trims the deterministic memory line at the cap", () => {
     const world = makeTinyWorld();
-    const config = resolveConfig({ maxBeliefsPerActor: 2, maxRelationshipsPerActor: 2 });
-    const next = applyConsequence(
-      world,
-      {
-        narrative: "n",
-        actorPatches: [{
-          actorId: "u",
-          beliefsAppend: ["b1", "b2", "b3"],
-          relationshipsAppend: ["r1", "r2", "r3"],
-        }],
-        objectPatches: [],
-        reasoning: "r",
-      },
-      { actorId: "u", text: "act" },
-      config,
-    );
+    const config = resolveConfig({ maxMemoriesPerActor: 2 });
+    let next = world;
+    for (let i = 0; i < 4; i++) {
+      next = applyRenderResult(
+        next,
+        { actorId: "u", text: `act${i}` },
+        { narrative: `n${i}`, reasoning: "r" },
+        { movement: null, pose: null, manipulation: null },
+        config,
+      );
+    }
     const u = next.actors.find((a) => a.id === "u")!;
-    expect(u.beliefs).toEqual(["b2", "b3"]);
-    expect(u.relationships).toEqual(["r2", "r3"]);
+    expect(u.memories).toHaveLength(2);
+    expect(u.memories[1]).toContain("n3");
   });
 
   it("memoryGrowthStats tracks the compounding curve", () => {

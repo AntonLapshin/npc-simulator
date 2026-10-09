@@ -6,7 +6,6 @@
 
 import type {
   Action,
-  ActionSemantics,
   ConsequenceResult,
   World,
 } from "../types.js";
@@ -141,40 +140,25 @@ export function consecutiveClusterFailures(
 
 /**
  * Exp-5 item 6: deterministic liveness reaction. After N consecutive own
- * fallbacks the actor holds position with a fresh thoughts reaction (plus
- * a stub reaction for anyone they were directly addressing), so threads
- * (desk question, first task) can advance by dialogue even when bodies
- * cannot. Bypasses validation like the fallback does — but unlike the
- * fallback it APPLIES (history records the narrative, honestly marked).
+ * fallbacks the actor holds position with a fresh thoughts reaction, so
+ * dialogue threads keep moving even when the render cannot. The liveness
+ * floor is prose-only (like the render contract): a narrative plus the
+ * acting actor's thoughts — no patches, no world changes beyond the
+ * history entry. Bypasses validation like the fallback does — but unlike
+ * the fallback it APPLIES (history records the narrative, honestly
+ * marked).
  */
 export function buildLivenessConsequence(
   world: World,
   action: Action,
-  semantics: ActionSemantics,
   priorFallbacks: number,
 ): ConsequenceResult {
   const actor = world.actors.find((a) => a.id === action.actorId);
   const name = actor?.name ?? action.actorId;
-  const actorPatches: ConsequenceResult["actorPatches"] = [
-    { actorId: action.actorId, thoughts: "Holding position and watching the room." },
-  ];
-  const addressee = semantics.addresseeActorId;
-  if (
-    addressee !== undefined &&
-    addressee !== action.actorId &&
-    world.actors.some((a) => a.id === addressee)
-  ) {
-    actorPatches.push({
-      actorId: addressee,
-      thoughts: `Heard ${name} — will pick this up next turn.`,
-    });
-  }
   const liveness: ConsequenceResult = {
     narrative: `${name} holds position, taking in the room.`,
-    actorPatches,
-    objectPatches: [],
+    thoughts: "Holding position and watching the room.",
     reasoning: `Liveness floor after ${priorFallbacks} consecutive fallbacks: minimal in-place reaction so the scene keeps moving.`,
-    effects: { moved: false, spoke: false },
   };
   setHonestHistoryNote(liveness, "liveness floor");
   return liveness;

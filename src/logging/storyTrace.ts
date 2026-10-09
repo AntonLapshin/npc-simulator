@@ -261,8 +261,11 @@ export function renderTurnStory(
     lines.push(ok(`consequence: narrative "${flat(out?.narrative ?? "", 200)}"${attemptsShown}${repairedMarker}`));
     const why = typeof consequenceDone.reasoning === "string" ? consequenceDone.reasoning : out?.reasoning;
     lines.push(ok(`  why: ${why ? flat(why, 200) : "(no reasoning)"}`));
-    const actorPatches = Array.isArray(out?.actorPatches) ? out.actorPatches : [];
-    const objectPatches = Array.isArray(out?.objectPatches) ? out.objectPatches : [];
+    // Phase 4 legacy: historical runs logged patch payloads — summarize
+    // them when present (the render contract no longer emits patches).
+    const legacy = (out ?? {}) as Record<string, unknown>;
+    const actorPatches = Array.isArray(legacy.actorPatches) ? legacy.actorPatches : [];
+    const objectPatches = Array.isArray(legacy.objectPatches) ? legacy.objectPatches : [];
     if (actorPatches.length > 0) {
       lines.push(ok(`  changes:`));
       for (const p of actorPatches as ActorPatch[]) {
@@ -319,8 +322,8 @@ export function renderTurnStory(
   }
 
   // 5. Validation + retries + fallback.
-  const validationFails = findAll(tickEntries, "validator", "validation_failed");
-  const validationPass = findEntry(tickEntries, "validator", "validation_passed");
+  const validationFails = findAll(tickEntries, "validator", "render_failed");
+  const validationPass = findEntry(tickEntries, "validator", "render_accepted");
   const retries = findAll(tickEntries, "turn", "retry_started");
   const fallback = findEntry(tickEntries, "turn", "fallback_used");
   if (validationFails.length === 0 && validationPass) {

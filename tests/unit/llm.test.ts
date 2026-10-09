@@ -3,7 +3,7 @@
 // JSON, timeouts, schema mismatches, unknown ids, and impossible movement.
 import { describe, expect, it } from "vitest";
 import { createTestLogger } from "../../src/logging/logger.js";
-import { resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
+import { resolveRender } from "../../src/engine/turnOrchestrator.js";
 import { defaultConfig } from "../../src/config.js";
 import { loadOfficeScenario, makeTinyWorld } from "../helpers.js";
 import {
@@ -60,13 +60,8 @@ const selectionJson = JSON.stringify({
 
 const consequenceJson = JSON.stringify({
   narrative: "Jeff introduces himself to the office.",
-  actorPatches: [
-    {
-      actorId: "jeff",
-      memoriesAppend: ["Introduced himself aloud to the office."],
-    },
-  ],
-  objectPatches: [],
+  thoughts: "Hope they take it well.",
+  emotion: "nervous",
   reasoning: "Speech in a shared room is heard by everyone nearby.",
 });
 
@@ -214,10 +209,13 @@ describe("LLM consequence engine + validation retry", () => {
     expect(logger.store.events()).toContain("consequence_completed");
   });
 
-  it("unknown actor id triggers validation feedback on retry, then fallback", async () => {
+  it("prose violation triggers validation feedback on retry, then fallback", async () => {
     const logger = createTestLogger();
+    // Phase 4: the narrative claims a walk the engine never executed — a
+    // prose violation (movement is engine-owned). Old-schema patch keys
+    // are stripped, never validated.
     const bad = JSON.stringify({
-      narrative: "A ghost acts.",
+      narrative: "U walks across the room.",
       actorPatches: [{ actorId: "ghost", emotion: "spooky" }],
       objectPatches: [],
       reasoning: "Ghost patch.",
@@ -232,14 +230,14 @@ describe("LLM consequence engine + validation retry", () => {
     };
     const world = makeTinyWorld();
 
-    const result = await resolveWithValidation(world, { actorId: "u", text: "Wave." }, deps);
+    const result = await resolveRender(world, { actorId: "u", text: "Wave." }, deps);
 
-    expect(result.narrative).toBe("Nothing changes.");
+    expect(result.render.narrative).toBe("Nothing changes.");
     expect(provider.calls).toHaveLength(2);
     // The second attempt carries the validator's feedback (§16.3/§16.5).
-    expect(provider.calls[1]!.user).toContain("unknown actor id: ghost");
+    expect(provider.calls[1]!.user).toContain("movement.narrated_without_move");
     const events = logger.store.events();
-    expect(events).toContain("validation_failed");
+    expect(events).toContain("render_failed");
     expect(events).toContain("retry_started");
     expect(events).toContain("fallback_used");
   });
@@ -251,14 +249,12 @@ describe("LLM consequence engine + validation retry", () => {
     // walk the engine did not perform.
     const dishonest = JSON.stringify({
       narrative: "U walks across the room.",
-      actorPatches: [{ actorId: "u", thoughts: "Sneaky." }],
-      objectPatches: [],
+      thoughts: "Sneaky.",
       reasoning: "Sneaky.",
     });
     const validTiny = JSON.stringify({
       narrative: "U stays put and looks around.",
-      actorPatches: [{ actorId: "u", memoriesAppend: ["Looked around the room."] }],
-      objectPatches: [],
+      thoughts: "Calm.",
       reasoning: "No movement was needed.",
     });
     const provider = new StubProvider([dishonest, validTiny]);
@@ -270,15 +266,15 @@ describe("LLM consequence engine + validation retry", () => {
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
     };
 
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       makeTinyWorld(),
       { actorId: "u", text: "Look around." },
       deps,
     );
 
     // Second attempt was valid, so no fallback was needed.
-    expect(result.narrative).toContain("looks around");
-    expect(provider.calls[1]!.user).toMatch(/describes movement|no position change/i);
+    expect(result.render.narrative).toContain("looks around");
+    expect(provider.calls[1]!.user).toMatch(/describes movement/i);
   });
 });
 
@@ -445,6 +441,7 @@ describe("F15 lenient-repair logging", () => {
     const provider = new StubProvider([
       JSON.stringify({
         narrative: "U waves.",
+        thoughts: "Friendly.",
         actorPatches: [{ id: "u", thoughts: "Friendly.", bogus: 1 }],
         objectPatches: [],
         // reasoning omitted on purpose → defaulted
@@ -462,16 +459,20 @@ describe("F15 lenient-repair logging", () => {
       schema: consequenceResultSchema,
     });
     expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.thoughts).toBe("Friendly.");
+      expect(result.value).not.toHaveProperty("actorPatches");
+    }
     const repairs = logger.store.byEvent("consequence_lenient_repair");
     expect(repairs).toHaveLength(1);
     const error = repairs[0]!.error ?? "";
-    expect(error).toMatch(/renamed "id" to "actorId"/);
-    expect(error).toMatch(/dropped unknown key "bogus" from actor patch/);
+    expect(error).toMatch(/dropped unknown key "actorPatches"/);
+    expect(error).toMatch(/dropped unknown key "objectPatches"/);
     expect(error).toMatch(/defaulted missing\/non-string reasoning/);
     expect(error).toMatch(/payload fingerprint: [0-9a-f]{8}/);
   });
 
-  it("warns loudly on malformed effects but keeps the fallback-to-judge behavior", async () => {
+  it("warns loudly on unknown old-schema keys and strips them", async () => {
     const logger = createTestLogger();
     const provider = new StubProvider([
       JSON.stringify({
@@ -493,12 +494,15 @@ describe("F15 lenient-repair logging", () => {
       maxRetries: 0,
       schema: consequenceResultSchema,
     });
-    // Still parses: effects is optional, the judge classification stands in.
+    // Still parses: the prose contract keeps narrative/reasoning.
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.effects).toBeUndefined();
+    if (result.ok) {
+      expect(result.value.narrative).toBe("U waves.");
+      expect(result.value).not.toHaveProperty("effects");
+    }
     const repairs = logger.store.byEvent("consequence_lenient_repair");
     expect(repairs).toHaveLength(1);
-    expect(repairs[0]!.error ?? "").toMatch(/WARNING: dropped malformed effects/);
+    expect(repairs[0]!.error ?? "").toMatch(/dropped unknown key "effects"/);
   });
 
   it("stays silent when nothing was repaired", async () => {

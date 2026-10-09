@@ -1,6 +1,5 @@
 import type {
   Action,
-  ActionSemantics,
   ConsequenceResult,
   EngineConfig,
   ProposalResult,
@@ -10,62 +9,40 @@ import type { Intent } from "../decision/decisionTypes.js";
 import type { ChatComplete } from "../decision/questionPlanner.js";
 import { defaultConfig, isLayaIntentFirst } from "../config.js";
 import {
-  applyLayaPostHooks,
   layaWiringFromEnv,
-  plausibilityAdvisoryForRetry,
   runIntentCascade,
   runRenderabilityScore,
   type LayaTurnWiring,
 } from "./layaTurn.js";
 import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
-import {
-  deterministicSalvageOrder,
-  rankSalvageCandidates,
-} from "../decision/layaSalvageSelect.js";
 import type {
   ConsequenceEngine,
   ProposalEngine,
   SelectionEngine,
-  SemanticJudge,
 } from "../intelligence/types.js";
-import { applyConsequence } from "./patchApplier.js";
-import { validateConsequence } from "./physicalValidator.js";
-import { resolveActionSemantics } from "./actionSemantics.js";
+import { applyRenderResult, type ExecutedTurn } from "./patchApplier.js";
+import { renderRetryFeedback, validateRenderProse, type RenderFacts } from "./validate/render.js";
 import {
-  applyEngineMovement,
   executeMovement,
-  executorDestination,
   planMovementSemantics,
   type MovementOutcome,
 } from "./movementExecutor.js";
+import { planSpeech } from "./speechExecutor.js";
 import {
-  applyEngineSpeech,
-  planSpeech,
-} from "./speechExecutor.js";
-import {
-  applyEngineManipulation,
   executeManipulation,
   type ManipulationOutcome,
 } from "./manipulationExecutor.js";
+import { planPose } from "../core/text.js";
+import { quoteContained, reinsertQuote } from "../core/speech.js";
 import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
 import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
-import { buildRosterRetryLine, type TurnEngines } from "../llm/index.js";
-import { MockSemanticJudge } from "../mocks/mockSemanticJudge.js";
+import { type TurnEngines } from "../llm/index.js";
 import { getCurrentActor } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
 import {
-  buildRetryDirective,
-  countHardErrors,
   getHonestHistoryNote,
   isFallbackConsequence,
-  isSpeechOnlyFailure,
-  pickBestAttempt,
-  recheckAcceptedProse,
-  salvageFormatCollapse,
-  shouldAbortRetries,
-  trySalvageConsequence,
-  type AttemptRecord,
 } from "./turnSalvage.js";
 import { buildLivenessConsequence, consecutiveClusterFailures, consecutiveFallbacks, consecutiveIntentFailures } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
@@ -99,13 +76,6 @@ export type EngineDependencies = {
   consequenceEngine: ConsequenceEngine;
   logger: Logger;
   config?: EngineConfig;
-  /**
-   * Decision-AI judge for free-form action meaning. Consumed only when a
-   * consequence omits its self-declared `effects`; defaults to the
-   * offline MockSemanticJudge (zero network calls). Real runs may inject
-   * LLMSemanticJudge. Judge failure fails open to physics-only validation.
-   */
-  semanticJudge?: SemanticJudge;
   /** Resolve free-form user action text (UI layer). Required for user turns. */
   getUserAction?: (actorId: string, suggestions: string[]) => Promise<string>;
   /**
@@ -168,12 +138,7 @@ export { FALLBACK_CONSEQUENCE };
 export {
   getHonestHistoryNote,
   isFallbackConsequence,
-  isSpeechOnlyFailure,
-  isTier2Salvageable,
-  salvageFormatCollapse,
-  trySalvageConsequence,
 } from "./turnSalvage.js";
-export type { SalvageEvaluation } from "./turnSalvage.js";
 export { consecutiveFallbacks } from "./turnLiveness.js";
 export { summarizeTurnOutcomes } from "./turnOutcomes.js";
 export type { TurnOutcomeSummary } from "./turnOutcomes.js";
@@ -221,8 +186,6 @@ export function stripSelectionPrefix(text: string): string {
   return text.replace(/^\s*\d+\s*[.)]\s*/, "").trimStart();
 }
 
-/** Offline default: keyword-based mock judge (zero network calls). */
-const defaultSemanticJudge: SemanticJudge = new MockSemanticJudge();
 
 
 
@@ -279,72 +242,67 @@ function readEngineDiagnostics(
 }
 
 
-/** Resolve with validation retries; applies fallback when retries are exhausted. */
-export async function resolveWithValidation(
+/** Phase 4: max render attempts per turn (1 clean + 1 prose retry). */
+export const RENDER_MAX_ATTEMPTS = 2;
+
+/**
+ * Phase 4: resolve one turn as execute → render.
+ *
+ * The engine executes the turn's movement, exact quote, manipulation, and
+ * pose deterministically (Phases 1–3 + the pose plan) BEFORE the render
+ * call; the render engine narrates the executed facts as prose. The render
+ * result gets prose-only validation (max 2 attempts); deterministic
+ * repairs (quote backstop, doubled-prefix collapse) run before validation
+ * and burn no LLM call. When rendering fails: the NPC liveness floor
+ * (after N consecutive own fallbacks), else the "Nothing changes."
+ * fallback.
+ */
+export async function resolveRender(
   world: World,
   action: Action,
   deps: EngineDependencies,
   opts: { allowLiveness?: boolean } = {},
-): Promise<ConsequenceResult> {
+): Promise<{ render: ConsequenceResult; executed: ExecutedTurn; liveness: boolean }> {
   const config = depsConfig(deps);
   const logger = deps.logger;
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const actorName = actor?.name ?? action.actorId;
   let feedback: string | undefined;
-  let lastResult: ConsequenceResult | undefined;
-  let lastSemantics: ActionSemantics | undefined;
-  // Item C10 (S7) / Exp-2 item 7: every attempt's {result, semantics,
-  // hardErrorCount, attempt} — salvage runs from the attempt with the
-  // FEWEST hard errors (pickBestAttempt), not the last, and the loop
-  // aborts early when hard errors grow twice in a row.
-  const attempts: AttemptRecord[] = [];
 
-  // Exp-6 item 3: total turn wall-time budget for the consequence phase. A
-  // turn burned 47 minutes in Exp-6 with no circuit breaker — when the
+  // Exp-6 item 3: total wall-time budget for the render phase. When the
   // deadline hits, the turn stops burning LLM calls and falls through to
-  // salvage → liveness → fallback.
+  // liveness → fallback.
   const turnTimeoutMs = config.turnTimeoutMs ?? 600_000;
   const deadlineAt = Date.now() + turnTimeoutMs;
   const timeLeft = (): number => deadlineAt - Date.now();
   let deadlineExceeded = false;
 
-  // Exp-6 item 6 / Q2: the semantic judge classifies the ACTION text —
-  // independent of the consequence result — but only when a consequence
-  // provides no `effects` (lazy judge: classification is only needed for
-  // grounding then). Started once, on the first attempt that needs it, and
-  // reused across retry attempts instead of re-running a judge LLM call
-  // per attempt.
-  const judge: SemanticJudge = deps.semanticJudge ?? defaultSemanticJudge;
-  let judgePromise: Promise<ActionSemantics> | undefined;
-  const judgeForAttempt = (): SemanticJudge => ({
-    classify: () => {
-      if (!judgePromise) {
-        judgePromise = Promise.resolve().then(() => judge.classify(world, action));
-      }
-      return judgePromise;
-    },
-  });
-
-  // Exp-6 item 4: track whether the engine EVER produced parseable output
-  // this turn, keeping the raw attempts for the format-collapse tier.
-  let haveParseableResult = false;
-  let turnRawAttempts: string[] = [];
-  let consecutiveParseFailures = 0;
-
-  // Exp-2-E item (b): per-turn cache for the Laya locomotion veto. The
-  // action text is constant across attempts, so the noul is asked at most
-  // once per turn. undefined = not asked yet; true = veto moves.
-  let locomotionVeto: boolean | undefined;
-
-  // Phase 1: engine-owned movement. Deterministic pre-pass from the action
-  // text alone (no model output): the engine — never the model — decides
-  // the acting actor's position. Computed once per turn, before the first
-  // consequence call, so the render input carries the executed movement
-  // as facts to narrate. Per attempt below, the outcome is refreshed only
-  // when the merged semantics add a destination/contact the text
-  // resolution couldn't see — never removed (merged.moves ⊇ planned moves
-  // unless the Laya veto fires, which drops it explicitly).
-  const plannedMovement = planMovementSemantics(world, action);
-  let engineMovement: MovementOutcome | null =
-    plannedMovement.moves ? executeMovement(world, action, plannedMovement) : null;
+  // ---- Execute (engine, Phases 1–3 + pose). Deterministic pre-pass from
+  // the action text alone: the engine — never the model — decides
+  // movement, the exact quote, manipulation, and pose. Computed once per
+  // turn, before the first render call, so the render input carries the
+  // executed facts to narrate.
+  let plannedMovement = planMovementSemantics(world, action);
+  // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1, off
+  // by default). Laya only ever VETOES a planned move — when it is
+  // confident the action needs no relocation. Laya failure or low
+  // confidence keeps the deterministic verdict.
+  if (plannedMovement.moves && deps.laya?.config.toggles.locomotion === true) {
+    const veto = (await checkLocomotionVeto(deps.laya.client, action.text)) === true;
+    logger.log({
+      module: "laya",
+      event: veto ? "locomotion_veto" : "locomotion_confirmed",
+      tick: world.tick,
+      turnIndex: world.turnIndex,
+      actorId: action.actorId,
+      input: { actionText: action.text, deterministicMoves: true },
+      output: { veto },
+    });
+    if (veto) plannedMovement = { moves: false };
+  }
+  const engineMovement = plannedMovement.moves
+    ? executeMovement(world, action, plannedMovement)
+    : null;
   if (plannedMovement.moves) {
     logger.log({
       module: "movement",
@@ -356,13 +314,6 @@ export async function resolveWithValidation(
       output: { engineMovement },
     });
   }
-
-  // Phase 2: engine-owned speech. Deterministic pre-pass from the action
-  // text alone (no model output, no judge): the exact quote is ground
-  // truth for the turn — the render call cannot invent dialogue because
-  // the engine dictates the words. Computed once per turn, before the
-  // first consequence call, so the render input carries the verbatim
-  // contract (mirrors the movement pre-pass above).
   const exactQuote = planSpeech(action);
   if (exactQuote !== null) {
     logger.log({
@@ -375,17 +326,7 @@ export async function resolveWithValidation(
       output: { exactQuote },
     });
   }
-
-  // Phase 3: engine-owned objects/props. Deterministic pre-pass from the
-  // action text alone (no model output): the engine — never the model —
-  // decides the turn's pick-up/put-down/hand-over. Computed once per
-  // turn, before the first consequence call, so the render input carries
-  // the executed manipulation as facts to narrate. Per attempt below,
-  // the plan is refreshed only when the merged semantics resolve a
-  // contact the deterministic text resolution couldn't see — never
-  // partially (a hand-over whose recipient fails the guards is dropped
-  // outright, not half-executed).
-  let engineManipulation: ManipulationOutcome | null = executeManipulation(world, action);
+  const engineManipulation = executeManipulation(world, action);
   if (engineManipulation !== null) {
     logger.log({
       module: "objects",
@@ -397,38 +338,53 @@ export async function resolveWithValidation(
       output: { engineManipulation },
     });
   }
+  const enginePose = planPose(action.text);
 
-  // Exp-7: the outer attempt cap is consequenceMaxAttempts (default 2),
-  // not maxRetries+1. Retries don't steer the model (exp-7 B2) — the
-  // in-loop deterministic repairs below run on every attempt, and salvage
-  // handles what they can't.
-  const maxAttempts = Math.max(1, config.consequenceMaxAttempts ?? config.maxRetries + 1);
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  const executed: ExecutedTurn = {
+    movement: engineMovement,
+    pose: enginePose,
+    manipulation: engineManipulation,
+  };
+  const emptyExecuted: ExecutedTurn = { movement: null, pose: null, manipulation: null };
+
+  // Facts the render prose is validated against.
+  const renderFacts = (): RenderFacts => {
+    const fromX = actor?.x ?? 0;
+    const fromY = actor?.y ?? 0;
+    const toX = engineMovement?.x ?? fromX;
+    const toY = engineMovement?.y ?? fromY;
+    return {
+      exactQuote,
+      moved: toX !== fromX || toY !== fromY,
+      pose: enginePose,
+      effectivePose: enginePose ?? actor?.pose ?? "stand",
+      x: toX,
+      y: toY,
+      engineManipulation,
+    };
+  };
+
+  // ---- Render (LLM): prose in, prose out. Max 2 attempts — the second
+  // only for prose issues (the deterministic repairs below burn none).
+  for (let attempt = 1; attempt <= RENDER_MAX_ATTEMPTS; attempt++) {
     if (timeLeft() <= 0) {
       deadlineExceeded = true;
       break;
     }
-    let result: ConsequenceResult;
+    let render: ConsequenceResult;
     try {
-      // F28: the deadline signal is forwarded to the consequence engine
-      // (which passes it to the provider call) so a hung LLM request is
+      // F28: the deadline signal is forwarded to the render engine (which
+      // passes it to the provider call) so a hung LLM request is
       // cancelled on timeout.
       // Exp-6 item 2: flag user turns so the engine leads with the
       // user-turn directive (the player's words are ground truth).
-      result = await withTurnDeadline(
+      render = await withTurnDeadline(
         (signal) =>
           deps.consequenceEngine.resolve(world, action, feedback, {
             signal,
             isUserTurn: !deps.forceAllNpc && action.actorId === world.userActorId,
-            // Phase 1: the render call narrates the already-executed
-            // movement (facts in its input) — it never emits coordinates.
             engineMovement,
-            // Phase 2: the render call carries the engine-dictated exact
-            // quote — it never invents dialogue.
             exactQuote,
-            // Phase 3: the render call narrates the already-executed
-            // manipulation (facts in its input) — it never emits
-            // objectPatches or prop patches.
             engineManipulation,
           }),
         timeLeft(),
@@ -448,450 +404,84 @@ export async function resolveWithValidation(
         error: errorMessage(err),
       });
       feedback = `Previous attempt raised an error: ${errorMessage(err)}`;
-      if (attempt >= maxAttempts) break;
-      logger.log({
-        module: "turn",
-        event: "retry_started",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
+      if (attempt >= RENDER_MAX_ATTEMPTS) break;
+      report(deps, {
+        stage: "consequence_retry",
         actorId: action.actorId,
-        input: { action, attempt: attempt + 1 },
-        output: { feedback },
+        message: `render failed — retrying (attempt ${attempt + 1})…`,
       });
       continue;
     }
 
-    // Exp-6 item 4: the engine reports whether its output parsed. Two
-    // consecutive unparseable engine calls mean the model is collapsing at
-    // the JSON layer, not the content layer — more full retries won't
-    // help, so stop and let the format-collapse tier salvage below.
-    const diag = readEngineDiagnostics(deps.consequenceEngine);
-    if (diag !== undefined) {
-      turnRawAttempts = diag.rawAttempts;
-      if (diag.parsed) {
-        haveParseableResult = true;
-        consecutiveParseFailures = 0;
-      } else {
-        consecutiveParseFailures += 1;
-        if (consecutiveParseFailures >= 2) {
-          logger.log({
-            module: "turn",
-            event: "consequence_parse_collapse",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action, attempt },
-            output: { consecutiveParseFailures },
-            error:
-              "consequence output failed to parse twice in a row — stopping retries, format-collapse salvage next",
-          });
-          lastResult = result;
-          break;
-        }
-      }
-    }
-
-    logger.log({
-      module: "validator",
-      event: "validation_started",
-      tick: world.tick,
-      turnIndex: world.turnIndex,
-      actorId: action.actorId,
-      input: { action, result, attempt },
-    });
-
     report(deps, {
       stage: "validation_started",
       actorId: action.actorId,
-      message: `validating consequence (attempt ${attempt})…`,
+      message: `validating render (attempt ${attempt})…`,
     });
-    // Merged semantics: the consequence's self-declared `effects` are
-    // checked against an independent classification of the action text
-    // (OR for requirement flags), so a consequence cannot dodge
-    // movement/speech/addressee gates by declaring moved=false/spoke=false.
-    // Q2 (lazy semantic judge): the judge only runs when the consequence
-    // provides no `effects` — classification exists to ground the gates,
-    // and `effects` alone already grounds them. Judge output is logged per
-    // turn (semantic_resolved/semantic_completed) for observability, like
-    // selection_completed.
-    const resolved = await resolveActionSemantics(
-      world,
-      action,
-      result,
-      result.effects === undefined ? judgeForAttempt() : undefined,
-      logger,
-    );
-    lastResult = result;
-    // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1,
-    // off by default). Deterministic/merged semantics decide moves first;
-    // Laya only ever VETOES a moves=true — when it is confident the action
-    // needs no relocation ("turn to face Dan", "where should I sit?").
-    // Laya failure or low confidence keeps the deterministic verdict.
-    let semantics = resolved.semantics;
-    let semanticsSource = resolved.source;
-    if (
-      semantics?.moves === true &&
-      deps.laya?.config.toggles.locomotion === true
-    ) {
-      if (locomotionVeto === undefined) {
-        locomotionVeto =
-          (await checkLocomotionVeto(deps.laya.client, action.text)) === true;
-        logger.log({
-          module: "laya",
-          event: locomotionVeto ? "locomotion_veto" : "locomotion_confirmed",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { actionText: action.text, deterministicMoves: true },
-          output: { veto: locomotionVeto },
-        });
-      }
-      if (locomotionVeto) {
-        semantics = { ...semantics, moves: false };
-        semanticsSource = "merged";
-      }
-    }
-    lastSemantics = semantics;
-    // Phase 1: engine-owned movement — refresh + merge. The pre-pass
-    // outcome stands unless the merged semantics (judge/effects) add a
-    // destination/contact the deterministic text resolution couldn't see
-    // (judge-only locomotion verbs, contact turns, effects-declared ids).
-    // A Laya locomotion veto drops the pre-pass movement outright.
-    // Model-emitted coordinates are stripped from every patch (ignored,
-    // logged at debug — the B6 shape: a patch "moving" the wrong actor
-    // simply loses its coordinates); the engine outcome is applied to the
-    // acting actor only, deterministically.
-    {
-      const contactId =
-        semantics?.contactActorId !== undefined && semantics.contactActorId !== action.actorId
-          ? semantics.contactActorId
-          : undefined;
-      const needsMove = semantics?.moves === true || contactId !== undefined;
-      if (semantics === undefined) {
-        // Fail-open: no semantics resolved — keep the deterministic
-        // pre-pass outcome (the text-derived signal is the best available).
-      } else if (!needsMove) {
-        if (engineMovement !== null) {
-          logger.log({
-            module: "movement",
-            event: "movement_dropped",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action, planned: engineMovement },
-            output: { reason: "final semantics carry no locomotion (veto or stationary downgrade)" },
-          });
-        }
-        engineMovement = null;
-      } else if (semantics) {
-        const wantDest = executorDestination(semantics, action.actorId);
-        const hasDest = engineMovement?.destination ?? null;
-        const destMismatch =
-          (wantDest?.kind ?? null) !== (hasDest?.kind ?? null) ||
-          (wantDest?.id ?? null) !== (hasDest?.id ?? null);
-        if (engineMovement === null || destMismatch) {
-          const refreshed = executeMovement(world, action, semantics);
-          if (refreshed !== null) {
-            logger.log({
-              module: "movement",
-              event: engineMovement === null ? "movement_refreshed" : "movement_destination_refreshed",
-              tick: world.tick,
-              turnIndex: world.turnIndex,
-              actorId: action.actorId,
-              input: { action, semantics },
-              output: { refreshed },
-            });
-            engineMovement = refreshed;
-          }
-        }
-      }
-      result = applyEngineMovement(
-        result,
-        action.actorId,
-        engineMovement,
-        (ignoredId, x, y) => {
-          logger.log({
-            module: "movement",
-            event: "model_coordinates_ignored",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action },
-            output: {
-              ignoredActorId: ignoredId,
-              ignoredX: x,
-              ignoredY: y,
-              note: "model-emitted coordinates are engine-owned — ignored (debug)",
-            },
-          });
-        },
-      );
-    }
-    // Phase 2: engine-owned speech — deterministic quote backstop. The
-    // render output must carry the exact quote verbatim; any deviation
-    // (dropped, paraphrased, altered — the B1 shape) is repaired
-    // deterministically here, before validation, burning no LLM retry.
-    // The speech.exact_quote_missing validator gate stays as the backstop
-    // for paths that bypass this (salvage, liveness).
-    {
-      const speech = applyEngineSpeech(
-        result,
-        action.actorId,
-        exactQuote,
-        world,
-        ({ before, after }) => {
-          logger.log({
-            module: "speech",
-            event: "speech_quote_reinserted",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action, before },
-            output: { after },
-            error:
-              "narrative failed to carry the engine-dictated exact quote verbatim — reinserted deterministically",
-          });
-        },
-      );
-      if (speech.reinserted) result = speech.result;
-    }
-    // Phase 3: engine-owned manipulation — refresh + merge. The pre-pass
-    // plan stands unless the merged semantics (judge/effects) resolve a
-    // contact the deterministic text resolution couldn't see (a pronoun
-    // recipient, an effects-declared contactActorId) or a different one.
-    // A newly-resolved contact that fails the guards (too far,
-    // recipient's hands full) drops the plan outright — the engine never
-    // hands an item to nobody, and never executes a transfer halfway. An
-    // undefined merged contact keeps the text-mention pre-pass plan.
-    // Model-emitted objectPatches and prop patches are stripped (ignored,
-    // logged at debug — the phantom-prop shape); the engine outcome is
-    // applied deterministically.
-    {
-      const contactId =
-        semantics?.contactActorId !== undefined && semantics.contactActorId !== action.actorId
-          ? semantics.contactActorId
-          : undefined;
-      const planContact = engineManipulation?.plan.targetActorId;
-      if (semantics === undefined) {
-        // Fail-open: no semantics resolved — keep the deterministic
-        // pre-pass outcome (the text-derived signal is the best available).
-      } else if (contactId !== undefined && contactId !== planContact) {
-        // The merged semantics resolved a contact the deterministic text
-        // resolution couldn't see (a pronoun recipient, an
-        // effects-declared contactActorId) — or a different one. Re-plan
-        // against it; a hand-over whose new contact fails the guards
-        // (too far, recipient's hands full) is dropped outright — the
-        // engine never hands an item to nobody, and never executes a
-        // transfer halfway. An undefined merged contact keeps the
-        // text-mention pre-pass plan: the judge not resolving contact is
-        // not the contact disappearing.
-        const refreshed = executeManipulation(world, action, contactId);
-        if (refreshed !== null) {
-          logger.log({
-            module: "objects",
-            event: "manipulation_refreshed",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action, semantics },
-            output: { refreshed },
-          });
-          engineManipulation = refreshed;
-        } else {
-          logger.log({
-            module: "objects",
-            event: "manipulation_dropped",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: action.actorId,
-            input: { action, semantics },
-            output: { reason: "newly-resolved contact fails the hand-over guards (too far or recipient's hands full)" },
-          });
-          engineManipulation = null;
-        }
-      }
-      result = applyEngineManipulation(result, engineManipulation, (ignored) => {
-        logger.log({
-          module: "objects",
-          event: "model_object_patch_ignored",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action },
-          output: {
-            ...ignored,
-            note: "model-emitted object/prop patches are engine-owned — ignored (debug)",
-          },
-        });
+    // Phase 2: deterministic quote backstop — the render output must
+    // carry the exact quote verbatim; any deviation is repaired via the
+    // pure core transform before validation, burning no LLM retry.
+    if (exactQuote !== null && !quoteContained(exactQuote, render.narrative)) {
+      const before = render.narrative;
+      render = { ...render, narrative: reinsertQuote(render.narrative, actorName, exactQuote) };
+      logger.log({
+        module: "speech",
+        event: "render_quote_reinserted",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, before },
+        output: { after: render.narrative },
+        error:
+          "render narrative failed to carry the engine-dictated exact quote verbatim — reinserted deterministically",
       });
     }
     // Exp-4 item 6 (S4): deterministic doubled-prefix repair — "Dana:
-    // Dana: …" collapses to "Dana: …" instead of tripping the voice gate
-    // every attempt. First-person prose is NOT auto-rewritten (too risky);
-    // it fails the voice gate with a targeted retry hint.
+    // Dana: …" collapses to "Dana: …" instead of tripping the voice gate.
     {
-      const actor = world.actors.find((a) => a.id === action.actorId);
-      const collapsed = collapseDoubledPrefix(result.narrative, actor?.name);
-      if (collapsed !== result.narrative) {
+      const collapsed = collapseDoubledPrefix(render.narrative, actorName);
+      if (collapsed !== render.narrative) {
         logger.log({
           module: "validator",
           event: "narrative_prefix_collapsed",
           tick: world.tick,
           turnIndex: world.turnIndex,
           actorId: action.actorId,
-          input: { narrative: result.narrative },
+          input: { narrative: render.narrative },
           output: { narrative: collapsed },
         });
-        result.narrative = collapsed;
+        render = { ...render, narrative: collapsed };
       }
     }
-    const validation = validateConsequence(world, result, action, semantics, config, engineManipulation);
-    // Exp-2 item 5 (S2): final accept gate. The tick-10/11 corrupt
-    // narratives passed validateConsequence outright (wrong-subject prose;
-    // stay-action teleport via self-declared effects.moved), so the
-    // accepted narrative gets one more prose re-check before it may become
-    // canonical history. A rejection is handled exactly like a validation
-    // failure: the attempt is recorded for best-attempt salvage and the
-    // loop retries. Unconditional (ARCHITECTURE P1 correctness fix).
-    const acceptGateErrors = validation.valid
-      ? recheckAcceptedProse(world, action, result)
-      : [];
-    if (validation.valid && acceptGateErrors.length === 0) {
+
+    const errors = validateRenderProse(world, action, render, renderFacts());
+    if (errors.length === 0) {
       logger.log({
         module: "validator",
-        event: "validation_passed",
+        event: "render_accepted",
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
-        input: { action, result, attempt, semanticsSource, semantics },
-        output: validation,
+        input: { action, render, attempt },
       });
-      return result;
-    }
-    // The errors driving the retry below: the validator's, or the final
-    // accept gate's when validation itself passed.
-    const errors = validation.valid ? acceptGateErrors : validation.errors;
-    if (validation.valid) {
-      logger.log({
-        module: "turn",
-        event: "accept_gate_rejected",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: action.actorId,
-        input: { action, result, attempt },
-        output: { errors: errors.map((e) => `[${e.code}] ${e.message}`) },
-      });
+      return { render, executed, liveness: false };
     }
 
     logger.log({
       module: "validator",
-      event: "validation_failed",
+      event: "render_failed",
       tick: world.tick,
       turnIndex: world.turnIndex,
       actorId: action.actorId,
-      input: { action, result, attempt, semanticsSource, semantics },
-      // LogInput.validationErrors is string[] — log the messages; the
-      // codes stay on the ValidationError objects in the trace output.
+      input: { action, render, attempt },
       validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
     });
-
-    // Item C10 (S7) / Exp-2 item 7: record the failed attempt for
-    // best-attempt salvage (fewest hard errors, ties → earliest).
-    attempts.push({
-      result,
-      semantics,
-      hardErrors: countHardErrors(errors),
-      attempt,
-    });
-
-    // Phase 3: the prop-stub repair is deleted — the executor subsumes it.
-    // Manipulation is planned deterministically at turn start and merged
-    // into every attempt BEFORE validation (see the Phase 3 merge above),
-    // so there is no forgotten prop patch left to repair after a failure.
-
-    // Phase 4 "retry only prose": when the patches are valid and only the
-    // narrative prose fails (speech nit, possibly plus droppable
-    // hallucinated patches), say so explicitly — otherwise the retry
-    // regenerates everything and often loses the good movement it just had
-    // (ticks 3/9). This hint costs nothing when the model already retries
-    // cleanly; after retries are exhausted the salvage path below applies
-    // the same split (keep patches, warn on speech).
-    let proseHint: string | undefined;
-    if (isSpeechOnlyFailure(errors)) {
-      proseHint =
-        "The patches are valid — keep every actorPatch/objectPatch exactly as-is and fix ONLY the narrative prose (preserve the action's exact wording).";
-    } else if (errors.some((e) => e.code === "actor.unknown_id" || e.code === "object.unknown_id")) {
-      proseHint =
-        "Drop patches that reference unknown ids, keep the remaining valid patches exactly as-is, and fix the narrative prose.";
-    }
-
-    // Phase 3: the object-affordance retry hint is deleted — object/prop
-    // patches are engine-owned now, so demanding them from the model is a
-    // dead instruction. The retry feedback keeps the prose-only hint
-    // above; the EXECUTED MANIPULATION facts in the context tell the
-    // model what actually happened.
-
-    // Item C1: repeat the actual roster ids in the retry feedback when the
-    // failure names unknown actors — retrieval beats recall for small models.
-    const rosterRepeat = errors.some(
-      (e) => e.code === "narrative.unknown_actor" || e.code === "actor.unknown_id",
-    )
-      ? `\n${buildRosterRetryLine(world.actors.map((a) => a.id))}`
-      : "";
-    // Phase 4: advisory patch-plausibility — each object/position patch gets
-    // a Laya 1–5 score in one batched call; scores ≤2 append a NON-BLOCKING
-    // advisory note to the retry feedback. Never invalidates on its own.
-    let plausibilityNote: string | undefined;
-    if (deps.laya?.plausibility === true) {
-      // Exp-2 S6: thread observability through so the phase reports
-      // (scored / no-op reason) into the layaEvents histogram.
-      plausibilityNote = await plausibilityAdvisoryForRetry(
-        deps.laya.client,
-        action,
-        result,
-        { logger, tick: world.tick, turnIndex: world.turnIndex, attempt },
-      );
-    }
-    // Coordinator follow-up (Exp-2 M4): the retry feedback leads with a
-    // deterministic "most severe error first, one line" directive instead
-    // of the raw multi-gate dump (which pushed small models
-    // off-distribution); the targeted hints below stay as-is.
-    feedback = `Previous consequence output was invalid: ${buildRetryDirective(errors)}${proseHint ? `\n${proseHint}` : ""}${rosterRepeat}${plausibilityNote ? `\n${plausibilityNote}` : ""}\nReturn corrected JSON only.`;
-    if (attempt >= maxAttempts) break;
-    // Exp-3 item 9 (S7, RULE-C): abort the retry loop early when the last
-    // two attempts both failed to STRICTLY improve on the best-so-far
-    // hard-error count. Data-grounded on Exp-3 (25 eligible turns): the old
-    // "strictly growing twice" rule fired 6/25 and could save at most 1
-    // call (it sits after the maxRetries break); RULE-C fires 17/25,
-    // saves ~17 LLM calls, loses 0 best-attempts by construction (it only
-    // fires when the best-so-far predates the last two attempts, and
-    // pickBestAttempt breaks ties toward the earliest), at the cost of 1
-    // success (m5 tick=12: [2,4,3] would abort at 3 instead of passing at
-    // 4 — the turn still advances via salvage, as partial_applied).
-    // Attempt 1 is the pickBestAttempt winner in 72% of Exp-3 turns, so
-    // aborting a non-improving tail is safe.
-    // Exp-6 item 11 (S8): the decision is a pure function
-    // (shouldAbortRetries) so the exp-6 divergence shapes are
-    // regression-tested without running turns.
-    if (shouldAbortRetries(attempts.map((a) => a.hardErrors), config.maxRetries)) {
-      const hardErrors = attempts.map((a) => a.hardErrors);
-      const bestSoFar = Math.min(...hardErrors.slice(0, hardErrors.length - 2));
-      logger.log({
-        module: "turn",
-        event: "retry_aborted",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: action.actorId,
-        input: { action, attempt },
-        output: { hardErrors, bestSoFar },
-        error: `last two attempts failed to improve on best-so-far hard errors (${bestSoFar}) — stopping retries, salvaging the best attempt`,
-      });
-      break;
-    }
+    if (attempt >= RENDER_MAX_ATTEMPTS) break;
+    feedback = renderRetryFeedback(errors, world.actors.map((a) => a.id));
     report(deps, {
       stage: "consequence_retry",
       actorId: action.actorId,
-      message: `consequence invalid — retrying (attempt ${attempt + 1})…`,
+      message: `render prose rejected — retrying (attempt ${attempt + 1})…`,
     });
     logger.log({
       module: "turn",
@@ -914,184 +504,31 @@ export async function resolveWithValidation(
       actorId: action.actorId,
       input: { action },
       output: { turnTimeoutMs },
-      error: `consequence phase exceeded its ${turnTimeoutMs}ms wall-time budget — falling through to salvage`,
+      error: `render phase exceeded its ${turnTimeoutMs}ms wall-time budget — falling through to liveness/fallback`,
     });
-  }
-
-  // Exp-6 item 4: "valid-JSON-at-all-costs" tier — nothing ever parsed, so
-  // the generic salvage below would operate on a "Nothing changes." husk.
-  // A degraded narrative/thoughts payload built from the model's own
-  // (unparseable) emissions beats a total loss. Runs before the
-  // content-salvage ladder; when it finds nothing usable, the ladder below
-  // still gets its chance.
-  if (!haveParseableResult && turnRawAttempts.length > 0) {
-    const degraded = salvageFormatCollapse(world, action, turnRawAttempts, config);
-    if (degraded) {
-      // Exp-3 item 5 (S3): defense in depth — the final accept gate runs
-      // on the format-salvage path too. The narrative is action-derived
-      // (low risk) but the donor thoughts are unvalidated model output;
-      // a gate failure falls through to the content-salvage ladder below
-      // instead of returning corrupt prose.
-      const formatGateErrors = recheckAcceptedProse(world, action, degraded);
-      if (formatGateErrors.length > 0) {
-        logger.log({
-          module: "turn",
-          event: "format_salvage_gate_rejected",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, rawAttemptCount: turnRawAttempts.length },
-          output: { errors: formatGateErrors.map((e) => e.code) },
-          error: "format-salvage payload failed the final accept gate — falling through to content salvage",
-        });
-      } else {
-        logger.log({
-          module: "turn",
-          event: "format_salvage_applied",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, rawAttemptCount: turnRawAttempts.length },
-          output: { salvaged: degraded },
-        });
-        return degraded;
-      }
-    }
-  }
-
-  // Exp-3 item 6: before giving up to "Nothing changes.", try to salvage
-  // an attempt — keep valid movement/patches, warn on speech nits.
-  // Exp-4 item 8: the evaluation (eligible/ineligible + reason) is logged
-  // inside trySalvageConsequence as `salvage_evaluated`.
-  // Item C10 (S7) / Exp-2 item 7: salvage from the attempt with the FEWEST
-  // hard (non-speech-nit) errors, not the last — attempt 1 is
-  // systematically the best. pickBestAttempt is the pure, unit-tested
-  // selection (ties → earliest attempt); deterministicSalvageOrder is the
-  // same ordering over all candidates for the ladder.
-  // Exp-2-E item (a): salvage candidate order. LAYA_SALVAGE_SELECT=1 (off
-  // by default) asks Laya which candidate narrative best matches the action
-  // and tries the ranked order, applying the first salvageable candidate.
-  // Any Laya failure degrades to the deterministic order. When the flag is
-  // off the path is unchanged: only the single fewest-hard-errors attempt
-  // is tried.
-  const salvageCandidates = attempts.map((a) => ({
-    result: a.result,
-    hardErrors: a.hardErrors,
-  }));
-  const salvageLaya =
-    deps.laya?.config.toggles.salvageSelect === true ? deps.laya : undefined;
-  const deterministicOrder = deterministicSalvageOrder(salvageCandidates);
-  let salvageOrder: number[] | undefined;
-  if (salvageLaya && salvageCandidates.length > 1) {
-    salvageOrder = await rankSalvageCandidates(
-      salvageLaya.client,
-      action,
-      salvageCandidates,
-    );
-    logger.log({
-      module: "laya",
-      event: "salvage_ranked",
-      tick: world.tick,
-      turnIndex: world.turnIndex,
-      actorId: action.actorId,
-      input: { hardErrors: salvageCandidates.map((c) => c.hardErrors) },
-      output: {
-        order: salvageOrder,
-        usedLaya: salvageOrder !== undefined,
-        agreedWithDeterministic:
-          salvageOrder !== undefined &&
-          JSON.stringify(salvageOrder) === JSON.stringify(deterministicOrder),
-      },
-    });
-  }
-  const salvageTryOrder =
-    salvageLaya !== undefined
-      ? (salvageOrder ?? deterministicOrder)
-      : deterministicOrder.slice(0, 1);
-  const bestAttempt = pickBestAttempt(attempts);
-  if (bestAttempt) {
-    logger.log({
-      module: "turn",
-      event: "salvage_best_attempt",
-      tick: world.tick,
-      turnIndex: world.turnIndex,
-      actorId: action.actorId,
-      input: { action },
-      output: {
-        pickedAttempt: bestAttempt.attempt,
-        hardErrors: attempts.map((a) => a.hardErrors),
-      },
-    });
-  }
-  for (const i of salvageTryOrder) {
-    const candidate = attempts[i];
-    if (!candidate?.result || !candidate.semantics) continue;
-    const salvage = trySalvageConsequence(
-      world,
-      action,
-      candidate.result,
-      candidate.semantics,
-      logger,
-      config,
-      engineManipulation,
-    );
-    if (salvage) {
-      logger.log({
-        module: "turn",
-        event: "partial_applied",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: action.actorId,
-        input: { action, result: candidate.result },
-        output: { salvaged: salvage.salvaged, warnings: salvage.warnings },
-        ...(salvage.warnings.length > 0
-          ? { error: `speech warnings (applied anyway): ${salvage.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ")}` }
-          : {}),
-      });
-      return salvage.salvaged;
-    }
   }
 
   // Exp-5 item 6: NPC liveness floor. Before giving up to "Nothing
   // changes.", check whether this actor has already fallen back N
-  // consecutive own turns — if so, apply a minimal in-place reaction
-  // (thoughts-only, plus a stub for anyone directly addressed) so the
-  // scene keeps moving by dialogue even when bodies cannot. User turns
-  // are excluded by the caller: silently rewriting the user's own action
-  // would hide the failure from them.
-  if (opts.allowLiveness !== false && lastSemantics) {
+  // consecutive own turns — if so, apply a minimal in-place reaction so
+  // the scene keeps moving by dialogue even when the render cannot. User
+  // turns are excluded by the caller: silently rewriting the user's own
+  // action would hide the failure from them.
+  if (opts.allowLiveness !== false) {
     const threshold = depsConfig(deps).livenessFallbackThreshold ?? 3;
     const priorFallbacks = consecutiveFallbacks(world, action.actorId);
     if (priorFallbacks >= threshold) {
-      const liveness = buildLivenessConsequence(world, action, lastSemantics, priorFallbacks);
-      // Exp-3 item 5 (S3): defense in depth — the final accept gate runs
-      // on the liveness path too. The templates are fixed (safe by
-      // construction), but bypassing validation by design is how the S2
-      // hole happened; a gate failure falls through to the plain
-      // fallback instead of applying.
-      const livenessGateErrors = recheckAcceptedProse(world, action, liveness);
-      if (livenessGateErrors.length === 0) {
-        logger.log({
-          module: "turn",
-          event: "liveness_applied",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, result: lastResult, priorFallbacks },
-          output: { liveness },
-        });
-        return liveness;
-      }
+      const liveness = buildLivenessConsequence(world, action, priorFallbacks);
       logger.log({
         module: "turn",
-        event: "liveness_gate_rejected",
+        event: "liveness_applied",
         tick: world.tick,
         turnIndex: world.turnIndex,
         actorId: action.actorId,
         input: { action, priorFallbacks },
-        output: { errors: livenessGateErrors.map((e) => e.code) },
-        error: "liveness payload failed the final accept gate — falling through to fallback",
+        output: { liveness },
       });
+      return { render: liveness, executed: emptyExecuted, liveness: true };
     }
   }
 
@@ -1103,13 +540,13 @@ export async function resolveWithValidation(
     actorId: action.actorId,
     input: { action, feedback },
     output: FALLBACK_CONSEQUENCE,
-    error: "max retries exceeded",
+    error: "render attempts exhausted",
   });
   // F23: mark the engine-produced fallback so isFallbackConsequence checks
   // the flag first (narrative equality stays as backward compat).
   const fallbackResult = structuredClone(FALLBACK_CONSEQUENCE);
   fallbackResult.fallback = true;
-  return fallbackResult;
+  return { render: fallbackResult, executed: emptyExecuted, liveness: false };
 }
 
 async function autosave(world: World, deps: EngineDependencies): Promise<void> {
@@ -1162,7 +599,6 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           proposalEngine: turnEngines.proposal,
           selectionEngine: turnEngines.selection,
           consequenceEngine: turnEngines.consequence,
-          semanticJudge: turnEngines.judge,
         }
       : {};
   const turnDeps: EngineDependencies = {
@@ -1174,9 +610,9 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
 
   // F18: exactly one deep clone per turn, taken here at turn start. The
   // snapshot doubles as the turn_started log input AND as the mutation
-  // base passed to applyConsequence below (which no longer clones when it
+  // base passed to applyRenderResult below (which no longer clones when it
   // receives one). Aliasing note: the in-memory log-store entry for
-  // turn_started references the same object that applyConsequence then
+  // turn_started references the same object that applyRenderResult then
   // mutates — the JSONL file write is unaffected (the logger stringifies
   // synchronously at log time), but in-memory readers see the applied
   // state. This is the accepted trade-off of the single-clone budget.
@@ -1399,33 +835,29 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     output: action,
   });
 
-  report(turnDeps, { stage: "consequence_started", actorId: action.actorId, message: `consequence engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
-  let consequence = await resolveWithValidation(world, action, turnDeps, {
+  report(turnDeps, { stage: "consequence_started", actorId: action.actorId, message: `render engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
+  // Phase 4: turn = proposal → selection → execute (engine) → render
+  // (LLM). The engine already executed movement/quote/manipulation/pose;
+  // the render call narrates the executed facts as prose.
+  const { render, executed, liveness } = await resolveRender(world, action, turnDeps, {
     // Exp-5 item 6: the liveness floor rewrites failed turns — never the
     // user's own action text. In autonomous mode every actor is an NPC, so
     // the floor applies to all of them.
     allowLiveness: turnDeps.forceAllNpc === true || action.actorId !== world.userActorId,
   });
-  report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "consequence validated" });
-
-  // Phase 3 post-hooks (behind flags, default OFF): observer triage drops
-  // thought/emotion patches for triaged-out observers, and the salience
-  // gate drops low-salience model memory/belief appends. Skipped for
-  // fallback consequences ("Nothing changes." carries nothing to gate).
-  if (turnDeps.laya !== undefined && !isFallbackConsequence(consequence)) {
-    consequence = await applyLayaPostHooks(turnDeps.laya, world, action, consequence, config, logger);
-  }
+  report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "render validated" });
 
   // Exp-4 item 6: mark fallback history as un-applied so proposals ground
-  // on the world, not the wish. Exp-5 item 2: salvaged/liveness turns
-  // record the narrative (what happened) plus the honest note — never the
-  // raw action text — so later turns don't assume a dropped desk question
-  // was asked or a laptop setup happened.
-  // F18: applyConsequence mutates the turn-start snapshot in place —
+  // on the world, not the wish. Exp-5 item 2: liveness turns record the
+  // narrative (what happened) plus the honest note — never the raw action
+  // text — so later turns don't assume a dropped desk question was asked
+  // or a laptop setup happened.
+  // F18: applyRenderResult mutates the turn-start snapshot in place —
   // no second clone.
-  const patched = applyConsequence(world, consequence, action, config, {
-    fallback: isFallbackConsequence(consequence),
-    honestHistoryNote: getHonestHistoryNote(consequence),
+  const patched = applyRenderResult(world, action, render, executed, config, {
+    fallback: isFallbackConsequence(render),
+    honestHistoryNote: getHonestHistoryNote(render),
+    liveness,
   }, turnSnapshot);
   report(turnDeps, { stage: "patch_applied", actorId: action.actorId, message: "world updated" });
   logger.log({
@@ -1434,7 +866,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     tick: world.tick,
     turnIndex: world.turnIndex,
     actorId: action.actorId,
-    input: { consequence, action },
+    input: { render, executed, action },
     output: { historyTail: patched.history.slice(-1) },
   });
   logger.log({

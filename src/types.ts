@@ -182,6 +182,12 @@ export type SelectionResult = {
   reasoning: string;
 };
 
+/**
+ * Phase 4 legacy: the pre-render patch shapes. No longer part of the
+ * model contract (the render engine returns prose only); kept for the
+ * log-analysis tooling in src/logging/storyTrace.ts, which summarizes
+ * historical runs whose logged payloads still carry patches.
+ */
 export type ActorPatch = {
   actorId: string;
   x?: number;
@@ -200,6 +206,7 @@ export type ActorPatch = {
   prop?: ActorProp;
 };
 
+/** Phase 4 legacy: the pre-render object-patch shape (see ActorPatch). */
 export type ObjectPatch = {
   objectId: string;
   description?: string;
@@ -212,11 +219,22 @@ export type ObjectPatch = {
   blocksSound?: boolean;
 };
 
+/**
+ * Phase 4: the render-only consequence contract. The consequence (render)
+ * engine returns PROSE ONLY — the acting actor's narrative, private
+ * thoughts, and emotion. Movement, speech quotes, and manipulation are
+ * engine-executed (Phases 1–3) and applied to the world deterministically;
+ * the model never emits patches. Unknown keys in a render response (old-
+ * schema actorPatches/objectPatches/effects) are stripped by the schema
+ * and ignored — never validated.
+ */
 export type ConsequenceResult = {
   narrative: string;
-  actorPatches: ActorPatch[];
-  objectPatches: ObjectPatch[];
-  reasoning: string;
+  /** The acting actor's private inner reaction (never narrated). */
+  thoughts?: string;
+  /** The acting actor's emotion after the turn (one word). */
+  emotion?: string;
+  reasoning?: string;
   /**
    * F23: true when this result is the canonical "Nothing changes."
    * fallback (set on the engine-produced fallback clone).
@@ -225,33 +243,6 @@ export type ConsequenceResult = {
    * the flag existed.
    */
   fallback?: boolean;
-  /**
-   * Machine-readable self-declaration by the consequence LLM about what the
-   * action did (see refactor plan §B). The validator checks patches against
-   * this declaration deterministically; the independent SemanticJudge is
-   * only consulted when `effects` is absent (or for dispute spot-checks).
-   * Optional for backward compatibility — missing effects falls back to
-   * the SemanticJudge, then to fail-open physics-only validation.
-   */
-  effects?: ConsequenceEffects;
-};
-
-/** Machine-readable declaration of what an action did (emitted with the narrative). */
-export type ConsequenceEffects = {
-  /** Whole-body locomotion by the acting actor occurred. */
-  moved: boolean;
-  /** The acting actor uttered words / performed explicit speech. */
-  spoke: boolean;
-  /** Canonical uttered segments (ground truth for speech preservation). */
-  quotedSpeech?: string[];
-  /** Resolved movement-target actor id, when the action names one. */
-  destinationActorId?: string;
-  /** Resolved movement-target object id, when the action names a landmark. */
-  destinationObjectId?: string;
-  /** Resolved speech addressee actor id, when the action speaks to someone. */
-  addresseeActorId?: string;
-  /** Resolved physical-contact target actor id (handshake, handing coffee...). */
-  contactActorId?: string;
 };
 
 /**
@@ -292,18 +283,6 @@ export type EngineConfig = {
   defaultPerceptionRadius: number;
   maxRetries: number;
   /**
-   * Exp-7: cap on outer consequence attempts per turn (validation-driven
-   * retries in resolveWithValidation). Default 2, down from the
-   * maxRetries+1=4 the loop previously used. Data-grounded: exp-3 showed
-   * attempt 1 is the best attempt in 72% of turns and RULE-C aborts
-   * non-improving tails; exp-7 showed retry feedback does not steer
-   * qwen3:14b (B2 echo persisted through 3 identical retries) while each
-   * retry costs 60-120 s. Deterministic in-loop repairs (movement repair,
-   * stationary downgrade, prop stub) already run on attempt 1; salvage
-   * handles the rest. Set higher only with evidence retries help.
-   */
-  consequenceMaxAttempts?: number;
-  /**
    * Exp-7 item A12: filename stem for saves. Defaults to world.id — UIs
    * that load scenarios from files set this to the scenario file's stem
    * (e.g. "office-anton") so `office.json` and `office-anton.json` runs
@@ -341,9 +320,9 @@ export type EngineConfig = {
    */
   intentFailureBanThreshold: number;
   /**
-   * Exp-6 item 3: wall-clock budget for one turn's consequence phase
-   * (all attempts). When exceeded, the turn stops burning LLM calls and
-   * falls through to salvage → liveness → fallback. Default 10 minutes.
+   * Exp-6 item 3: wall-clock budget for one turn's render phase
+   * (both attempts). When exceeded, the turn stops burning LLM calls and
+   * falls through to liveness → fallback. Default 10 minutes.
    */
   turnTimeoutMs: number;
 };

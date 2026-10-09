@@ -1,14 +1,14 @@
 // Unit tests for the ARCHITECTURE.md reviewed fixes (F1–F35, Q1–Q7).
 // Each test names the flaw it locks in so future edits know the intent.
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import { OBJECT_INTERACT_RADIUS } from "../../src/engine/validate/objects.js";
 import { MAX_SUGGEST_CANDIDATES, computeMovementOutcome } from "../../src/core/movement.js";
-import { isSpeechOnlyFailure, isTier2Salvageable } from "../../src/engine/turnSalvageGates.js";
+
 import { hasDisplacementToken, resolveMentionedActorId } from "../../src/engine/deterministicSemantics.js";
 import { isFallbackConsequence } from "../../src/engine/turnSalvage.js";
 import { isFallbackHistoryEntry } from "../../src/engine/patchApplier.js";
-import { applyConsequence } from "../../src/engine/patchApplier.js";
+import { applyRenderResult } from "../../src/engine/patchApplier.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { KNOWN_WORLD_VERSIONS, normalizeHistoryEntry, NOT_DONE_SENTINEL } from "../../src/types.js";
 import { buildConsequenceContext, historyVisibleTo } from "../../src/engine/contextBuilder.js";
@@ -19,94 +19,30 @@ import { hist, makeTinyWorld, errorText } from "../helpers.js";
 import type { ConsequenceResult } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
-  return { narrative, actorPatches: [], objectPatches: [], reasoning: "r" };
+  return { narrative, reasoning: "r" };
+}
+
+function facts(over: Partial<RenderFacts> = {}): RenderFacts {
+  return {
+    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    x: 1, y: 1, engineManipulation: null, ...over,
+  };
 }
 
 describe("F2: stable error codes", () => {
   it("validation errors carry snake_case codes, not bare strings", () => {
     const world = makeTinyWorld();
-    const v = validateConsequence(
+    const errors = validateRenderProse(
       world,
-      { ...baseResult(), actorPatches: [{ actorId: "u", x: 999, y: 999 }] },
       { actorId: "u", text: "Walk." },
+      baseResult("U walks to the door."),
+      facts(),
     );
-    expect(v.valid).toBe(false);
-    expect(v.errors.length).toBeGreaterThan(0);
-    for (const e of v.errors) {
+    expect(errors.length).toBeGreaterThan(0);
+    for (const e of errors) {
       expect(e.code).toMatch(/^[a-z0-9_]+(\.[a-z0-9_]+)+$/);
       expect(e.message.length).toBeGreaterThan(0);
     }
-  });
-
-  it("failure classification switches on stable codes, not message prose", () => {
-    // F2: salvage classifiers switch on error codes — rewording a message
-    // must not change turn behavior. (Phase 1: the movement-retry
-    // classifiers are deleted with the retry category; the surviving
-    // speech-tier classifiers still prove the pattern.)
-    expect(isSpeechOnlyFailure([{ code: "speech.dropped_words", message: "x" }])).toBe(true);
-    expect(isSpeechOnlyFailure([{ code: "movement.over_step_cap", message: "x" }])).toBe(false);
-    expect(isSpeechOnlyFailure([])).toBe(false);
-    expect(isTier2Salvageable([{ code: "speech.dropped_words", message: "x" }])).toBe(true);
-    expect(isTier2Salvageable([{ code: "actor.unknown_id", message: "x" }])).toBe(false);
-  });
-});
-
-describe("F4: object interaction radius", () => {
-  it("exports OBJECT_INTERACT_RADIUS = 4", () => {
-    expect(OBJECT_INTERACT_RADIUS).toBe(4);
-  });
-
-  it("rejects object move/resize patches when the actor is too far", () => {
-    const world = makeTinyWorld();
-    // u at (1,1); put a small object far away.
-    world.scene.objects.push({
-      id: "far_box", name: "Far box", description: "A box.",
-      x: 10, y: 10, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
-    });
-    const v = validateConsequence(
-      world,
-      { ...baseResult(), objectPatches: [{ objectId: "far_box", x: 9, y: 9 }] },
-      { actorId: "u", text: "Move the far box." },
-    );
-    expect(v.valid).toBe(false);
-    expect(v.errors.some((e) => e.code === "object.too_far")).toBe(true);
-  });
-
-  it("always allows description-only object patches", () => {
-    const world = makeTinyWorld();
-    world.scene.objects.push({
-      id: "far_box", name: "Far box", description: "A box.",
-      x: 10, y: 10, w: 1, h: 1, passable: true, blocksVision: false, blocksSound: false,
-    });
-    const v = validateConsequence(
-      world,
-      { ...baseResult(), objectPatches: [{ objectId: "far_box", description: "A red box." }] },
-      { actorId: "u", text: "Look at the far box." },
-    );
-    expect(v.errors.some((e) => e.code === "object.too_far")).toBe(false);
-  });
-});
-
-describe("F5: observers cannot rewrite other actors' goals", () => {
-  it("rejects goal patches on non-acting actors", () => {
-    const world = makeTinyWorld();
-    const v = validateConsequence(
-      world,
-      { ...baseResult(), actorPatches: [{ actorId: "n", goal: "Take over the world." }] },
-      { actorId: "u", text: "Wave." },
-    );
-    expect(v.valid).toBe(false);
-    expect(v.errors.some((e) => e.code === "turn_discipline.observer_goal_rewrite")).toBe(true);
-  });
-
-  it("allows the acting actor to update their own goal", () => {
-    const world = makeTinyWorld();
-    const v = validateConsequence(
-      world,
-      { ...baseResult(), actorPatches: [{ actorId: "u", goal: "Stay productive." }] },
-      { actorId: "u", text: "Focus." },
-    );
-    expect(v.errors.some((e) => e.code === "turn_discipline.observer_goal_rewrite")).toBe(false);
   });
 });
 
@@ -127,19 +63,6 @@ describe("F6: perceiver-scoped history", () => {
     expect(forN[0]!.text).toBe("N: Hi U.");
     const forU = historyVisibleTo(world, "u");
     expect(forU).toHaveLength(2);
-  });
-});
-
-describe("F10: actor-occupied destination cells", () => {
-  it("rejects movement onto another actor's cell", () => {
-    const world = makeTinyWorld(); // u at (1,1), n at (4,4)
-    const v = validateConsequence(
-      world,
-      { ...baseResult(), actorPatches: [{ actorId: "u", x: 4, y: 4 }] },
-      { actorId: "u", text: "Walk to N." },
-    );
-    expect(v.valid).toBe(false);
-    expect(v.errors.some((e) => e.code === "movement.actor_collision")).toBe(true);
   });
 });
 
@@ -202,9 +125,9 @@ describe("F22: sentinel-marked fallbacks", () => {
 
 describe("F23: fallback flag on ConsequenceResult", () => {
   it("checks the flag first, narrative equality as backward compat", () => {
-    expect(isFallbackConsequence({ narrative: "Custom.", actorPatches: [], objectPatches: [], reasoning: "r", fallback: true })).toBe(true);
-    expect(isFallbackConsequence({ narrative: "Nothing changes.", actorPatches: [], objectPatches: [], reasoning: "r" })).toBe(true);
-    expect(isFallbackConsequence({ narrative: "Custom.", actorPatches: [], objectPatches: [], reasoning: "r" })).toBe(false);
+    expect(isFallbackConsequence({ narrative: "Custom.", reasoning: "r", fallback: true })).toBe(true);
+    expect(isFallbackConsequence({ narrative: "Nothing changes.", reasoning: "r" })).toBe(true);
+    expect(isFallbackConsequence({ narrative: "Custom.", reasoning: "r" })).toBe(false);
   });
 });
 
@@ -254,7 +177,7 @@ describe("F34: head-verb variants", () => {
 describe("Q1: history records the narrative", () => {
   it("clean turns record Name: narrative", () => {
     const world = makeTinyWorld();
-    const next = applyConsequence(world, baseResult("U waves hello."), { actorId: "u", text: "Wave at everyone." });
+    const next = applyRenderResult(world, { actorId: "u", text: "Wave at everyone." }, baseResult("U waves hello."), { movement: null, pose: null, manipulation: null });
     expect(next.history.at(-1)).toEqual({
       text: "U: U waves hello.",
       perceivers: ["u", "n"],

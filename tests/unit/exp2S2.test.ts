@@ -1,7 +1,6 @@
-// Regression tests for Experiment-2 items 5 (S2) and 7 (S1/S7), plus the
-// coordinator follow-up (deterministic retry-feedback directive).
+// Regression tests for Experiment-2 items 5 (S2) and 7 (S1/S7).
 //
-// S2: two fully-corrupt consequences passed `validateConsequence`
+// S2: two fully-corrupt consequences passed the old `validateConsequence`
 // outright in the Exp-2 run —
 //   tick 10: "Ana: Jeff introduces Ana to Dan." for a silent coffee sip
 //            (observer-as-subject hid behind the "Ana: " attribution
@@ -10,38 +9,29 @@
 //   tick 11: "Dan walks into the conference room…" for "Stay where you
 //            are" (self-declared effects.moved=true dodged
 //            movement.unexpected_move through the merged-semantics OR-trust).
-// The final accept gate (`recheckAcceptedProse`, wired into every accept
-// path) must reject both; salvage must rebuild honest prose from the
-// action text instead of keeping the corrupt narrative.
+// Phase 4: the render contract has no patches and no self-declared
+// effects — `validateRenderProse` rejects both corrupt narratives
+// directly, and the turn falls back after the single prose retry.
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
-import {
-  buildRetryDirective,
-  trySalvageConsequence,
-} from "../../src/engine/turnSalvage.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   findSupplementObserverSubject,
   isExplicitStayAction,
-  pickBestAttempt,
-  recheckAcceptedProse,
   stripAttributionPrefix,
-  type AttemptRecord,
-} from "../../src/engine/turnSalvageGates.js";
-import { resolveWithValidation } from "../../src/engine/turnOrchestrator.js";
+} from "../../src/engine/validate/narrative.js";
+import { resolveRender } from "../../src/engine/turnOrchestrator.js";
 import { FALLBACK_CONSEQUENCE } from "../../src/llm/llmConsequenceEngine.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import { defaultConfig } from "../../src/config.js";
 import { loadOfficeScenario, makeTestDeps } from "../helpers.js";
-import type {
-  ActionSemantics,
-  ConsequenceResult,
-  ValidationError,
-  World,
-} from "../../src/types.js";
+import type { ConsequenceResult, World } from "../../src/types.js";
 
-function stillSemantics(): ActionSemantics {
-  return { moves: false, speaks: false, quotedSpeech: [] };
+function facts(over: Partial<RenderFacts> = {}): RenderFacts {
+  return {
+    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    x: 7, y: 8, engineManipulation: null, ...over,
+  };
 }
 
 function officeWorld(): World {
@@ -54,45 +44,25 @@ function officeWorld(): World {
   return world;
 }
 
-function err(code: string, message = "m"): ValidationError {
-  return { code, message };
-}
-
 describe("exp2-5 S2 final accept gate: tick-10 wrong-subject narrative", () => {
   const action = { actorId: "ana", text: "Take a quiet sip of coffee." };
   const corrupt: ConsequenceResult = {
     narrative: "Ana: Jeff introduces Ana to Dan.",
-    actorPatches: [
-      { actorId: "ana", thoughts: "Sipping coffee." },
-      { actorId: "jeff", thoughts: "Glad to meet everyone." },
-      { actorId: "dan", thoughts: "Sizing up the new hire." },
-    ],
-    objectPatches: [],
+    thoughts: "Sipping coffee.",
     reasoning: "r",
   };
 
   it("rejects the Jeff-subject narrative for a silent sip action", () => {
     const world = officeWorld();
-    // Sanity: the base validator really does pass this (the S2 hole) —
-    // the final gate is what must catch it.
-    expect(validateConsequence(world, corrupt, action, stillSemantics()).valid).toBe(true);
-    const gateErrors = recheckAcceptedProse(world, action, corrupt);
-    expect(gateErrors.some((e) => e.code === "narrative.observer_as_subject")).toBe(true);
+    const errors = validateRenderProse(world, action, corrupt, facts());
+    expect(errors.some((e) => e.code === "narrative.observer_as_subject")).toBe(true);
   });
 
   it("also catches the unprefixed form (introduces not in the validator verb list)", () => {
     const world = officeWorld();
     const noPrefix = { ...corrupt, narrative: "Jeff introduces Ana to Dan." };
-    const gateErrors = recheckAcceptedProse(world, action, noPrefix);
-    expect(gateErrors.some((e) => e.code === "narrative.observer_as_subject")).toBe(true);
-  });
-
-  it("salvage rebuilds honest prose from the action text instead of keeping it", () => {
-    const world = officeWorld();
-    const salvaged = trySalvageConsequence(world, action, corrupt, stillSemantics());
-    expect(salvaged).not.toBeNull();
-    expect(salvaged!.salvaged.narrative).not.toContain("Jeff introduces");
-    expect(salvaged!.salvaged.narrative.toLowerCase()).toContain("sip");
+    const errors = validateRenderProse(world, action, noPrefix, facts());
+    expect(errors.some((e) => e.code === "narrative.observer_as_subject")).toBe(true);
   });
 
   it("does not false-positive on clean prose with observer landmarks", () => {
@@ -100,60 +70,47 @@ describe("exp2-5 S2 final accept gate: tick-10 wrong-subject narrative", () => {
     const clean: ConsequenceResult = {
       ...corrupt,
       narrative: "Ana takes a quiet sip of her coffee, watching Jeff and Dan.",
-      actorPatches: [{ actorId: "ana", thoughts: "Good coffee." }],
+      thoughts: "Good coffee.",
     };
-    expect(recheckAcceptedProse(world, action, clean)).toEqual([]);
+    expect(validateRenderProse(world, action, clean, facts())).toEqual([]);
   });
 
   it("does not false-positive on possessives", () => {
     const world = officeWorld();
     const possessive = { ...corrupt, narrative: "Ana: Jeff's desk is cluttered today." };
-    expect(recheckAcceptedProse(world, action, possessive)).toEqual([]);
+    expect(validateRenderProse(world, action, possessive, facts())).toEqual([]);
   });
 });
 
 describe("exp2-5 S2 final accept gate: tick-11 stay-action teleport", () => {
   const action = { actorId: "dan", text: "Stay where you are." };
-  function teleport(): { world: World; corrupt: ConsequenceResult } {
+
+  it("rejects movement narration on an explicit stay action", () => {
     const world = officeWorld();
-    const dan = world.actors.find((a) => a.id === "dan")!;
-    const corrupt: ConsequenceResult = {
-      narrative: "Dan walks into the conference room and greets everyone.",
-      actorPatches: [{ actorId: "dan", x: dan.x - 3, y: dan.y, thoughts: "Time to mingle." }],
-      objectPatches: [],
-      reasoning: "r",
-      // The OR-trust dodge: the consequence declares moved=true.
-      effects: { moved: true, spoke: false, quotedSpeech: [] },
-    };
-    return { world, corrupt };
-  }
-
-  it("rejects movement on an explicit stay action, even with effects.moved=true", () => {
-    const { world, corrupt } = teleport();
     expect(isExplicitStayAction(action.text)).toBe(true);
-    // Sanity: with the self-declared effects the base validator passes (the S2 hole).
-    const movedSemantics: ActionSemantics = { moves: true, speaks: false, quotedSpeech: [] };
-    expect(validateConsequence(world, corrupt, action, movedSemantics).valid).toBe(true);
-    const gateErrors = recheckAcceptedProse(world, action, corrupt);
-    expect(gateErrors.some((e) => e.code === "movement.unexpected_move")).toBe(true);
+    // Phase 4: the engine is the source of truth for movement — the model
+    // cannot self-declare moved=true anymore, so the stay-teleport
+    // surfaces as narrated-without-move.
+    const errors = validateRenderProse(
+      world,
+      action,
+      {
+        narrative: "Dan walks into the conference room and greets everyone.",
+        thoughts: "Time to mingle.",
+        reasoning: "r",
+      },
+      facts({ x: 15, y: 8 }),
+    );
+    expect(errors.some((e) => e.code === "movement.narrated_without_move")).toBe(true);
   });
 
-  it("salvage refuses the stay-teleport (no honest movement to keep)", () => {
-    const { world, corrupt } = teleport();
-    const movedSemantics: ActionSemantics = { moves: true, speaks: false, quotedSpeech: [] };
-    expect(trySalvageConsequence(world, action, corrupt, movedSemantics)).toBeNull();
-  });
-
-  it("end-to-end: the retry loop never applies the stay-teleport narrative", async () => {
+  it("end-to-end: the render retry never applies the stay-teleport narrative", async () => {
     const logger = createTestLogger();
     const world = officeWorld();
-    const dan = world.actors.find((a) => a.id === "dan")!;
     const scripted: ConsequenceResult = {
       narrative: "Dan walks into the conference room and greets everyone.",
-      actorPatches: [{ actorId: "dan", x: dan.x - 3, y: dan.y, thoughts: "Time to mingle." }],
-      objectPatches: [],
+      thoughts: "Time to mingle.",
       reasoning: "r",
-      effects: { moved: true, spoke: false, quotedSpeech: [] },
     };
     const deps = makeTestDeps(logger, {
       consequenceEngine: new MockConsequenceEngine(logger, {
@@ -161,9 +118,9 @@ describe("exp2-5 S2 final accept gate: tick-11 stay-action teleport", () => {
       }),
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
     });
-    const out = await resolveWithValidation(world, action, deps);
-    expect(out.narrative).toBe(FALLBACK_CONSEQUENCE.narrative);
-    expect(out.narrative).not.toContain("conference room");
+    const out = await resolveRender(world, action, deps);
+    expect(out.render.narrative).toBe(FALLBACK_CONSEQUENCE.narrative);
+    expect(out.render.narrative).not.toContain("conference room");
     // Dan never moved.
     expect(world.actors.find((a) => a.id === "dan")!.x).toBe(15);
   });
@@ -191,107 +148,5 @@ describe("exp2-5 attribution prefix stripping", () => {
       action,
     );
     expect(errors.some((e) => e.code === "narrative.observer_as_subject")).toBe(true);
-  });
-});
-
-describe("exp2-7 pickBestAttempt (S7)", () => {
-  function rec(attempt: number, hardErrors: number): AttemptRecord {
-    return {
-      result: { narrative: `n${attempt}`, actorPatches: [], objectPatches: [], reasoning: "r" },
-      semantics: stillSemantics(),
-      hardErrors,
-      attempt,
-    };
-  }
-
-  it("picks the attempt with the fewest hard errors, not the last", () => {
-    const attempts = [rec(1, 1), rec(2, 4), rec(3, 3)];
-    expect(pickBestAttempt(attempts)!.attempt).toBe(1);
-  });
-
-  it("breaks ties toward the earliest attempt (retry divergence)", () => {
-    const attempts = [rec(1, 2), rec(2, 1), rec(3, 1)];
-    expect(pickBestAttempt(attempts)!.attempt).toBe(2);
-  });
-
-  it("returns undefined for no attempts", () => {
-    expect(pickBestAttempt([])).toBeUndefined();
-  });
-});
-
-describe("exp2-7 salvage never implants thoughts naming stripped actors (S1/S7)", () => {
-  it("sanitizes thoughts that mention a stripped actor id", () => {
-    const world = officeWorld();
-    const action = { actorId: "ana", text: "Take a quiet sip of coffee." };
-    const result: ConsequenceResult = {
-      narrative: "Ana: takes a quiet sip of coffee.",
-      actorPatches: [
-        { actorId: "ana", thoughts: "Liam is late again, whatever." },
-        { actorId: "liam", thoughts: "Hello everyone." },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const salvaged = trySalvageConsequence(world, action, result, stillSemantics());
-    expect(salvaged).not.toBeNull();
-    const ana = salvaged!.salvaged.actorPatches.find((p) => p.actorId === "ana")!;
-    expect(ana.thoughts).not.toMatch(/liam/i);
-    expect(salvaged!.salvaged.actorPatches.some((p) => p.actorId === "liam")).toBe(false);
-  });
-
-  it("salvaged narrative re-checks observer-subject after stripping", () => {
-    const world = officeWorld();
-    const action = { actorId: "ana", text: "Take a quiet sip of coffee." };
-    const result: ConsequenceResult = {
-      narrative: "Ana: Jeff greets Dan.",
-      actorPatches: [
-        { actorId: "ana", thoughts: "Sipping." },
-        { actorId: "liam", thoughts: "Hi." },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const salvaged = trySalvageConsequence(world, action, result, stillSemantics());
-    expect(salvaged).not.toBeNull();
-    // The corrupt prose was rebuilt from the action text, not kept.
-    expect(salvaged!.salvaged.narrative).not.toContain("Jeff greets");
-    expect(salvaged!.salvaged.narrative.toLowerCase()).toContain("sip");
-  });
-});
-
-describe("coordinator follow-up: deterministic retry-feedback directive (M4)", () => {
-  it("ranks hard gates above tier-2 wording above speech nits", () => {
-    const d = buildRetryDirective([
-      err("speech.dropped_words", "dropped quote"),
-      err("movement.over_step_cap", "moved 13 cells"),
-    ]);
-    expect(d).toContain("[movement.over_step_cap]");
-    expect(d).not.toContain("speech.dropped_words");
-  });
-
-  it("ranks tier-2 wording above speech nits", () => {
-    const d = buildRetryDirective([
-      err("speech.dropped_words", "dropped quote"),
-      err("object.phantom_manipulation", "phantom pick-up"),
-    ]);
-    expect(d).toContain("[object.phantom_manipulation]");
-  });
-
-  it("emits a single line with the fix-first directive", () => {
-    const d = buildRetryDirective([err("actor.unknown_id", "unknown actor id: liam\nsecond line")]);
-    expect(d.startsWith("Fix this first: [actor.unknown_id]")).toBe(true);
-    expect(d).not.toContain("\n");
-  });
-
-  it("keeps original order among equal severity (stable)", () => {
-    const d = buildRetryDirective([
-      err("actor.out_of_bounds", "first"),
-      err("actor.blocked_position", "second"),
-    ]);
-    expect(d).toContain("[actor.out_of_bounds]");
-  });
-
-  it("handles the empty case", () => {
-    expect(buildRetryDirective([])).toContain("[unknown]");
   });
 });

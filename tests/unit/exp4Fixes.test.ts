@@ -27,7 +27,7 @@
 //     reports the reason instead of silently falling back.
 // Item 11 (S10): consequence prompt carries the emotion-update nudge.
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   collapseDoubledPrefix,
   detectVoiceViolation,
@@ -39,9 +39,8 @@ import { describePosition } from "../../src/engine/patchApplier.js";
 import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
 import { LIVENESS_HISTORY_MARKER } from "../../src/engine/patchApplier.js";
 import { stepTowardPoint } from "../../src/core/movement.js";
-import { resolveActionSemantics } from "../../src/engine/actionSemantics.js";
 import { capableTierNoopReason } from "../../src/llm/index.js";
-import { consequenceSuffix } from "../../src/llm/prompts.js";
+import { renderSuffix } from "../../src/llm/prompts.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { NOT_DONE_SENTINEL } from "../../src/types.js";
 import type {
@@ -139,21 +138,23 @@ describe("exp4 item 6 (S4/M1): narrative voice gate", () => {
     );
   });
 
-  it("fires as narrative.first_person inside validateConsequence", () => {
+  it("fires as narrative.first_person inside validateRenderProse", () => {
     const world = officeWorld();
     const action: Action = { actorId: "dana", text: "Glance up at Anton." };
-    const result: ConsequenceResult = {
-      narrative: "Dana: I glance up from my screen to look at Anton.",
-      actorPatches: [
-        { actorId: "dana", thoughts: "New hire." },
-        { actorId: "anton", thoughts: "Noticed." },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const v = validateConsequence(world, result, action, silentSemantics());
-    expect(v.valid).toBe(false);
-    expect(v.errors.some((e) => e.code === "narrative.first_person")).toBe(true);
+    const errors = validateRenderProse(
+      world,
+      action,
+      {
+        narrative: "Dana: I glance up from my screen to look at Anton.",
+        thoughts: "New hire.",
+        reasoning: "r",
+      },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 15, y: 11, engineManipulation: null,
+      },
+    );
+    expect(errors.some((e) => e.code === "narrative.first_person")).toBe(true);
   });
 
   it("validateNarrativeVoice surfaces narrative.* codes", () => {
@@ -300,14 +301,14 @@ describe("exp4 item 10 (S6, Phase 3): engine-executed props + pour distance", ()
 
   it("pour_too_far fires when brewing/pouring far from any machine (tick-29 repro)", () => {
     const world = officeWorld(); // dana at (15,11), machine at (2,1)
+    const dana = world.actors.find((a) => a.id === "dana")!;
     const errors = validateObjectGrounding(
       world,
-      {
-        narrative: "Dana pours coffee from the coffee maker into a dana_mug.",
-        actorPatches: [{ actorId: "dana", prop: "cup", thoughts: "Coffee." }],
-        objectPatches: [],
-      },
       { actorId: "dana", text: "Pour a coffee." },
+      "Dana pours coffee from the coffee maker into a dana_mug.",
+      "stand",
+      dana.x,
+      dana.y,
     );
     expect(errors.some((e) => e.code === "object_grounding.pour_too_far")).toBe(true);
   });
@@ -318,45 +319,16 @@ describe("exp4 item 10 (S6, Phase 3): engine-executed props + pour distance", ()
     dana.x = 2; dana.y = 2;
     const errors = validateObjectGrounding(
       world,
-      {
-        narrative: "Dana pours coffee from the coffee maker into a dana_mug.",
-        actorPatches: [{ actorId: "dana", prop: "cup", thoughts: "Coffee." }],
-        objectPatches: [],
-      },
       { actorId: "dana", text: "Pour a coffee." },
+      "Dana pours coffee from the coffee maker into a dana_mug.",
+      "stand",
+      dana.x,
+      dana.y,
     );
     expect(errors.some((e) => e.code === "object_grounding.pour_too_far")).toBe(false);
   });
 });
 
-describe("exp4 item 3 (S1/M2): canonical speech turns", () => {
-  it("downgrades a judge-hallucinated moves=true on a quoted speech turn", async () => {
-    const world = officeWorld();
-    const action: Action = {
-      actorId: "anton",
-      text: "Say to Tanya \"I would love to take a look at your test plan if you have a minute.\"",
-    };
-    const judge = {
-      classify: async () => ({ moves: true, speaks: true, quotedSpeech: [] }),
-    };
-    const resolved = await resolveActionSemantics(world, action, undefined, judge as never);
-    expect(resolved.semantics?.moves).toBe(false);
-    expect(resolved.semantics?.speaks).toBe(true);
-  });
-
-  it("keeps moves=true when the action text carries a displacement token", async () => {
-    const world = officeWorld();
-    const action: Action = {
-      actorId: "anton",
-      text: "Walk to Tanya and say \"Can I see the test plan?\"",
-    };
-    const judge = {
-      classify: async () => ({ moves: true, speaks: true, quotedSpeech: [] }),
-    };
-    const resolved = await resolveActionSemantics(world, action, undefined, judge as never);
-    expect(resolved.semantics?.moves).toBe(true);
-  });
-});
 
 describe("exp4 item 2 (S1): capable-tier no-op warning", () => {
   it("reports the reason when both tiers resolve to the same provider+model", () => {
@@ -384,14 +356,12 @@ describe("exp4 item 2 (S1): capable-tier no-op warning", () => {
   });
 });
 
-describe("exp4 item 11 (S10): emotion nudge in the consequence prompt", () => {
-  it("short and full suffixes carry the EMOTION line", () => {
-    expect(consequenceSuffix("short")).toMatch(/EMOTION/);
-    expect(consequenceSuffix("full")).toMatch(/EMOTION/);
+describe("exp4 item 11 (S10): emotion nudge in the render prompt", () => {
+  it("render suffix carries the EMOTION line", () => {
+    expect(renderSuffix()).toMatch(/EMOTION/i);
   });
 
-  it("consequence suffix carries the NARRATIVE VOICE discipline line", () => {
-    expect(consequenceSuffix("short")).toMatch(/NARRATIVE VOICE/);
-    expect(consequenceSuffix("full")).toMatch(/NARRATIVE VOICE/);
+  it("render suffix carries the NARRATIVE VOICE discipline line", () => {
+    expect(renderSuffix()).toMatch(/NARRATIVE VOICE/);
   });
 });

@@ -6,34 +6,10 @@ import { pointInRect } from "./geometry.js";
 import { distanceToRect } from "./validate/movement.js";
 import { detectVoiceViolation, perceiverIds, thirdPersonFallbackText } from "./validate/narrative.js";
 import { resolveDestinationObjectId } from "./deterministicSemantics.js";
+import type { MovementOutcome } from "./movementExecutor.js";
+import type { ManipulationOutcome } from "./manipulationExecutor.js";
+import type { PlannedPose } from "../core/text.js";
 
-/**
- * Apply a validated ConsequenceResult to produce the next World:
- * actor positions/strings, appended memories/beliefs/relationships,
- * object updates, world history entries, and trimming.
- * Assumes the result already passed validateConsequence.
- */
-export type ApplyConsequenceOptions = {
-  /**
-   * Exp-4 item 6: the turn fell back ("Nothing changes.") — record the
-   * attempt separately from the world ("Anton tried: … (not done)") so
-   * proposal/selection ground on what happened, not the wish. Fallback
-   * entries never count as answers, own actions, or open questions
-   * (see contextBuilder filtering).
-   */
-  fallback?: boolean;
-  /**
-   * Exp-5 item 2: the applied consequence dropped content (tier-1/2 salvage)
-   * or is a deterministic liveness reaction — record the NARRATIVE (what
-   * happened) plus this note ("partial: <warnings>" / "liveness floor"),
-   * never the raw action text (the wish). Later proposals ground on the
-   * fiction otherwise (tick 16 assumed the laptop setup was underway).
-   * Takes effect only for non-fallback turns.
-   */
-  honestHistoryNote?: string;
-};
-
-/** Marker suffix for un-applied fallback history entries (Exp-4 item 6). Kept human-readable; F22: only the sentinel is parsed. */
 export const FALLBACK_HISTORY_MARKER = "(not done)";
 
 /** Marker for salvaged/liveness history entries recorded from the narrative (Exp-5 item 2). */
@@ -184,12 +160,60 @@ export function isPartialHistoryEntry(entry: HistoryEntry | string): boolean {
   return !text.includes(NOT_DONE_SENTINEL) && text.includes(PARTIAL_HISTORY_MARKER);
 }
 
-export function applyConsequence(
+/**
+ * Phase 4: the engine-executed outcomes for one turn, computed by the
+ * turn orchestrator before the render call (Phases 1–3) and applied to
+ * the world by `applyRenderResult` alongside the render prose.
+ */
+export type ExecutedTurn = {
+  /** Engine-executed movement (null = the actor stays in place). */
+  movement: MovementOutcome | null;
+  /** Engine-executed pose change (null = pose unchanged). */
+  pose: PlannedPose | null;
+  /** Engine-executed manipulation (null = none executed). */
+  manipulation: ManipulationOutcome | null;
+};
+
+/**
+ * Apply one turn's result to produce the next World.
+ *
+ * Phase 4: the render contract is prose-only, so the world update has two
+ * deterministic halves — the engine-executed outcomes (movement, pose,
+ * manipulation) and the render prose (acting actor's thoughts/emotion,
+ * narrative → history). There are no model patches anymore.
+ */
+export type ApplyRenderOptions = {
+  /**
+   * Exp-4 item 6: the turn fell back ("Nothing changes.") — record the
+   * attempt separately from the world ("Anton tried: … (not done)") so
+   * proposal/selection ground on what happened, not the wish. Fallback
+   * entries never count as answers, own actions, or open questions
+   * (see contextBuilder filtering).
+   */
+  fallback?: boolean;
+  /**
+   * Exp-5 item 2: the applied turn is a deterministic liveness reaction —
+   * record the NARRATIVE (what happened) plus this note ("liveness
+   * floor"), never the raw action text (the wish). Takes effect only for
+   * non-fallback turns.
+   */
+  honestHistoryNote?: string;
+  /**
+   * Liveness floor: apply the prose only (thoughts/emotion + history) —
+   * no engine outcomes. The liveness turn is a minimal in-place reaction
+   * by design, so the actor holds position even when the action implied
+   * movement.
+   */
+  liveness?: boolean;
+};
+
+export function applyRenderResult(
   world: World,
-  result: ConsequenceResult,
   action: Action,
+  render: ConsequenceResult,
+  executed: ExecutedTurn,
   config: EngineConfig = defaultConfig,
-  opts: ApplyConsequenceOptions = {},
+  opts: ApplyRenderOptions = {},
   /**
    * F18: optional pre-cloned mutation base. When provided (the turn-start
    * snapshot from runTurn), the applier mutates it in place instead of
@@ -202,68 +226,63 @@ export function applyConsequence(
   const next = snapshot ?? cloneWorld(world);
   const actorById = new Map(next.actors.map((a) => [a.id, a]));
   const objectById = new Map(next.scene.objects.map((o) => [o.id, o]));
+  const acting = actorById.get(action.actorId);
 
-  for (const patch of result.actorPatches) {
-    const actor = actorById.get(patch.actorId);
-    if (!actor) continue;
-    if (patch.x !== undefined && patch.y !== undefined) {
-      const moved = patch.x !== actor.x || patch.y !== actor.y;
-      actor.x = patch.x;
-      actor.y = patch.y;
-      // Exp-3 item 8 (S6): keep `state` coherent with position — auto-fill
-      // when the patch moves the actor without updating `state` (an
-      // explicit patch.state always wins below). The label prefers the
-      // action's named destination object when one resolves.
-      // Exp-4 item 8 (S5): pass the effective pose so a standing actor is
-      // never labeled "at <chair>".
-      if (moved && patch.state === undefined) {
-        actor.state = describePosition(
+  const applyOutcomes = !opts.fallback && !opts.liveness;
+  if (applyOutcomes && acting !== undefined) {
+    // Engine-executed movement (Phase 1): the acting actor's position is
+    // engine-owned, always. Keep `state` coherent with the new position —
+    // the deterministic landmark label (Exp-3 item 8 / S6), preferring
+    // the action's named destination object.
+    if (executed.movement !== null) {
+      const { x, y } = executed.movement;
+      const moved = x !== acting.x || y !== acting.y;
+      acting.x = x;
+      acting.y = y;
+      if (moved) {
+        acting.state = describePosition(
           next,
-          patch.x,
-          patch.y,
+          x,
+          y,
           preferredStateObject(next, action),
-          patch.pose ?? actor.pose,
+          executed.pose ?? acting.pose,
         );
       }
     }
-    if (patch.state !== undefined) actor.state = patch.state;
-    if (patch.emotion !== undefined) actor.emotion = patch.emotion;
-    if (patch.goal !== undefined) actor.goal = patch.goal;
-    if (patch.pose !== undefined) actor.pose = patch.pose;
-    if (patch.prop !== undefined) actor.prop = patch.prop;
-    if (patch.thoughts !== undefined) actor.thoughts = patch.thoughts;
-    if (patch.memoriesAppend) actor.memories.push(...patch.memoriesAppend);
-    if (patch.beliefsAppend) actor.beliefs.push(...patch.beliefsAppend);
-    if (patch.relationshipsAppend) actor.relationships.push(...patch.relationshipsAppend);
-
-    // Trim memory arrays. Phase 5: beliefs/relationships are capped too
-    // (previously unbounded — compounding state is what drowns long runs);
-    // prompt rendering summarizes instead of trimming, so nothing is lost
-    // from the model's view when these caps drop old entries.
-    if (actor.memories.length > config.maxMemoriesPerActor) {
-      actor.memories.splice(0, actor.memories.length - config.maxMemoriesPerActor);
+    // Engine-executed pose (Phase 4): sit/stand verbs in the action text
+    // set the pose deterministically.
+    if (executed.pose !== null) {
+      acting.pose = executed.pose;
     }
-    if (actor.beliefs.length > config.maxBeliefsPerActor) {
-      actor.beliefs.splice(0, actor.beliefs.length - config.maxBeliefsPerActor);
-    }
-    if (actor.relationships.length > config.maxRelationshipsPerActor) {
-      actor.relationships.splice(0, actor.relationships.length - config.maxRelationshipsPerActor);
+    // Engine-executed manipulation (Phase 3): prop assignments (acting
+    // actor always, hand-over recipient too) and object relocations.
+    if (executed.manipulation !== null) {
+      for (const ap of executed.manipulation.actorProps) {
+        const target = actorById.get(ap.actorId);
+        if (target !== undefined) target.prop = ap.prop;
+      }
+      for (const mv of executed.manipulation.objectMoves) {
+        const obj = objectById.get(mv.objectId);
+        if (obj !== undefined) {
+          obj.x = mv.x;
+          obj.y = mv.y;
+        }
+      }
     }
   }
 
-  const actorName = actorById.get(action.actorId)?.name ?? action.actorId;
-  // Item C3 (exp local-8b M8): deterministic memory append — the acting
-  // actor's own-turn narrative becomes a memory even when the model emits
-  // no memoriesAppend, so P8 ("memory compounds") holds on weak tiers.
-  // Skipped for fallbacks ("Nothing changes." is not a memory) and when
-  // the model already appended memories; never duplicates the tail entry.
-  // Existing caps trim as usual.
-  if (!opts.fallback) {
-    const acting = actorById.get(action.actorId);
-    const actingPatch = result.actorPatches.find((p) => p.actorId === action.actorId);
-    const modelAppended = (actingPatch?.memoriesAppend?.length ?? 0) > 0;
-    if (acting !== undefined && !modelAppended && result.narrative.trim().length > 0) {
-      const line = summarizeNarrativeForMemory(result.narrative, actorName);
+  const actorName = acting?.name ?? action.actorId;
+  if (!opts.fallback && acting !== undefined) {
+    // Render prose: the acting actor's thoughts/emotion. Undefined fields
+    // leave the current values untouched.
+    if (render.thoughts !== undefined) acting.thoughts = render.thoughts;
+    if (render.emotion !== undefined) acting.emotion = render.emotion;
+    // Item C3 (exp local-8b M8): deterministic memory append — the acting
+    // actor's own-turn narrative becomes a memory (the render contract is
+    // prose-only, so the model cannot append memories itself). Never
+    // duplicates the tail entry. Existing caps trim as usual.
+    if (render.narrative.trim().length > 0) {
+      const line = summarizeNarrativeForMemory(render.narrative, actorName);
       if (acting.memories[acting.memories.length - 1] !== line) {
         acting.memories.push(line);
         if (acting.memories.length > config.maxMemoriesPerActor) {
@@ -273,22 +292,9 @@ export function applyConsequence(
     }
   }
 
-  for (const patch of result.objectPatches) {
-    const obj = objectById.get(patch.objectId);
-    if (!obj) continue;
-    if (patch.description !== undefined) obj.description = patch.description;
-    if (patch.x !== undefined) obj.x = patch.x;
-    if (patch.y !== undefined) obj.y = patch.y;
-    if (patch.w !== undefined) obj.w = patch.w;
-    if (patch.h !== undefined) obj.h = patch.h;
-    if (patch.passable !== undefined) obj.passable = patch.passable;
-    if (patch.blocksVision !== undefined) obj.blocksVision = patch.blocksVision;
-    if (patch.blocksSound !== undefined) obj.blocksSound = patch.blocksSound;
-  }
-
   // F6: every history entry records its perceivers (computed from the
   // PRE-patch world — the event happened at the acting actor's position
-  // before the patches moved anything).
+  // before the turn's changes).
   const perceivers = [...perceiverIds(world, action.actorId, config)];
   const pushEntry = (text: string): void => {
     const entry: HistoryEntry = normalizeHistoryEntry({ text, perceivers }, []);
@@ -296,14 +302,13 @@ export function applyConsequence(
   };
   // Single history entry per turn.
   // Q1: clean turns record the NARRATIVE (what happened), not the action
-  // text (the wish) — salvaged/liveness turns already did; now all applied
-  // turns agree, and getOpenQuestions/proposal grounding treat them alike.
-  // UI layers show this entry only when the viewer can perceive the actor.
+  // text (the wish). UI layers show this entry only when the viewer can
+  // perceive the actor.
   // Exp-4 item 6: fallback attempts are marked as un-applied so later
   // proposals don't assume Anton sits at his desk / the task was explained.
   // F22: the sentinel (not the "(not done)" substring) marks fallbacks.
-  // Exp-5 item 2: salvaged/liveness turns record the narrative + note so
-  // later turns don't assume a dropped question was asked.
+  // Exp-5 item 2: liveness turns record the narrative + note so later
+  // turns don't assume a dropped question was asked.
   if (opts.fallback) {
     // Exp-6 item 8 (M8): first-person echoes in user-turn fallbacks
     // ("Anton tried: I turn toward Dana and say: …") must never become
@@ -318,9 +323,9 @@ export function applyConsequence(
       `${actorName} tried: ${fallbackText} ${FALLBACK_HISTORY_MARKER}${NOT_DONE_SENTINEL}`,
     );
   } else if (opts.honestHistoryNote !== undefined) {
-    pushEntry(`${actorName}: ${result.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);
+    pushEntry(`${actorName}: ${render.narrative} ${PARTIAL_HISTORY_MARKER} [${opts.honestHistoryNote}]`);
   } else {
-    pushEntry(`${actorName}: ${result.narrative}`);
+    pushEntry(`${actorName}: ${render.narrative}`);
   }
   if (next.history.length > config.maxHistoryEntries) {
     next.history.splice(0, next.history.length - config.maxHistoryEntries);

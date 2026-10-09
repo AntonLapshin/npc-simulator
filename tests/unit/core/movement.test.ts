@@ -8,6 +8,7 @@ import {
   clampMoveToCap,
   computeMovementOutcome,
   describeMovement,
+  hasContactVerb,
   isFacingOnlyTurn,
   isInterrogativeQuestion,
   isNonLocomotionSense,
@@ -140,6 +141,22 @@ describe("isNonLocomotionSense", () => {
     expect(isNonLocomotionSense("Ana, where should I sit?")).toBe(true);
     expect(isNonLocomotionSense("turn to Dan")).toBe(true);
     expect(isNonLocomotionSense("Walk toward Tanya.")).toBe(false);
+  });
+});
+
+describe("hasContactVerb (Phase 4: deterministic contact approach)", () => {
+  it("detects contact verbs", () => {
+    expect(hasContactVerb("Shake Bea's hand.")).toBe(true);
+    expect(hasContactVerb("Give Bea a handshake.")).toBe(true);
+    expect(hasContactVerb("Hug Tanya.")).toBe(true);
+    expect(hasContactVerb("High-five Dan!")).toBe(true);
+    expect(hasContactVerb("Pat him on the back.")).toBe(true);
+  });
+
+  it("ignores non-contact actions", () => {
+    expect(hasContactVerb("Walk toward Bea.")).toBe(false);
+    expect(hasContactVerb("Shake the bottle and hand it over.")).toBe(false);
+    expect(hasContactVerb("Wave at Bea.")).toBe(false);
   });
 });
 

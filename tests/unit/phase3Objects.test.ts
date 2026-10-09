@@ -18,16 +18,13 @@ import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps } from "../helpers.js";
 import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import {
-  runTurn,
-  resolveWithValidation,
-} from "../../src/engine/turnOrchestrator.js";
-import {
-  applyEngineManipulation,
   executeManipulation,
   executedManipulationFacts,
 } from "../../src/engine/manipulationExecutor.js";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
+import { consequenceResultSchema } from "../../src/schemas.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
 import { defaultConfig } from "../../src/config.js";
@@ -84,13 +81,15 @@ function scriptedConsequence(result: ConsequenceResult) {
 }
 
 function silentResult(narrative: string): ConsequenceResult {
+  // Phase 4: the render engine emits prose only — no objectPatches, no
+  // prop patches (the Phase 3 contract, now enforced by the schema).
+  return { narrative, reasoning: "r" };
+}
+
+function renderFacts(): RenderFacts {
   return {
-    narrative,
-    // The render engine emits NO objectPatches and NO prop patches —
-    // the Phase 3 contract.
-    actorPatches: [],
-    objectPatches: [],
-    reasoning: "r",
+    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    x: 2, y: 2, engineManipulation: null,
   };
 }
 
@@ -125,17 +124,17 @@ describe("Phase 3 acceptance: pick-up", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence({
         narrative: "Dana picks up her laptop.",
-        actorPatches: [{ actorId: "dana", prop: "cup", thoughts: "Wrong prop." }],
-        objectPatches: [],
+        thoughts: "Wrong prop.",
         reasoning: "r",
-      }),
+      } as ConsequenceResult),
       getUserAction: async () => "Pick up the laptop.",
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
     const next = await runTurn(world, deps);
-    // The model's invented "cup" is stripped; the engine's "laptop" stands.
+    // The engine's "laptop" stands — the render contract is prose-only, so
+    // there is no model patch channel left to override it.
     expect(next.actors.find((a) => a.id === "dana")!.prop).toBe("laptop");
-    expect(logger.store.byEvent("model_object_patch_ignored").length).toBeGreaterThanOrEqual(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
     expect(ignored).toEqual([]);
   });
 });
@@ -218,36 +217,32 @@ describe("Phase 3 acceptance: put-down", () => {
 });
 
 describe("Phase 3 acceptance: stripping and phantom gate", () => {
-  it("model objectPatches are stripped and ignored (debug-logged)", () => {
-    const result: ConsequenceResult = {
+  it("model objectPatches are stripped by the schema and ignored", () => {
+    const parsed = consequenceResultSchema.safeParse({
       narrative: "Dana types.",
+      thoughts: "t",
       actorPatches: [{ actorId: "dana", thoughts: "t" }],
       objectPatches: [{ objectId: "invented_mug", description: "Fake." }],
       reasoning: "r",
-    };
-    const ignored: string[] = [];
-    const merged = applyEngineManipulation(result, null, (e) =>
-      ignored.push(`${e.kind}:${e.kind === "objectPatch" ? e.objectId : e.actorId}`),
-    );
-    expect(merged.objectPatches).toEqual([]);
-    expect(ignored).toEqual(["objectPatch:invented_mug"]);
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data).not.toHaveProperty("actorPatches");
+      expect(parsed.data).not.toHaveProperty("objectPatches");
+      expect(parsed.data.narrative).toBe("Dana types.");
+    }
   });
 
   it("phantom manipulation fails validation", () => {
     const world = officeWorld();
-    const v = validateConsequence(
+    const errors = validateRenderProse(
       world,
-      {
-        ...silentResult("Dana picks up the laptop and waves it triumphantly."),
-        actorPatches: [{ actorId: "dana", thoughts: "Mine now." }],
-      },
       { actorId: "dana", text: "Dana stretches." },
-      { moves: false, speaks: false, quotedSpeech: [] },
-      undefined,
-      null,
+      { narrative: "Dana picks up the laptop and waves it triumphantly.", thoughts: "Mine now." },
+      renderFacts(),
     );
-    expect(v.valid).toBe(false);
-    expect(v.errors.map((e) => e.code)).toContain("object.phantom_manipulation");
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.map((e) => e.code)).toContain("object.phantom_manipulation");
   });
 
   it("the render input carries the executed manipulation as facts", () => {

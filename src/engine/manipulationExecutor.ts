@@ -17,7 +17,6 @@
 
 import type {
   Action,
-  ConsequenceResult,
   World,
 } from "../types.js";
 import {
@@ -109,48 +108,6 @@ export type IgnoredPropPatch = {
   prop: unknown;
 };
 
-/**
- * Merge engine-executed manipulation into a consequence result.
- *
- * Model-emitted object/prop patches are engine-owned now: EVERY
- * objectPatch is stripped and EVERY prop patch is stripped (the
- * `onIgnored` hook lets the caller debug-log each one — the same
- * treatment Phase 1 gave model x/y), then the engine outcome is applied
- * deterministically (acting actor always; hand-over recipient too).
- * Null outcome = no manipulation executed: the result keeps no
- * object/prop changes at all.
- */
-export function applyEngineManipulation(
-  result: ConsequenceResult,
-  outcome: ManipulationOutcome | null,
-  onIgnored?: (ignored: IgnoredObjectPatch | IgnoredPropPatch) => void,
-): ConsequenceResult {
-  const merged: ConsequenceResult = structuredClone(result);
-  for (const patch of merged.objectPatches) {
-    onIgnored?.({ kind: "objectPatch", objectId: patch.objectId, patch: { ...patch } });
-  }
-  merged.objectPatches = [];
-  for (const patch of merged.actorPatches) {
-    if (patch.prop !== undefined) {
-      onIgnored?.({ kind: "prop", actorId: patch.actorId, prop: patch.prop });
-      delete patch.prop;
-    }
-  }
-  if (outcome !== null) {
-    for (const ap of outcome.actorProps) {
-      const patch = merged.actorPatches.find((p) => p.actorId === ap.actorId);
-      if (patch !== undefined) {
-        patch.prop = ap.prop;
-      } else {
-        merged.actorPatches.push({ actorId: ap.actorId, prop: ap.prop });
-      }
-    }
-    for (const mv of outcome.objectMoves) {
-      merged.objectPatches.push({ objectId: mv.objectId, x: mv.x, y: mv.y });
-    }
-  }
-  return merged;
-}
 
 /**
  * Fact lines describing the executed manipulation for the consequence

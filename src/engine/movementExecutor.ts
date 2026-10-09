@@ -11,18 +11,18 @@
 import type {
   Action,
   ActionSemantics,
-  ConsequenceResult,
   World,
 } from "../types.js";
 import {
   assertMovementInvariants,
   computeMovementOutcome,
   describeMovement,
+  hasContactVerb,
   isNonLocomotionSense,
   type MovementOutcome,
 } from "../core/movement.js";
 import { extractDirectionHint, hasDisplacementToken } from "../core/text.js";
-import { resolveDeterministicSemantics } from "./deterministicSemantics.js";
+import { resolveDeterministicSemantics, resolveMentionedActorId } from "./deterministicSemantics.js";
 
 export type { MovementOutcome };
 
@@ -34,13 +34,23 @@ export type { MovementOutcome };
  */
 export type PlannedMovement = Pick<
   ActionSemantics,
-  "moves" | "destinationActorId" | "destinationObjectId" | "destinationObjectExplicit"
+  "moves" | "destinationActorId" | "destinationObjectId" | "destinationObjectExplicit" | "contactActorId"
 >;
 
 export function planMovementSemantics(world: World, action: Action): PlannedMovement {
   const det = resolveDeterministicSemantics(world, action);
   const moves = hasDisplacementToken(action.text) && !isNonLocomotionSense(action.text);
-  if (!moves) return { moves: false };
+  if (!moves) {
+    // Contact approach: a handshake/hug turn with no walk verb still has
+    // to close distance. Phase 4: the semantic judge no longer supplies
+    // contactActorId, so detect the contact verb + named actor
+    // deterministically.
+    if (hasContactVerb(action.text)) {
+      const contact = resolveMentionedActorId(world, action.actorId, action.text);
+      if (contact !== undefined) return { moves: true, contactActorId: contact };
+    }
+    return { moves: false };
+  }
   return {
     moves: true,
     ...(det.destinationActorId !== undefined
@@ -128,41 +138,6 @@ export function executeMovement(
   return outcome;
 }
 
-/**
- * Merge engine-executed movement into a consequence result.
- *
- * Model-emitted coordinates are engine-owned now: x/y is stripped from
- * EVERY actor patch (the `onIgnored` hook lets the caller debug-log each
- * one — B6 shape: a patch "moving" the wrong actor simply loses its
- * coordinates), then the engine outcome is applied to the acting actor
- * only (adding a position-only patch when the consequence didn't patch
- * the actor at all).
- */
-export function applyEngineMovement(
-  result: ConsequenceResult,
-  actorId: string,
-  outcome: MovementOutcome | null,
-  onIgnored?: (actorId: string, x: number | undefined, y: number | undefined) => void,
-): ConsequenceResult {
-  const merged: ConsequenceResult = structuredClone(result);
-  for (const patch of merged.actorPatches) {
-    if (patch.x !== undefined || patch.y !== undefined) {
-      onIgnored?.(patch.actorId, patch.x, patch.y);
-      delete patch.x;
-      delete patch.y;
-    }
-  }
-  if (outcome !== null) {
-    const patch = merged.actorPatches.find((p) => p.actorId === actorId);
-    if (patch !== undefined) {
-      patch.x = outcome.x;
-      patch.y = outcome.y;
-    } else {
-      merged.actorPatches.push({ actorId, x: outcome.x, y: outcome.y });
-    }
-  }
-  return merged;
-}
 
 /**
  * Fact lines describing the executed movement for the consequence

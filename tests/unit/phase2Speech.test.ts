@@ -14,11 +14,10 @@ import { describe, expect, it } from "vitest";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps } from "../helpers.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
-import { resolveWithValidation, runTurn } from "../../src/engine/turnOrchestrator.js";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { resolveRender, runTurn } from "../../src/engine/turnOrchestrator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
 import {
-  applyEngineSpeech,
   exactQuoteFacts,
   planSpeech,
 } from "../../src/engine/speechExecutor.js";
@@ -56,12 +55,13 @@ function scriptedConsequence(result: ConsequenceResult) {
 }
 
 function speechResult(narrative: string): ConsequenceResult {
+  return { narrative, thoughts: "Saying words.", reasoning: "r" };
+}
+
+function renderFacts(): RenderFacts {
   return {
-    narrative,
-    actorPatches: [{ actorId: "dana", thoughts: "Saying words." }],
-    objectPatches: [],
-    reasoning: "r",
-    effects: { moved: false, spoke: true, quotedSpeech: [QUOTE] },
+    exactQuote: QUOTE, moved: false, pose: null, effectivePose: "stand",
+    x: 1, y: 1, engineManipulation: null,
   };
 }
 
@@ -95,62 +95,18 @@ describe("exactQuoteFacts", () => {
   });
 });
 
-describe("applyEngineSpeech", () => {
-  it("passes through when there is no exact quote", () => {
-    const result = speechResult("Dana waves.");
-    const out = applyEngineSpeech(result, "dana", null, danaWorld());
-    expect(out.reinserted).toBe(false);
-    expect(out.result).toBe(result);
-  });
-
-  it("passes through when the narrative already carries the quote", () => {
-    const result = speechResult(`Dana says "${QUOTE}", smiling.`);
-    const out = applyEngineSpeech(result, "dana", QUOTE, danaWorld());
-    expect(out.reinserted).toBe(false);
-    expect(out.result).toBe(result);
-  });
-
-  it("reinserts a dropped quote and fixes the effects declaration", () => {
-    const result = speechResult("Dana looks around the office.");
-    const seen: Array<{ before: string; after: string }> = [];
-    const out = applyEngineSpeech(result, "dana", QUOTE, danaWorld(), (i) => seen.push(i));
-    expect(out.reinserted).toBe(true);
-    expect(out.result.narrative).toBe(`Dana looks around the office. Dana says "${QUOTE}"`);
-    expect(out.result.effects?.quotedSpeech).toEqual([QUOTE]);
-    expect(out.result.effects?.spoke).toBe(true);
-    // Input is never mutated.
-    expect(result.narrative).toBe("Dana looks around the office.");
-    expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ before: "Dana looks around the office." });
-  });
-
-  it("replaces an altered quote with the exact words (B1 shape)", () => {
-    const result = speechResult('Dana says "I need help with the backend".');
-    const out = applyEngineSpeech(result, "dana", QUOTE, danaWorld());
-    expect(out.reinserted).toBe(true);
-    expect(out.result.narrative).toBe(`Dana says "${QUOTE}"`);
-    expect(out.result.narrative).not.toContain("backend");
-  });
-
-  it("falls back to the actor id when the actor is unknown", () => {
-    const world = danaWorld();
-    const result = speechResult("Someone waves.");
-    const out = applyEngineSpeech(result, "ghost", QUOTE, world);
-    expect(out.result.narrative).toBe(`Someone waves. ghost says "${QUOTE}"`);
-  });
-});
 
 describe("Phase 2 golden run: altered quote (B1)", () => {
   it("validator rejects an altered quote with speech.exact_quote_missing", () => {
     const world = danaWorld();
-    const v = validateConsequence(
+    const errors = validateRenderProse(
       world,
-      speechResult('Dana says "I need help with the backend".'),
       { actorId: "dana", text: ACTION },
-      { moves: false, speaks: true, quotedSpeech: [QUOTE] },
+      speechResult('Dana says "I need help with the backend".'),
+      renderFacts(),
     );
-    expect(v.valid).toBe(false);
-    expect(v.errors.map((e) => e.code)).toContain("speech.exact_quote_missing");
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.map((e) => e.code)).toContain("speech.exact_quote_missing");
   });
 
   it("the in-loop backstop repairs the altered quote — no retry burned", async () => {
@@ -161,11 +117,11 @@ describe("Phase 2 golden run: altered quote (B1)", () => {
         speechResult('Dana says "I need help with the backend".'),
       ),
     });
-    const result = await resolveWithValidation(world, { actorId: "dana", text: ACTION }, deps);
+    const result = await resolveRender(world, { actorId: "dana", text: ACTION }, deps);
     // The exact action quote — not the model's altered words — is what validates.
-    expect(result.narrative).toContain(`"${QUOTE}"`);
-    expect(result.narrative).not.toContain("backend");
-    expect(logger.store.byEvent("speech_quote_reinserted")).toHaveLength(1);
+    expect(result.render.narrative).toContain(`"${QUOTE}"`);
+    expect(result.render.narrative).not.toContain("backend");
+    expect(logger.store.byEvent("render_quote_reinserted")).toHaveLength(1);
     expect(logger.store.byEvent("retry_started")).toHaveLength(0);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
     expect(logger.store.byEvent("speech_planned")).toHaveLength(1);
@@ -178,9 +134,9 @@ describe("Phase 2 golden run: altered quote (B1)", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence(speechResult(narrative)),
     });
-    const result = await resolveWithValidation(world, { actorId: "dana", text: ACTION }, deps);
-    expect(result.narrative).toBe(narrative);
-    expect(logger.store.byEvent("speech_quote_reinserted")).toHaveLength(0);
+    const result = await resolveRender(world, { actorId: "dana", text: ACTION }, deps);
+    expect(result.render.narrative).toBe(narrative);
+    expect(logger.store.byEvent("render_quote_reinserted")).toHaveLength(0);
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
@@ -238,12 +194,12 @@ describe("Phase 2 multi-quote rule", () => {
     const deps = makeTestDeps(logger, {
       consequenceEngine: scriptedConsequence(speechResult("Dana waves.")),
     });
-    const result = await resolveWithValidation(
+    const result = await resolveRender(
       world,
       { actorId: "dana", text: 'Dana says "hi" then adds "bye"' },
       deps,
     );
-    expect(result.narrative).toContain('Dana says "hi"');
+    expect(result.render.narrative).toContain('Dana says "hi"');
     expect(logger.store.byEvent("speech_planned")).toHaveLength(1);
     expect(logger.store.byEvent("speech_planned")[0]!.output).toMatchObject({
       exactQuote: "hi",

@@ -12,7 +12,6 @@ export * from "./engine/physicalValidator.js";
 export * from "./engine/patchApplier.js";
 export * from "./engine/persistence.js";
 export * from "./engine/turnOrchestrator.js";
-export * from "./engine/actionSemantics.js";
 export * from "./intelligence/types.js";
 export * from "./mocks/mockProposalEngine.js";
 export * from "./mocks/mockSelectionEngine.js";
