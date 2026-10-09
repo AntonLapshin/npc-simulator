@@ -392,6 +392,11 @@ export async function resolveRender(
     return {
       exactQuote,
       moved: toX !== fromX || toY !== fromY,
+      // Stage-1 A4: actor destinations feed the destination-grounding gate.
+      destinationActorId:
+        engineMovement?.destination?.kind === "actor"
+          ? (engineMovement.destination.id ?? null)
+          : null,
       pose: enginePose,
       effectivePose: enginePose ?? actor?.pose ?? "stand",
       x: toX,

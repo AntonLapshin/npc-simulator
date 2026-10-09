@@ -183,7 +183,7 @@ describe("exp7 A6: pronouns", () => {
       action,
       { narrative: "Dana nods, and she smiles.", thoughts: "t", reasoning: "r" },
       {
-        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
         x: 4, y: 4, engineManipulation: null,
       },
     );
