@@ -19,6 +19,7 @@ import type {
   ConsequenceEngine,
   ProposalEngine,
   SelectionEngine,
+  SelectionEngineWithIntent,
 } from "../intelligence/types.js";
 import { applyRenderResult, type ExecutedTurn } from "./patchApplier.js";
 import { renderRetryFeedback, validateRenderProse, type RenderFacts } from "./validate/render.js";
@@ -261,7 +262,7 @@ export async function resolveRender(
   world: World,
   action: Action,
   deps: EngineDependencies,
-  opts: { allowLiveness?: boolean } = {},
+  opts: { allowLiveness?: boolean; intent?: Intent } = {},
 ): Promise<{ render: ConsequenceResult; executed: ExecutedTurn; liveness: boolean }> {
   const config = depsConfig(deps);
   const logger = deps.logger;
@@ -282,7 +283,13 @@ export async function resolveRender(
   // movement, the exact quote, manipulation, and pose. Computed once per
   // turn, before the first render call, so the render input carries the
   // executed facts to narrate.
-  let plannedMovement = planMovementSemantics(world, action);
+  //
+  // Phase 5: a fully-typed cascade intent (kind + resolved targetId from
+  // the Laya proposal engine) is authoritative — it generated the action
+  // text, so the executors use its fields instead of re-parsing the text
+  // (no translation layer). On the LLM/chat path the intent is undefined
+  // and the text parsers run as before.
+  let plannedMovement = planMovementSemantics(world, action, opts.intent);
   // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1, off
   // by default). Laya only ever VETOES a planned move — when it is
   // confident the action needs no relocation. Laya failure or low
@@ -314,7 +321,7 @@ export async function resolveRender(
       output: { engineMovement },
     });
   }
-  const exactQuote = planSpeech(action);
+  const exactQuote = planSpeech(action, opts.intent);
   if (exactQuote !== null) {
     logger.log({
       module: "speech",
@@ -326,6 +333,10 @@ export async function resolveRender(
       output: { exactQuote },
     });
   }
+  // Phase 5: manipulation stays text-parsed — the Laya proposal engine's
+  // candidate templates are written as inverses of planManipulation's
+  // verb ontology, so the template → parse round-trip recovers the
+  // intent's target deterministically (covered by round-trip tests).
   const engineManipulation = executeManipulation(world, action);
   if (engineManipulation !== null) {
     logger.log({
@@ -630,6 +641,10 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   report(turnDeps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
 
   let action: Action;
+  // Phase 5: the turn's decided intent (intent-first cascade and/or the
+  // Laya proposal engine's fully-typed intent). Threads to selection and
+  // the executors; undefined on user turns and the pure chat path.
+  let decidedIntent: Intent | undefined;
   // Autonomous mode (forceAllNpc): the "user" actor is simulated like any
   // other NPC — proposal + selection + consequence, never getUserAction.
   const isUserTurn = !turnDeps.forceAllNpc && actor.id === world.userActorId;
@@ -690,7 +705,18 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     const proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
     report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
     report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
-    const selection = await turnDeps.selectionEngine.select(world, actor.id, proposal.suggestions);
+    // Phase 5: the Laya proposal engine returns its fully-typed intent
+    // (kind + resolved targetId); it threads to selection (skips the
+    // redundant intent cascade) and to the executors (authoritative —
+    // it generated the action text). On the LLM path proposal.intent is
+    // undefined and the intent-first intent (if any) is advisory only.
+    decidedIntent = proposal.intent ?? intent;
+    const selection = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
+      world,
+      actor.id,
+      proposal.suggestions,
+      decidedIntent,
+    );
     report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
     let actionText = stripSelectionPrefix(selection.action);
     // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
@@ -801,7 +827,12 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
           (s) => stripSelectionPrefix(s) !== actionText,
         );
         if (filtered.length > 0) {
-          const repick = await turnDeps.selectionEngine.select(world, actor.id, filtered);
+          const repick = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
+            world,
+            actor.id,
+            filtered,
+            decidedIntent,
+          );
           const repickText = stripSelectionPrefix(repick.action);
           const repickRejection = validateSelectionForActor(world, actor.id, repickText);
           actionText =
@@ -844,6 +875,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
     // user's own action text. In autonomous mode every actor is an NPC, so
     // the floor applies to all of them.
     allowLiveness: turnDeps.forceAllNpc === true || action.actorId !== world.userActorId,
+    // Phase 5: the cascade's fully-typed intent threads to the executors.
+    intent: decidedIntent,
   });
   report(turnDeps, { stage: "validation_done", actorId: action.actorId, message: "render validated" });
 
