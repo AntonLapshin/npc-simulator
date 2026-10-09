@@ -38,13 +38,9 @@ import {
   recheckAcceptedProse,
 } from "../../src/engine/turnSalvageGates.js";
 import {
-  effectiveRepairTarget,
-  vetoAwayFromTarget,
-} from "../../src/engine/textHints.js";
-import {
-  buildStationaryDowngrade,
-  synthesizeStationaryNarrative,
-} from "../../src/engine/turnOrchestrator.js";
+  executorDestination,
+  executeMovement,
+} from "../../src/engine/movementExecutor.js";
 import {
   suggestionClusterNouns,
   suggestionCore,
@@ -260,107 +256,52 @@ describe("exp5 item 7 (S3): accept-path prose gates", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Item 6 (S2): effective repair target, veto, stationary downgrade.
+// Item 6 (S2): Phase 1 — the repair machinery is deleted.
 // ---------------------------------------------------------------------------
-describe("exp5 item 6 (S2): constructive movement repair", () => {
-  it("effectiveRepairTarget prefers the judge destination over the narrative target (tick-15 repro)", () => {
-    const world = officeWorld();
+// Phase 1 (engine-owned movement) deletes effectiveRepairTarget,
+// vetoAwayFromTarget, buildStationaryDowngrade, and
+// synthesizeStationaryNarrative. The tick-15 invariant they protected — the
+// judge's resolved destination beats the narrative's named target — now
+// holds structurally: executorDestination ranks explicit semantic
+// destinations above text, and the engine step always moves toward the
+// resolved destination.
+describe("exp5 item 6 (S2): engine-owned movement", () => {
+  it("the resolved semantic destination wins over the narrative's named target (tick-15 repro)", () => {
+    const world = officeWorld(); // anton at (16,2)
     const semantics: ActionSemantics = {
       moves: true,
       speaks: false,
       quotedSpeech: [],
       destinationObjectId: "anton_desk",
     };
-    const target = effectiveRepairTarget(
+    // Narrative says "Tanya's desk" but the judge resolved anton_desk.
+    expect(executorDestination(semantics, "anton")).toEqual({
+      kind: "object",
+      id: "anton_desk",
+    });
+    const o = executeMovement(
       world,
-      "anton",
-      "Anton walks toward Tanya's desk, setting his laptop down.",
+      { actorId: "anton", text: "Anton walks toward Tanya's desk." },
       semantics,
     );
-    expect(target?.id).toBe("anton_desk");
-    // Judge silent: falls back to the narrative target — actor mentions win
-    // over objects (person is the stronger signal), so "Tanya's desk"
-    // resolves to Tanya herself (tick-28 behavior preserved).
-    const fallback = effectiveRepairTarget(
-      world,
-      "anton",
-      "Anton walks toward Tanya's desk.",
-      undefined,
-    );
-    expect(fallback?.id).toBe("tanya");
-    // No target anywhere: null.
-    expect(
-      effectiveRepairTarget(world, "anton", "Anton looks around.", undefined),
-    ).toBeNull();
+    expect(o).not.toBeNull();
+    const desk = world.scene.objects.find((ob) => ob.id === "anton_desk")!;
+    const oldDist = Math.hypot(16 - (desk.x + desk.w / 2), 2 - (desk.y + desk.h / 2));
+    expect(Math.hypot(o!.x - (desk.x + desk.w / 2), o!.y - (desk.y + desk.h / 2))).toBeLessThan(oldDist);
+    // Not toward Tanya: the narrative's named target is not a destination.
+    const tanya = world.actors.find((a) => a.id === "tanya")!;
+    const oldTanya = Math.hypot(16 - tanya.x, 2 - tanya.y);
+    expect(Math.hypot(o!.x - tanya.x, o!.y - tanya.y)).toBeLessThan(oldTanya + 1e-9);
   });
 
-  it("vetoAwayFromTarget vetoes away-steps and keeps toward-steps", () => {
-    const world = officeWorld(); // anton at (16,2)
-    const towardDesk = { x: 4.5, y: 9 }; // anton_desk center
-    expect(
-      vetoAwayFromTarget(world, "anton", { x: 4, y: 10 }, towardDesk),
-    ).toEqual({ x: 4, y: 10 });
-    expect(
-      vetoAwayFromTarget(world, "anton", { x: 17, y: 2 }, towardDesk),
-    ).toBeNull();
-  });
-
-  it("buildStationaryDowngrade commits an honest stationary turn", () => {
+  it("stationary intents get no engine movement (no downgrade machinery needed)", () => {
     const world = officeWorld();
-    // Exp-5 geometry: Tanya at (8,7), Anton moved adjacent to (7,7).
-    world.actors.find((a) => a.id === "anton")!.x = 7;
-    world.actors.find((a) => a.id === "anton")!.y = 7;
-    const action: Action = {
-      actorId: "tanya",
-      text: "I offer to help Anton set up his laptop and get settled at his new desk.",
-    };
-    const result: ConsequenceResult = {
-      narrative: "Tanya walks over to Anton to help with his laptop.",
-      actorPatches: [
-        { actorId: "tanya", x: 7, y: 7, thoughts: "Helping the new hire." },
-      ],
-      objectPatches: [],
-      reasoning: "r",
-      effects: { moved: true, spoke: false },
-    };
-    const effTarget = effectiveRepairTarget(
+    const o = executeMovement(
       world,
-      "tanya",
-      result.narrative,
+      { actorId: "anton", text: "Type furiously on the laptop." },
       silentSemantics(),
     );
-    expect(effTarget?.id).toBe("anton");
-    const downgrade = buildStationaryDowngrade(world, action, result, effTarget);
-    expect(downgrade).not.toBeNull();
-    // Honest prose: no movement claimed, already-reached target named.
-    expect(downgrade!.narrative).toBe("Tanya remains in position by Anton.");
-    // Movement stripped, thoughts kept, moved=false.
-    const patch = downgrade!.actorPatches.find((p) => p.actorId === "tanya")!;
-    expect(patch.x).toBeUndefined();
-    expect(patch.y).toBeUndefined();
-    expect(patch.thoughts).toBe("Helping the new hire.");
-    expect(downgrade!.effects?.moved).toBe(false);
-    // The downgrade validates clean (moves=false) and passes the accept gate.
-    const v = validateConsequence(
-      world,
-      downgrade!,
-      action,
-      silentSemantics(),
-    );
-    expect(v.errors).toEqual([]);
-    expect(recheckAcceptedProse(world, action, downgrade!)).toEqual([]);
-  });
-
-  it("synthesizeStationaryNarrative preserves quoted speech", () => {
-    const world = officeWorld();
-    const action: Action = {
-      actorId: "anton",
-      text: `I stay put and say, "No rush, take your time."`,
-    };
-    const actor = world.actors.find((a) => a.id === "anton")!;
-    expect(
-      synthesizeStationaryNarrative(action, "Anton", actor, null, undefined),
-    ).toBe(`Anton remains in position. Anton says "No rush, take your time.".`);
+    expect(o).toBeNull();
   });
 });
 

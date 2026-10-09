@@ -12,7 +12,7 @@ import {
 } from "../../src/engine/contextBuilder.js";
 import { renderTurnStory } from "../../src/logging/storyTrace.js";
 import { mockClassifyAction } from "../../src/mocks/mockSemanticJudge.js";
-import { suggestMoveTarget } from "../../src/engine/movementAssist.js";
+import { computeMovementOutcome } from "../../src/core/movement.js";
 import { LLMProposalEngine } from "../../src/llm/llmProposalEngine.js";
 import { consequenceSuffix } from "../../src/llm/prompts.js";
 import { createTestLogger } from "../../src/logging/logger.js";
@@ -147,12 +147,12 @@ describe("exp1-3 destination fidelity for landmarks", () => {
     expect(validateConsequence(world, closer, action, semantics).valid).toBe(true);
   });
 
-  it("suggestMoveTarget resolves object destinations to closer cells", () => {
+  it("computeMovementOutcome resolves object destinations to closer cells", () => {
     const world = coffeeWorld();
-    const s = suggestMoveTarget(world, "u", undefined, "coffee_machine");
-    expect(s).not.toBeNull();
+    const o = computeMovementOutcome(world, "u", { destinationObjectId: "coffee_machine" });
+    expect(o).not.toBeNull();
     const dOld = Math.hypot(1 - 5.5, 1 - 5.5);
-    const dNew = Math.hypot(s!.x - 5.5, s!.y - 5.5);
+    const dNew = Math.hypot(o!.x - 5.5, o!.y - 5.5);
     expect(dNew).toBeLessThan(dOld);
   });
 });

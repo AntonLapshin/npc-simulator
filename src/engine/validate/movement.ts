@@ -1,79 +1,53 @@
 // Movement validation checks (extracted from physicalValidator.ts).
+//
+// Phase 1 (renderer architecture): movement is engine-owned — the model
+// never emits coordinates. The gates below are engine-output invariants
+// (plus narrative-coherence checks), not model-retry triggers: the engine
+// asserts its own output via `assertMovementInvariants` (src/core) before
+// the consequence is validated, so a movement failure here is an engine
+// bug, never a prompt-repair candidate.
 
 import type { Action, ActionSemantics, ValidationError, World } from "../../types.js";
-import { distance } from "../geometry.js";
-import { MAX_STEP_DISTANCE, requiredProgress } from "../movementAssist.js";
+import { distance, distanceToRect } from "../../core/geometry.js";
+import {
+  isNonLocomotionSense,
+  MAX_STEP_DISTANCE,
+} from "../../core/movement.js";
+
+// Word-sense predicates moved to the pure core (src/core/movement.ts);
+// re-exported here so existing importers keep working.
+export {
+  isFacingOnlyTurn,
+  isInterrogativeQuestion,
+  isNonLocomotionSense,
+} from "../../core/movement.js";
+// distanceToRect moved to the pure core (src/core/geometry.ts);
+// re-exported here (and via physicalValidator) for existing importers.
+export { distanceToRect };
 
 /** Physical-contact radius: touching requires ending this close (Euclidean). */
 export const CONTACT_RADIUS = 2.5;
 
 /**
- * Exp-2 item 8 (S4/S5): word-sense checks before `moves=true` takes
- * effect. Two action shapes carry locomotion/pose-looking words without
- * moving the body:
- * - Interrogative questions ("where should I sit?"): asking about an
- *   action never performs it. A question never demands a sit/stand pose
- *   patch and never relocates the body.
- * - Facing constructions ("turn to/toward Dan", "face Ana"): rotating in
- *   place with no step verb is not locomotion.
- * Both exempt the turn from the locomotion/moves gates below (and
- * `isInterrogativeQuestion` is exported for the sit-pose gate in
- * validate/objects.ts). Pure functions; unconditional correctness fixes,
- * not env-flagged.
- */
-
-/**
- * Unambiguous whole-body displacement verbs (true steps — proximity
- * phrases like "toward" are deliberately excluded because facing uses
- * them too). Mirrors the locomotion side of DISPLACEMENT_VERBS in
- * deterministicSemantics.ts; kept local so the facing/question sense
- * checks stay independent of that over-broad token heuristic (which
- * counts "toward" as a displacement token).
- */
-const STEP_VERBS_RE =
-  /\b(walk|walks|walked|walking|go|goes|went|going|move|moves|moved|moving|run|runs|ran|running|step|steps|stepped|stepping|approach|approaches|approached|approaching|enter|enters|entered|entering|leave|leaves|left|leaving|come|comes|came|coming|follow|follows|followed|following|join|joins|joined|head|heads|headed|heading|return|returns|returned|returning|advance|advances|advancing|proceed|proceeds|proceeding|shift|shifts|shifting|slide|slides|sliding|stroll|strolls|strolling|hurry|hurries|hurrying|rush|rushes|rushing|rushed|saunter|saunters|sauntering|drift|drifts|drifting|sidle|sidles|sidling|dance|dances|dancing|slip|slips|slipping|slipped|teleport|teleports|teleporting)\b/i;
-
-const INTERROGATIVE_RE = /\b(who|whom|whose|what|where|when|why|how|which)\b/i;
-
-/**
- * True when the action text asks a question (a "?" plus an interrogative
- * word) and carries no genuine movement clause. "Walk to Ana and ask
- * where I should sit?" still moves — the walk clause wins; only pure
- * questions ("Ana, where should I sit?") are exempt.
- */
-export function isInterrogativeQuestion(text: string): boolean {
-  return text.includes("?") && INTERROGATIVE_RE.test(text) && !STEP_VERBS_RE.test(text);
-}
-
-const FACING_RE = /\bturn(?:s|ed|ing)?\s+(?:to|toward|towards)\b|\bface[sd]?\b/i;
-
-/**
- * True for facing-only turns ("turn to Dan", "turns toward Ana", "face
- * the room"): a facing construction with no step/movement verb. "Turn to
- * Dan and walk over" keeps locomotion — the step verb wins. Word-boundary
- * anchored so "return to Dan" (no boundary before "turn") never matches.
- */
-export function isFacingOnlyTurn(text: string): boolean {
-  return FACING_RE.test(text) && !STEP_VERBS_RE.test(text);
-}
-
-/** Either non-locomotion word sense: interrogative question or pure facing. */
-export function isNonLocomotionSense(text: string): boolean {
-  return isInterrogativeQuestion(text) || isFacingOnlyTurn(text);
-}
-
-/**
- * Movement gate on judged semantics: semantics.moves === false never
- * requires x/y; semantics.moves === true requires a changed, reachable
- * position, and — when the judge resolved a destinationActorId — one
- * strictly closer to that actor (by id comparison).
+ * Movement gate on judged semantics, Phase-1 edition.
  *
- * Phase 2 (exp-3 item 3, ticks 8/20): the mirror direction also holds —
- * with moves === false the acting actor must STAY in place. A glance, a
- * question, or a sip never relocates the body, so a position change on
- * such a turn is a teleport, not progress. Contact-driven approaches are
- * exempt (a handshake turn legitimately closes to adjacency — enforced
- * separately by the contact gate).
+ * Movement is engine-owned: the engine computes the acting actor's
+ * position and merges it into the consequence before validation, so the
+ * model is never asked to emit coordinates. The checks below are
+ * engine-output invariants (the engine asserts them via
+ * `assertMovementInvariants` before validation — a failure here is an
+ * engine bug, never a model-retry trigger):
+ * - moves === false: the actor must stay in place (unexpected teleports
+ *   still fail).
+ * - moves === true: no position is demanded from the model anymore (an
+ *   engine null-outcome is an honest stationary turn); when the engine
+ *   did move, the output must satisfy the cap / strictly-closer rules.
+ *
+ * The old model-facing demands (movement.no_position_change,
+ * movement.position_unchanged) and the token-shuffle progress rule
+ * (movement.no_progress_actor) are gone: with engine-owned movement a
+ * token shuffle is impossible by construction — the engine always takes
+ * the maximum-progress step.
  */
 export function validateMovementIntent(
   world: World,
@@ -114,17 +88,13 @@ export function validateMovementIntent(
     return errors;
   }
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
+  // Phase 1: the engine merges its computed position before validation, so
+  // a moves=true turn with no position patch means the merge failed — the
+  // engine always moves the acting actor (or honestly reports no step).
   if (!patch || patch.x === undefined || patch.y === undefined) {
     errors.push({
-      code: "movement.no_position_change",
-      message: `action implies movement ("${action.text.slice(0, 80)}") but acting actor (${action.actorId}) has no position change: include x and y with a new reachable position reflecting that movement`,
-    });
-    return errors;
-  }
-  if (patch.x === actor.x && patch.y === actor.y) {
-    errors.push({
-      code: "movement.position_unchanged",
-      message: `action implies movement ("${action.text.slice(0, 80)}") but acting actor (${action.actorId}) position is unchanged (${patch.x}, ${patch.y}): move to a different reachable position`,
+      code: "movement.declared_without_patch",
+      message: `action declares movement (moves=true) but acting actor (${action.actorId}) has no position patch: the engine always moves the acting actor on a moves=true turn`,
     });
     return errors;
   }
@@ -151,18 +121,6 @@ export function validateMovementIntent(
           code: "movement.not_closer_actor",
           message: `action says to move toward ${target.id} but new position (${patch.x}, ${patch.y}) is not closer than current (${actor.x}, ${actor.y}): pick x,y strictly closer to ${target.id} at (${target.x}, ${target.y})`,
         });
-      } else {
-        // Exp-3 item 4: real progress for named cross-room walks — a
-        // 0.8-cell shuffle toward a 12-cell-distant target is not a walk.
-        // Tolerance of one cell covers integer-grid quantization (a full
-        // 6-cell diagonal step closes ~5.9 cells of Euclidean distance).
-        const need = requiredProgress(oldDist);
-        if (need > 0 && oldDist - newDist < need - 1.0) {
-          errors.push({
-            code: "movement.no_progress_actor",
-            message: `action says to move toward ${target.id} ${oldDist.toFixed(1)} cells away but only closes ${(oldDist - newDist).toFixed(1)} cells: make real progress (at least ${need.toFixed(1)} cells) or arrive — a token shuffle toward a distant target is not the walk`,
-          });
-        }
       }
     }
   }
@@ -172,13 +130,6 @@ export function validateMovementIntent(
   // (Weak judges sometimes miss the destination; this keeps cross-room
   // teleports from passing silently.)
   return errors;
-}
-
-/** Distance from a point to the closest point of an axis-aligned rect. */
-export function distanceToRect(px: number, py: number, rect: { x: number; y: number; w: number; h: number }): number {
-  const cx = Math.min(Math.max(px, rect.x), rect.x + rect.w);
-  const cy = Math.min(Math.max(py, rect.y), rect.y + rect.h);
-  return Math.hypot(px - cx, py - cy);
 }
 
 /**
@@ -231,7 +182,9 @@ export function validateDestinationObject(
   // facing/question turn has no locomotion to ground against a landmark.
   if (!semantics.moves || isNonLocomotionSense(action.text)) return errors;
   const patch = normalized.actorPatches.find((p) => p.actorId === action.actorId);
-  if (!patch || patch.x === undefined || patch.y === undefined) return errors; // movement gate reports this
+  // Phase 1: no patch means the engine could not move this turn (boxed in
+  // / already adjacent) — an honest stationary turn, nothing to check.
+  if (!patch || patch.x === undefined || patch.y === undefined) return errors;
   if (patch.x === actor.x && patch.y === actor.y) return errors;
   const oldDist = distanceToRect(actor.x, actor.y, obj);
   const newDist = distanceToRect(patch.x, patch.y, obj);
@@ -255,18 +208,10 @@ export function validateDestinationObject(
       code: "movement.arrival_too_far",
       message: `narrative claims to be AT ${obj.name} (${obj.id}) but ends at (${patch.x}, ${patch.y}), ${newDist.toFixed(1)} cells away: land within ${ARRIVAL_RADIUS} cells of it (next to it, never inside) or drop the arrival claim`,
     });
-  } else {
-    // Exp-3 item 4: real progress for named cross-room walks (tick 15: a
-    // 1-cell shuffle toward a 12-cell-distant desk passed as "progress").
-    // One-cell tolerance covers integer-grid quantization (see above).
-    const need = requiredProgress(oldDist);
-    if (need > 0 && oldDist - newDist < need - 1.0) {
-      errors.push({
-        code: "movement.no_progress_object",
-        message: `action says to move toward ${obj.name} (${obj.id}) ${oldDist.toFixed(1)} cells away but only closes ${(oldDist - newDist).toFixed(1)} cells: make real progress (at least ${need.toFixed(1)} cells) or arrive — a token shuffle is not the walk`,
-      });
-    }
   }
+  // Phase 1: the old movement.no_progress_object token-shuffle rule is
+  // gone — with engine-owned movement a token shuffle is impossible by
+  // construction (the engine always takes the maximum-progress step).
   // Exp-3 item 4: forbid claiming a DIFFERENT landmark ("stands next to
   // Tanya's desk" for "my desk" — tick 15). Strict name/id matching only:
   // a bare kind word ("at his desk") cannot identify the object. Exp-3
