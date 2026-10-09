@@ -1,7 +1,7 @@
 // Regression tests for experiment-1.md action items 1-12
 // (office-anton.json, text UI, local model run, ticks 0-20).
 import { describe, expect, it } from "vitest";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
   buildConsequenceContext,
   buildIdentityAnchor,
@@ -14,14 +14,21 @@ import { renderTurnStory } from "../../src/logging/storyTrace.js";
 import { mockClassifyAction } from "../../src/mocks/mockSemanticJudge.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
 import { LLMProposalEngine } from "../../src/llm/llmProposalEngine.js";
-import { consequenceSuffix } from "../../src/llm/prompts.js";
+import { renderSuffix } from "../../src/llm/prompts.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import type { LLMProvider } from "../../src/llm/index.js";
 import { makeTinyWorld, hist, errorText } from "../helpers.js";
 import type { ActionSemantics, ConsequenceResult } from "../../src/types.js";
 
 function baseResult(narrative = "Something happens."): ConsequenceResult {
-  return { narrative, actorPatches: [], objectPatches: [], reasoning: "r" };
+  return { narrative, reasoning: "r" };
+}
+
+function baseFacts(over: Partial<RenderFacts> = {}): RenderFacts {
+  return {
+    exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+    x: 1, y: 1, engineManipulation: null, ...over,
+  };
 }
 
 function entry(module: string, event: string, extra: Record<string, unknown> = {}) {
@@ -45,16 +52,8 @@ class StubProvider implements LLMProvider {
 
 describe("exp1-1 story trace renders the accepted consequence", () => {
   it("shows the LAST consequence_completed when a tick retried", () => {
-    const first = {
-      narrative: "U walks to (5,8) inside the desk.",
-      actorPatches: [{ actorId: "u", x: 5, y: 8 }],
-      objectPatches: [], reasoning: "first",
-    };
-    const second = {
-      narrative: "U walks toward N but stays put.",
-      actorPatches: [{ actorId: "u", thoughts: "Crowded." }],
-      objectPatches: [], reasoning: "accepted",
-    };
+    const first = { narrative: "U walks to (5,8) inside the desk.", reasoning: "first" };
+    const second = { narrative: "U walks toward N but stays put.", reasoning: "accepted" };
     const entries = [
       entry("turn", "turn_started", { actorId: "u" }),
       entry("consequence", "consequence_completed", { output: first, parsedResponse: first, reasoning: "first" }),
@@ -68,19 +67,9 @@ describe("exp1-1 story trace renders the accepted consequence", () => {
     expect(story).toMatch(/attempt 2 of 2|rejected/);
   });
 
-  it("shows repaired coordinates with a repair marker", () => {
-    const raw = {
-      narrative: "U approaches N.",
-      actorPatches: [{ actorId: "u", thoughts: "Going." }],
-      objectPatches: [], reasoning: "r",
-      effects: { moved: true, spoke: false },
-    };
-    const repaired = {
-      narrative: "U approaches N.",
-      actorPatches: [{ actorId: "u", x: 2, y: 2, thoughts: "Going." }],
-      objectPatches: [], reasoning: "r",
-      effects: { moved: true, spoke: false },
-    };
+  it("shows the repair marker on a repaired turn", () => {
+    const raw = { narrative: "U approaches N.", reasoning: "r" };
+    const repaired = { narrative: "U approaches N.", reasoning: "r" };
     const entries = [
       entry("turn", "turn_started", { actorId: "u" }),
       entry("consequence", "consequence_completed", { output: raw, parsedResponse: raw, reasoning: "r" }),
@@ -88,30 +77,41 @@ describe("exp1-1 story trace renders the accepted consequence", () => {
       entry("validator", "validation_passed", {}),
     ];
     const story = renderTurnStory(entries, 3, [{ id: "u", name: "U" }]);
-    expect(story).toContain("(2, 2)");
+    // Phase 4: no coordinate patches left — the story shows the repair
+    // marker, not the coordinates.
     expect(story).toMatch(/movement repaired/);
   });
 });
 
-describe("exp1-2 contact adjacency", () => {
-  it("rejects a handshake across the room, accepts one adjacent", () => {
-    const world = makeTinyWorld(); // u(1,1) n(4,4): ~4.2 apart
-    const action = { actorId: "u", text: "Shake hands with N." };
-    const semantics: ActionSemantics = { moves: false, speaks: false, quotedSpeech: [], contactActorId: "n" };
-    const far: ConsequenceResult = {
-      ...baseResult("U shakes hands with N across the room."),
-      actorPatches: [{ actorId: "u", thoughts: "Nice." }],
-    };
-    const vFar = validateConsequence(world, far, action, semantics);
-    expect(vFar.valid).toBe(false);
-    expect(errorText(vFar.errors)).toMatch(/contact|adjacent/i);
 
-    const near: ConsequenceResult = {
-      ...baseResult("U shakes hands with N."),
-      actorPatches: [{ actorId: "u", x: 3, y: 3, thoughts: "Nice." }],
-      effects: { moved: true, spoke: false, destinationActorId: "n", contactActorId: "n" },
-    };
-    expect(validateConsequence(world, near, action, semantics).valid).toBe(true);
+describe("exp1-2 contact approach (Phase 4: engine-owned)", () => {
+  it("the engine closes to adjacency on a handshake turn (contact verb + named actor)", async () => {
+    const { planMovementSemantics, executeMovement } = await import(
+      "../../src/engine/movementExecutor.js"
+    );
+    const world = makeTinyWorld(); // u(1,1) n(4,4): ~4.2 apart
+    // Single-letter names never resolve as mentions — use the full name.
+    world.actors.find((a) => a.id === "n")!.name = "Nadia";
+    const action = { actorId: "u", text: "Shake hands with Nadia." };
+    const planned = planMovementSemantics(world, action);
+    expect(planned.moves).toBe(true);
+    expect(planned.contactActorId).toBe("n");
+    const o = executeMovement(world, action, planned);
+    expect(o).not.toBeNull();
+    // Adjacent to Nadia after the engine step (the structural contact guarantee).
+    expect(Math.hypot(o!.x - 4, o!.y - 4)).toBeLessThanOrEqual(Math.SQRT2 + 1e-9);
+  });
+
+  it("a grounded handshake narrative passes render validation", () => {
+    const world = makeTinyWorld();
+    const action = { actorId: "u", text: "Shake hands with N." };
+    const errors = validateRenderProse(
+      world,
+      action,
+      { narrative: "U shakes hands with N.", reasoning: "r" },
+      baseFacts({ moved: true, x: 3, y: 3 }),
+    );
+    expect(errors).toEqual([]);
   });
 });
 
@@ -124,27 +124,27 @@ describe("exp1-3 destination fidelity for landmarks", () => {
     });
     return world;
   }
-  it("rejects moves away from a named landmark, accepts moves closer", () => {
+  it("rejects narrated walks the engine did not perform, accepts grounded ones", () => {
     const world = coffeeWorld();
     const action = { actorId: "u", text: "Walk to the coffee machine." };
-    const semantics: ActionSemantics = {
-      moves: true, destinationObjectId: "coffee_machine", speaks: false, quotedSpeech: [],
-    };
-    const away: ConsequenceResult = {
-      ...baseResult("U walks to the coffee machine."),
-      actorPatches: [{ actorId: "u", x: 0, y: 0 }],
-      effects: { moved: true, spoke: false, destinationObjectId: "coffee_machine" },
-    };
-    const vAway = validateConsequence(world, away, action, semantics);
-    expect(vAway.valid).toBe(false);
-    expect(errorText(vAway.errors)).toMatch(/coffee_machine|not closer/);
+    // Phase 4: the engine computes the step, so "moving away" is
+    // impossible by construction — the prose gate rejects narrated
+    // locomotion with no engine move instead.
+    const noMove = validateRenderProse(
+      world,
+      action,
+      baseResult("U walks to the coffee machine."),
+      baseFacts(),
+    );
+    expect(noMove.some((e) => e.code === "movement.narrated_without_move")).toBe(true);
 
-    const closer: ConsequenceResult = {
-      ...baseResult("U walks to the coffee machine."),
-      actorPatches: [{ actorId: "u", x: 2, y: 2 }],
-      effects: { moved: true, spoke: false, destinationObjectId: "coffee_machine" },
-    };
-    expect(validateConsequence(world, closer, action, semantics).valid).toBe(true);
+    const grounded = validateRenderProse(
+      world,
+      action,
+      baseResult("U walks to the coffee machine."),
+      baseFacts({ moved: true, x: 2, y: 2 }),
+    );
+    expect(grounded).toEqual([]);
   });
 
   it("computeMovementOutcome resolves object destinations to closer cells", () => {
@@ -160,65 +160,26 @@ describe("exp1-3 destination fidelity for landmarks", () => {
 describe("exp1-4 speech preservation applies to user turns too", () => {
   it("rejects truncation of a long user utterance to a fragment", () => {
     const world = makeTinyWorld();
-    const action = { actorId: "u", text: `"Hi, I'm Anton, where is my desk?"` };
-    const semantics: ActionSemantics = {
-      moves: false, speaks: true, quotedSpeech: ["Hi, I'm Anton, where is my desk?"],
-    };
-    const truncated: ConsequenceResult = {
-      ...baseResult(`U says "Hi, I'm Anton."`),
-      actorPatches: [{ actorId: "u", thoughts: "Nervous." }],
-    };
-    const v = validateConsequence(world, truncated, action, semantics);
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/exact words|truncate/);
+    const quote = "Hi, I'm Anton, where is my desk?";
+    const action = { actorId: "u", text: `"${quote}"` };
+    const truncated = validateRenderProse(
+      world,
+      action,
+      { ...baseResult(`U says "Hi, I'm Anton."`), thoughts: "Nervous." },
+      baseFacts({ exactQuote: quote }),
+    );
+    expect(truncated.some((e) => e.code === "speech.exact_quote_missing")).toBe(true);
 
-    const full: ConsequenceResult = {
-      ...baseResult(`U says "Hi, I'm Anton, where is my desk?"`),
-      actorPatches: [{ actorId: "u", thoughts: "Nervous." }],
-    };
-    expect(validateConsequence(world, full, action, semantics).valid).toBe(true);
+    const full = validateRenderProse(
+      world,
+      action,
+      { ...baseResult(`U says "${quote}"`), thoughts: "Nervous." },
+      baseFacts({ exactQuote: quote }),
+    );
+    expect(full).toEqual([]);
   });
 });
 
-describe("exp1-5 addressee patching", () => {
-  it("requires a patch on the actor spoken to", () => {
-    const world = makeTinyWorld();
-    const action = { actorId: "u", text: "Ask N where is my desk?" };
-    const semantics: ActionSemantics = {
-      moves: false, speaks: true, quotedSpeech: [], addresseeActorId: "n",
-    };
-    const missing: ConsequenceResult = {
-      ...baseResult("U asks N where his desk is."),
-      actorPatches: [{ actorId: "u", thoughts: "Hope N answers." }],
-      effects: { moved: false, spoke: true, quotedSpeech: ["where is my desk?"], addresseeActorId: "n" },
-    };
-    const v = validateConsequence(world, missing, action, semantics);
-    expect(v.valid).toBe(false);
-    expect(errorText(v.errors)).toMatch(/directly to n|thoughts/);
-
-    const patched: ConsequenceResult = {
-      ...baseResult("U asks N where his desk is."),
-      actorPatches: [
-        { actorId: "u", thoughts: "Hope N answers." },
-        { actorId: "n", thoughts: "U wants his desk; I should point it out." },
-      ],
-      effects: { moved: false, spoke: true, quotedSpeech: ["where is my desk?"], addresseeActorId: "n" },
-    };
-    expect(validateConsequence(world, patched, action, semantics).valid).toBe(true);
-  });
-
-  it("does not demand patches for room broadcasts", () => {
-    const world = makeTinyWorld();
-    const action = { actorId: "u", text: "Greet the room." };
-    const semantics: ActionSemantics = { moves: false, speaks: true, quotedSpeech: [] };
-    const solo: ConsequenceResult = {
-      ...baseResult("U greets the room."),
-      actorPatches: [{ actorId: "u", thoughts: "Friendly." }],
-      effects: { moved: false, spoke: true },
-    };
-    expect(validateConsequence(world, solo, action, semantics).valid).toBe(true);
-  });
-});
 
 describe("exp1-6/7 questions cue + repetition guard", () => {
   it("surfaces pending questions to proposal and selection", () => {
@@ -254,8 +215,8 @@ describe("exp1-8/9/10 anchors and nudges", () => {
     expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
     expect(ctx).not.toContain("POSE/PROP/OBJECT RULE");
     expect(ctx).toContain("You are NOT");
-    expect(consequenceSuffix()).toContain("pose");
-    expect(consequenceSuffix()).toMatch(/pronouns/);
+    expect(renderSuffix()).toContain("pose");
+    expect(renderSuffix()).toMatch(/pronouns/i);
   });
 
   it("identity anchor states role and excludes others", () => {

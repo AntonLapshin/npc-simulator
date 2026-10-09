@@ -22,17 +22,16 @@
 import { describe, expect, it } from "vitest";
 import { NOT_DONE_SENTINEL } from "../../src/types.js";
 import { sanitizeDisplayText } from "../../src/util/sanitize.js";
-import { plainLanguageNote } from "../../src/engine/turnSalvage.js";
 import { hasStationaryWorkToken } from "../../src/engine/deterministicSemantics.js";
-import { resolveActionSemantics } from "../../src/engine/actionSemantics.js";
-import { validateNarrativePronouns, validateStatePronouns } from "../../src/engine/validate/narrative.js";
-import { validateConsequence } from "../../src/engine/physicalValidator.js";
+import { planMovementSemantics } from "../../src/engine/movementExecutor.js";
+import { validateNarrativePronouns } from "../../src/engine/validate/narrative.js";
+import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
-  resolveWithValidation,
+  resolveRender,
   runTurn,
 } from "../../src/engine/turnOrchestrator.js";
 import { defaultConfig } from "../../src/config.js";
-import { ECHO_BAN_LINE, consequenceSuffix } from "../../src/llm/prompts.js";
+import { ECHO_BAN_LINE, renderSuffix } from "../../src/llm/prompts.js";
 import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
 import { historyEntryText } from "../../src/logging/storyTrace.js";
 import { scenarioStemOf } from "../../src/ui/text/textUi.js";
@@ -79,29 +78,6 @@ describe("exp7 A10: sanitizeDisplayText", () => {
   });
 });
 
-describe("exp7 A9: plainLanguageNote", () => {
-  it("maps validator codes to plain phrases", () => {
-    expect(
-      plainLanguageNote([{ code: "speech.invented_dialogue", message: "x" }]),
-    ).toBe("partial — some dialogue was improvised");
-    expect(plainLanguageNote([])).toBe("partial");
-  });
-
-  it("dedupes and joins multiple categories", () => {
-    const note = plainLanguageNote([
-      { code: "speech.invented_dialogue", message: "x" },
-      { code: "movement.no_position_change", message: "y" },
-      { code: "speech.dropped_words", message: "z" },
-    ]);
-    expect(note).toBe("partial — some dialogue was improvised; the movement didn't fully happen");
-  });
-
-  it("gives the quote-reinsertion salvage a speech-shaped phrase", () => {
-    expect(plainLanguageNote([{ code: "salvage.quote_reinserted", message: "x" }])).toBe(
-      "partial — dropped dialogue was restored",
-    );
-  });
-});
 
 describe("exp7 A7: stationary-work verbs", () => {
   it("detects typing/staring/sipping-class verbs", () => {
@@ -115,32 +91,21 @@ describe("exp7 A7: stationary-work verbs", () => {
     expect(hasStationaryWorkToken("Say hello.")).toBe(false);
   });
 
-  it("downgrades a model-hallucinated moves=true on stationary work (B7)", async () => {
+  it("stationary work plans no movement (B7, deterministic pre-pass)", () => {
     const world = pronWorld();
-    const action: Action = { actorId: "dana", text: "Dana types furiously on his laptop." };
-    const result: ConsequenceResult = {
-      narrative: "Dana types furiously on his laptop.",
-      actorPatches: [],
-      objectPatches: [],
-      effects: { moved: true, spoke: false, quotedSpeech: [] },
-      reasoning: "r",
-    };
-    const resolved = await resolveActionSemantics(world, action, result, undefined);
-    expect(resolved.semantics?.moves).toBe(false);
+    // Phase 4: there is no judge and no self-declared effects.moved —
+    // the engine plans movement from the action text alone.
+    expect(
+      planMovementSemantics(world, { actorId: "dana", text: "Dana types furiously on his laptop." }).moves,
+    ).toBe(false);
   });
 
-  it("keeps moves=true when a displacement token is present (walk-then-type)", async () => {
+  it("keeps moves=true when a displacement token is present (walk-then-type)", () => {
     const world = pronWorld();
-    const action: Action = { actorId: "dana", text: "Dana walks to his desk and types up the report." };
-    const result: ConsequenceResult = {
-      narrative: "Dana walks to his desk and types up the report.",
-      actorPatches: [{ actorId: "dana", x: 3, y: 3, thoughts: "t" }],
-      objectPatches: [],
-      effects: { moved: true, spoke: false, quotedSpeech: [] },
-      reasoning: "r",
-    };
-    const resolved = await resolveActionSemantics(world, action, result, undefined);
-    expect(resolved.semantics?.moves).toBe(true);
+    expect(
+      planMovementSemantics(world, { actorId: "dana", text: "Dana walks to his desk and types up the report." })
+        .moves,
+    ).toBe(true);
   });
 });
 
@@ -198,18 +163,6 @@ describe("exp7 A6: pronouns", () => {
     expect(errors[0]!.code).toBe("narrative.pronoun_mismatch");
   });
 
-  it("flags the exp-7 tick-8 shape: plagiarized state string (state.pronoun_mismatch)", () => {
-    const world = pronWorld();
-    const errors = validateStatePronouns(
-      world,
-      "dana",
-      "sitting at her desk and working on a laptop",
-    );
-    expect(errors).toHaveLength(1);
-    expect(errors[0]!.code).toBe("state.pronoun_mismatch");
-    expect(validateStatePronouns(world, "dana", "sitting at his desk")).toHaveLength(0);
-  });
-
   it("is opt-in: no pronouns set, no check", () => {
     const world = makeTinyWorld();
     const action: Action = { actorId: "n", text: "N sits down." };
@@ -222,34 +175,32 @@ describe("exp7 A6: pronouns", () => {
     expect(validateNarrativePronouns(world, "Dana walks to his desk.", action)).toHaveLength(0);
   });
 
-  it("surfaces through validateConsequence", () => {
+  it("surfaces through validateRenderProse", () => {
     const world = pronWorld();
     const action: Action = { actorId: "dana", text: "Dana nods." };
-    const result: ConsequenceResult = {
-      narrative: "Dana nods, and she smiles.",
-      actorPatches: [{ actorId: "dana", thoughts: "t" }],
-      objectPatches: [],
-      reasoning: "r",
-    };
-    const errors = validateConsequence(world, result, action, undefined);
-    expect(errors.errors.some((e) => e.code === "narrative.pronoun_mismatch")).toBe(true);
+    const errors = validateRenderProse(
+      world,
+      action,
+      { narrative: "Dana nods, and she smiles.", thoughts: "t", reasoning: "r" },
+      {
+        exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+        x: 4, y: 4, engineManipulation: null,
+      },
+    );
+    expect(errors.some((e) => e.code === "narrative.pronoun_mismatch")).toBe(true);
   });
 });
 
-describe("exp7 structural: consequence retry cap", () => {
-  it("defaults to 2 outer attempts", () => {
-    expect(defaultConfig.consequenceMaxAttempts).toBe(2);
+describe("exp7 structural: render retry cap", () => {
+  it("is a fixed 2 attempts (no config knob — the retry loop is gone)", async () => {
+    const { RENDER_MAX_ATTEMPTS } = await import("../../src/engine/turnOrchestrator.js");
+    expect(RENDER_MAX_ATTEMPTS).toBe(2);
   });
 
-  it("burns at most 2 consequence resolves on an always-invalid engine", async () => {
+  it("burns at most 2 render calls on an always-invalid engine", async () => {
     const logger = new Logger({ sessionId: "exp7-cap", writeToFile: false });
     const world = makeTinyWorld();
-    const bad: ConsequenceResult = {
-      narrative: "Nope.",
-      actorPatches: [{ actorId: "ghost", thoughts: "x" }],
-      objectPatches: [],
-      reasoning: "r",
-    };
+    const bad: ConsequenceResult = { narrative: "Liam waves.", reasoning: "r" };
     let calls = 0;
     const deps = makeTestDeps(logger, {
       consequenceEngine: {
@@ -259,16 +210,15 @@ describe("exp7 structural: consequence retry cap", () => {
         },
       } as never,
     });
-    await resolveWithValidation(world, { actorId: "n", text: "Wave." }, deps);
+    await resolveRender(world, { actorId: "n", text: "Wave." }, deps);
     expect(calls).toBe(2);
   });
 });
 
 describe("exp7 A4/A5: echo hardening in the consequence prompt", () => {
-  it("ECHO-BAN ships in both suffix modes", () => {
+  it("ECHO-BAN ships in the render suffix", () => {
     expect(ECHO_BAN_LINE).toContain("BAD");
-    expect(consequenceSuffix("short")).toContain("ECHO-BAN");
-    expect(consequenceSuffix("full")).toContain("ECHO-BAN");
+    expect(renderSuffix()).toContain("ECHO-BAN");
   });
 
   it("the preceding turn's narrative is excluded from the consequence history window", () => {
