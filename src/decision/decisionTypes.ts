@@ -74,73 +74,8 @@ export type ScoreAnswer = z.infer<typeof ScoreAnswerSchema>;
 export type LayaAnswer = z.infer<typeof LayaAnswerSchema>;
 
 // ---------------------------------------------------------------------------
-// Decision diagrams (static DAGs of questions)
+// (Decision diagrams and the cascade Intent type lived here until
+// PLAN_V2 Phase 6: the static diagrams, the intent cascade, and the
+// proposal/selection engines were deleted. Laya survives only as the
+// semantic parser — one batched decide over the action sentence.)
 // ---------------------------------------------------------------------------
-
-export const DiagramNodeSchema = z.object({
-  id: z.string().min(1),
-  type: z.enum(["choice", "noul", "score"]),
-  instructions: z.string().min(1).max(2000),
-  /** Required for choice; the option ids. */
-  options: z.array(z.string().min(1)).optional(),
-  /** Required for score; ordered level labels. */
-  levels: z.array(z.string().min(1)).optional(),
-});
-
-export const DiagramEdgeSchema = z.object({
-  from: z.string().min(1),
-  /** Winner key this edge fires on (choice option, "true"/"false" for noul,
-   *  rounded level index for score). Omitted = default fallthrough. */
-  whenWinner: z.string().optional(),
-  to: z.string().min(1),
-});
-
-export const DecisionDiagramSchema = z.object({
-  nodes: z.array(DiagramNodeSchema).min(1).max(8),
-  edges: z.array(DiagramEdgeSchema).max(24),
-  terminal: z.string().min(1),
-});
-
-export type DiagramNode = z.infer<typeof DiagramNodeSchema>;
-export type DiagramEdge = z.infer<typeof DiagramEdgeSchema>;
-export type DecisionDiagram = z.infer<typeof DecisionDiagramSchema>;
-
-// ---------------------------------------------------------------------------
-// Intent (output of the decision cascade)
-//
-// Phase 5: typed intents map directly onto engine executors with no
-// translation layer —
-//   move     (+ targetId) -> movementExecutor destination
-//   speak    (+ quote)    -> speechExecutor exactQuote
-//   interact (+ targetId) -> manipulationExecutor object target
-//   gesture / wait        -> prose-only, no executor
-// A "fully-typed" intent (kind + resolved targetId) is authoritative for
-// the executors: it generated the action text, so the executors use its
-// fields instead of re-parsing the text.
-// ---------------------------------------------------------------------------
-
-export const IntentSchema = z.object({
-  kind: z.enum(["speak", "move", "interact", "gesture", "wait"]),
-  targetId: z.string().optional(),
-  targetKind: z.enum(["actor", "object", "landmark", "none"]).optional(),
-  manner: z.string().optional(),
-  /** Phase 5: engine-dictated exact words for speak intents (feeds exactQuote). */
-  quote: z.string().optional(),
-});
-
-export type Intent = z.infer<typeof IntentSchema>;
-
-/**
- * Phase 5: true when the intent is fully typed — kind plus a resolved
- * target id. Only the cascade's target-resolution step produces these, so
- * executors may treat them as authoritative (no text re-parsing). Pure.
- */
-export function isFullyTypedIntent(
-  intent: Intent | undefined,
-): intent is Intent {
-  return (
-    intent !== undefined &&
-    intent.targetId !== undefined &&
-    intent.targetId.length > 0
-  );
-}

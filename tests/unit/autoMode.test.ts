@@ -20,9 +20,10 @@ describe("autonomous mode (forceAllNpc)", () => {
     });
     const next = await runTurn(world, deps);
     expect(prompted).toBe(false);
-    // NPC pipeline: proposal ran (not skipped) and the turn advanced.
+    // NPC pipeline: the intent call ran (not skipped) and the turn advanced.
     expect(logger.store.byEvent("proposal_skipped")).toHaveLength(0);
-    expect(logger.store.byEvent("proposal_started").length).toBeGreaterThanOrEqual(1);
+    expect(logger.store.byEvent("intent_started").length).toBeGreaterThanOrEqual(1);
+    expect(logger.store.byEvent("intent_completed").length).toBeGreaterThanOrEqual(1);
     expect(next.tick).toBe(world.tick + 1);
     expect(next.history.length).toBeGreaterThan(world.history.length);
   });

@@ -23,7 +23,7 @@ import { buildManipulationSnapshot } from "./objects.js";
  * contact, manipulation). Returns null when every channel executed as
  * attempted — no honest gap for the narrate input to carry.
  *
- * V2-only — the caller gates on readTurnLoopV2(); v1 turns never see
+ * The turn orchestrator applies this on every turn; there is no v1 anymore
  * this, so v1 outcomes stay byte-identical.
  */
 export function buildTurnClamp(

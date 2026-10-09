@@ -1,38 +1,29 @@
-// Pure config reading + thin factory shells for the Laya decision layer.
-// Nothing here touches src/engine, src/llm, or src/config.
+// Pure config reading + thin factory shells for the Laya layer.
+// PLAN_V2 Phase 6: the decision cascade (proposal/selection engines,
+// intent cascade, static diagrams, renderability screen) is deleted —
+// Laya survives only as the semantic parser (one batched decide over the
+// action sentence) plus the locomotion veto (a physics guard on planned
+// moves). Nothing here touches src/engine, src/llm, or src/config.
 
-import type { ProposalEngine, SelectionEngine } from "../intelligence/types.js";
-import { LayaProposalEngine } from "./layaProposalEngine.js";
-import { LayaSelectionEngine } from "./layaSelectionEngine.js";
 import { LayaSemanticJudge } from "./layaSemanticJudge.js";
 import { LayaClient } from "./layaClient.js";
 
-export type LayaMode = "off" | "static" | "dynamic";
+export type LayaMode = "off" | "on";
 
 export type LayaToggles = {
-  selection: boolean;
-  judge: boolean;
-  triage: boolean;
-  salience: boolean;
-  planner: boolean;
-  /** Exp-2-E (a): Laya ranks failed-attempt narratives for salvage order. */
-  salvageSelect: boolean;
-  /** Exp-2-E (b): Laya word-sense veto on deterministic moves=true. */
-  locomotion: boolean;
   /**
-   * Exp-3 item 6 (S2): Laya scores the chosen action's renderability
-   * (1–5) before consequence attempts burn on it; ≤2 triggers one
-   * re-selection. OFF by default (Phase 5 has not validated it).
+   * Exp-2-E (b): Laya word-sense veto on deterministic moves=true.
+   * A genuine physics guard — Laya only ever VETOES a planned move when
+   * it is confident the action needs no relocation; failure or low
+   * confidence keeps the deterministic verdict. Kept in Phase 6.
    */
-  renderability: boolean;
+  locomotion: boolean;
 };
 
 export type LayaConfig = {
   url: string;
   mode: LayaMode;
-  confidenceThreshold: number;
   timeoutMs: number;
-  maxOptions: number;
   toggles: LayaToggles;
 };
 
@@ -52,29 +43,20 @@ function parseNumber(raw: string | undefined, defaultValue: number): number {
 
 /**
  * Read Laya configuration from the environment (pure — pass a fake env in
- * tests). Per LAYA_PLAN.md §5: LAYA_URL, LAYA_MODE, LAYA_CONFIDENCE_THRESHOLD,
- * LAYA_TIMEOUT_MS, LAYA_MAX_OPTIONS, and per-phase toggles.
+ * tests). LAYA_MODE: "off" disables Laya entirely (the parser falls back
+ * to deterministic text parsing); anything else (including the legacy
+ * "static"/"dynamic" values) enables it. LAYA_URL, LAYA_TIMEOUT_MS, and
+ * LAYA_LOCOMOTION (the move veto, default on) complete the surface.
  */
 export function readLayaConfig(env: Record<string, string | undefined> = process.env): LayaConfig {
-  const modeRaw = (env["LAYA_MODE"] ?? "static").trim().toLowerCase();
-  const mode: LayaMode = modeRaw === "off" || modeRaw === "dynamic" ? modeRaw : "static";
+  const modeRaw = (env["LAYA_MODE"] ?? "on").trim().toLowerCase();
+  const mode: LayaMode = modeRaw === "off" ? "off" : "on";
   return {
     url: env["LAYA_URL"] ?? "http://127.0.0.1:8000",
     mode,
-    confidenceThreshold: parseNumber(env["LAYA_CONFIDENCE_THRESHOLD"], 0.55),
     timeoutMs: parseNumber(env["LAYA_TIMEOUT_MS"], 5000),
-    maxOptions: Math.floor(parseNumber(env["LAYA_MAX_OPTIONS"], 12)),
     toggles: {
-      selection: parseToggle(env["LAYA_SELECTION"], true),
-      judge: parseToggle(env["LAYA_JUDGE"], true),
-      triage: parseToggle(env["LAYA_TRIAGE"], true),
-      salience: parseToggle(env["LAYA_SALIENCE"], true),
-      planner: parseToggle(env["LAYA_PLANNER"], false),
-      // Exp-2-E additions: OFF by default (Phase 5 has not validated them).
-      salvageSelect: parseToggle(env["LAYA_SALVAGE_SELECT"], false),
-      locomotion: parseToggle(env["LAYA_LOCOMOTION"], false),
-      // Exp-3 item 6 (S2): OFF by default (Phase 5 has not validated it).
-      renderability: parseToggle(env["LAYA_RENDERABILITY"], false),
+      locomotion: parseToggle(env["LAYA_LOCOMOTION"], true),
     },
   };
 }
@@ -102,44 +84,11 @@ export async function isLayaAvailable(client: LayaClient): Promise<boolean> {
 
 export type LayaEngineDeps = {
   client: LayaClient;
-  confidenceThreshold?: number;
 };
-
-/** Thin shell: Laya selection engine with an injected chat fallback. */
-export function createLayaSelectionEngine(
-  deps: LayaEngineDeps,
-  config: LayaConfig,
-  fallback: SelectionEngine,
-): LayaSelectionEngine {
-  return new LayaSelectionEngine(
-    {
-      client: deps.client,
-      confidenceThreshold: deps.confidenceThreshold ?? config.confidenceThreshold,
-    },
-    fallback,
-  );
-}
-
-/** Phase 5: thin shell — Laya proposal engine with an injected fallback. */
-export function createLayaProposalEngine(
-  deps: LayaEngineDeps,
-  config: LayaConfig,
-  fallback: ProposalEngine,
-): LayaProposalEngine {
-  return new LayaProposalEngine(
-    {
-      client: deps.client,
-      confidenceThreshold: deps.confidenceThreshold ?? config.confidenceThreshold,
-    },
-    fallback,
-  );
-}
 
 /** Thin shell: Laya semantic judge (one batched decide per action). */
 export function createLayaSemanticJudge(
   deps: LayaEngineDeps,
-  _config: LayaConfig,
 ): LayaSemanticJudge {
-  void _config;
   return new LayaSemanticJudge({ client: deps.client });
 }

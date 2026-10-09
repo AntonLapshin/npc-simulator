@@ -10,7 +10,6 @@
 
 import type { Action, World } from "../types.js";
 import type { ActionSemantics } from "../types.js";
-import type { Intent } from "../decision/decisionTypes.js";
 import {
   extractExactQuote,
   quoteContained,
@@ -33,17 +32,15 @@ export { extractExactQuote, quoteContained, reinsertQuote };
  */
 export function planSpeech(
   action: Action,
-  intent?: Intent,
   /**
    * PLAN_V2 Phase 2 (Laya as parser): pre-parsed ActionSemantics from the
    * parse step. The judge extracts quotes deterministically from the same
    * sentence (parseActionQuotes) — when provided, reuse its extraction
    * instead of re-parsing the text. When absent the text parse runs
-   * exactly as before (v1, and the fail-open fallback).
+   * (the fail-open fallback when Laya is down/unavailable).
    */
   semantics?: Pick<ActionSemantics, "quotedSpeech">,
 ): string | null {
-  if (intent?.quote !== undefined) return intent.quote;
   if (semantics !== undefined) return semantics.quotedSpeech[0] ?? null;
   return extractExactQuote(action.text);
 }
