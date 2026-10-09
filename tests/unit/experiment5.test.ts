@@ -312,9 +312,13 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
   });
 
   it("end-to-end: a salvaged user turn logs narrative history", async () => {
+    // Phase 2: the exact (first) quote is repaired in-loop by the
+    // deterministic backstop, so a turn that reaches salvage drops the
+    // action's SECOND quote — a speech nit (multi-quote choreography is a
+    // non-goal) that salvage tier 1 downgrades to a warning.
     const logger = new Logger({ sessionId: "exp5-honest", writeToFile: false });
     const quoteDrop: ConsequenceResult = {
-      narrative: "U walks toward N.",
+      narrative: 'U walks toward N. U says "Where is my desk?"',
       actorPatches: [{ actorId: "u", x: 2, y: 2, thoughts: "Going." }],
       objectPatches: [],
       reasoning: "r",
@@ -324,20 +328,19 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
     const world = makeTinyWorld();
-    deps.getUserAction = async () => 'Walk to N and ask "Where is my desk?"';
+    deps.getUserAction = async () => 'Walk to N and ask "Where is my desk?" then add "thanks a lot!"';
     const next = await runTurn(world, deps);
     expect(logger.store.byEvent("partial_applied")).toHaveLength(1);
-    // Narrative-based history: the dropped question is reinserted
-    // deterministically (Exp-3 item 3) — the question is preserved in the
-    // narrative AND the engine intervention is marked honestly.
+    // Narrative-based history: the exact quote is preserved verbatim in
+    // the narrative AND the engine intervention is marked honestly.
     // Exp-7 item A9: the history note is plain language; the validator
     // code stays on the log record only.
     expect(next.history.at(-1)!.text).toMatch(/^U: U walks toward N\. U says "Where is my desk\?" \(partial\)/);
-    expect(next.history.at(-1)!.text).toContain("partial — dropped dialogue was restored");
+    expect(next.history.at(-1)!.text).toContain("partial — some dialogue was improvised");
     expect(next.history.at(-1)!.text).not.toContain("quote_reinserted");
     const partialLog = logger.store.byEvent("partial_applied");
     expect(partialLog).toHaveLength(1);
-    expect(JSON.stringify(partialLog[0])).toContain("salvage.quote_reinserted");
+    expect(JSON.stringify(partialLog[0])).toContain("speech.dropped_words");
     // Phase 1: the scripted (2,2) is ignored — the engine computes the step.
     const engine = computeMovementOutcome(makeTinyWorld(), "u", {}, null)!;
     expect(next.actors.find((a) => a.id === "u")!.x).toBe(engine.x);

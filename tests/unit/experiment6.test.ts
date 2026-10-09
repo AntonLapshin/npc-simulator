@@ -405,7 +405,9 @@ describe("exp6-6 throughput engineering", () => {
     });
     const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
     expect(out.narrative).toContain("Hello there");
-    expect(engineCalls).toBe(2); // one retry happened…
+    // Phase 2: the first attempt's dropped quote is repaired by the
+    // deterministic backstop — no retry is burned for it.
+    expect(engineCalls).toBe(1);
     // Q2: both consequences declared effects, so the judge never ran.
     expect(judgeCalls).toBe(0);
   });
@@ -441,7 +443,9 @@ describe("exp6-6 throughput engineering", () => {
     });
     const out = await resolveWithValidation(world, { actorId: "u", text: 'Say "Hello there".' }, deps);
     expect(out.narrative).toContain("Hello there");
-    expect(engineCalls).toBe(2); // one retry happened…
+    // Phase 2: the first attempt's dropped quote is repaired by the
+    // deterministic backstop — no retry is burned for it.
+    expect(engineCalls).toBe(1);
     expect(judgeCalls).toBe(1); // …but the judge ran only once per turn
   });
 
