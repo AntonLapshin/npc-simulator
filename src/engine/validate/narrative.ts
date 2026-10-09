@@ -5,6 +5,7 @@ import type { Action, ActionSemantics, EngineConfig, ValidationError, World } fr
 import { defaultConfig } from "../../config.js";
 import { getAudibleActors, getVisibleActors } from "../perceptionHelpers.js";
 import { maskResumedActivity, quotedSegments } from "./speech.js";
+import { isActorMentioned } from "../deterministicSemantics.js";
 import { distanceToRect, isNonLocomotionSense } from "./movement.js";
 import { OBJECT_INTERACT_RADIUS } from "./objects.js";
 
@@ -177,6 +178,14 @@ export function validateStateCoherence(
           message: `actor ${patch.actorId}: moved ${Math.hypot(patch.x! - actor.x, patch.y! - actor.y).toFixed(1)} cells but state still reads "${state.slice(0, 80)}": update 'state' (and 'pose') to match — a sitting state cannot walk across the room`,
         });
       }
+    }
+    // Exp-7 item A6: the acting actor's state string is self-descriptive —
+    // a wrong-set pronoun there is a misgendering (exp-7 tick 8: Dana's
+    // state applied as "sitting at her desk and working on a laptop",
+    // plagiarized from Tanya's state). Checked on the acting actor only;
+    // observer state patches are rejected by turn discipline anyway.
+    if (patch.actorId === action.actorId && typeof patch.state === "string") {
+      errors.push(...validateStatePronouns(world, patch.actorId, patch.state));
     }
   }
   return errors;
@@ -1055,6 +1064,119 @@ export function validateNarrativeVoice(
     code: `narrative.${v.code}`,
     message: v.detail,
   }));
+}
+
+const MASCULINE_PRONOUNS = ["he", "him", "his", "himself"];
+const FEMININE_PRONOUNS = ["she", "her", "hers", "herself"];
+/** Subject-case pronouns — the unambiguous self-reference slot. */
+const MASCULINE_SUBJECT = ["he"];
+const FEMININE_SUBJECT = ["she"];
+
+/**
+ * Exp-7 item A6: wrong-set pronouns for an explicit `pronouns` tag.
+ * Returns the first offending pronoun, or undefined.
+ *
+ * `subjectOnly`: check only subject-case pronouns (she/he). Object and
+ * possessive pronouns (her/him/his) are genuinely ambiguous in narrative
+ * prose — "greets her" after "Tanya's desk" is Tanya, not a misgendering —
+ * so narrative prose only flags the unambiguous subject slot ("she
+ * says", "as she walks"). State strings are self-descriptive ("sitting
+ * at HER desk" = the actor's own desk), so they check the full set.
+ *
+ * Singular "they" is never flagged for he/him or she/her actors (plural
+ * "they" for a group is legitimate); they/them actors check both binary
+ * sets.
+ */
+function findWrongPronoun(
+  text: string,
+  pronouns: string,
+  subjectOnly: boolean,
+): string | undefined {
+  const wrongFull = pronouns.startsWith("he")
+    ? FEMININE_PRONOUNS
+    : pronouns.startsWith("she")
+      ? MASCULINE_PRONOUNS
+      : [...MASCULINE_PRONOUNS, ...FEMININE_PRONOUNS];
+  const wrongSubject = pronouns.startsWith("he")
+    ? FEMININE_SUBJECT
+    : pronouns.startsWith("she")
+      ? MASCULINE_SUBJECT
+      : [...MASCULINE_SUBJECT, ...FEMININE_SUBJECT];
+  const set = subjectOnly ? wrongSubject : wrongFull;
+  return set.find((p) => new RegExp(`\\b${p}\\b`, "i").test(text));
+}
+
+/**
+ * Exp-7 item A6: third-person pronoun check for narrative prose
+ * (exp-7 B5: Dana, he/him, rendered "as she says"). Opt-in: only fires
+ * when the scenario sets explicit `actor.pronouns`. Quoted speech is
+ * stripped first (a quote may mention anyone). Only the subject slot is
+ * checked — "greets her" / "near him" refer to the other party, not a
+ * misgendering — and clauses naming another actor are skipped entirely.
+ * Requires the actor's name in the prose (house style). A hit costs a
+ * retry with a targeted hint, never a corrupt world state.
+ * Pure.
+ */
+export function validateNarrativePronouns(
+  world: World,
+  narrative: string,
+  action: Action,
+): ValidationError[] {
+  const actor = world.actors.find((a) => a.id === action.actorId);
+  const pronouns = actor?.pronouns?.trim().toLowerCase();
+  if (!actor || !pronouns) return [];
+  const unquoted = stripQuotedForVoice(narrative);
+  const nameHit = new RegExp(
+    `\\b${actor.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+    "i",
+  ).test(unquoted);
+  if (!nameHit) return [];
+  const others = world.actors.filter((a) => a.id !== actor.id);
+  // Clause-level: a clause naming another actor may use that actor's
+  // pronouns legitimately — only check clauses where no other actor is
+  // mentioned.
+  for (const clause of unquoted.split(/[.!?;,]+/)) {
+    if (others.some((o) => isActorMentioned(world, clause, o.id))) continue;
+    const hit = findWrongPronoun(clause, pronouns, true);
+    if (hit !== undefined) {
+      return [
+        {
+          code: "narrative.pronoun_mismatch",
+          message:
+            `narrative uses "${hit}" for ${actor.name}, whose pronouns are ${actor.pronouns} — ` +
+            `keep every pronoun for ${actor.name} in the ${actor.pronouns} set (prefer the name over pronouns when another actor is involved)`,
+        },
+      ];
+    }
+  }
+  return [];
+}
+
+/**
+ * Exp-7 item A6: pronoun check for the acting actor's `state` patch.
+ * State strings are self-descriptive ("sitting at HER desk" describes the
+ * patched actor's own status), so the full pronoun set is checked —
+ * exp-7 tick 8 applied Dana's state as "sitting at her desk and working
+ * on a laptop", plagiarized from Tanya's state string. Pure.
+ */
+export function validateStatePronouns(
+  world: World,
+  actorId: string,
+  state: string,
+): ValidationError[] {
+  const actor = world.actors.find((a) => a.id === actorId);
+  const pronouns = actor?.pronouns?.trim().toLowerCase();
+  if (!actor || !pronouns) return [];
+  const hit = findWrongPronoun(state, pronouns, false);
+  if (hit === undefined) return [];
+  return [
+    {
+      code: "state.pronoun_mismatch",
+      message:
+        `state patch uses "${hit}" for ${actor.name}, whose pronouns are ${actor.pronouns} — ` +
+        `the state string describes ${actor.name}; keep its pronouns in the ${actor.pronouns} set`,
+    },
+  ];
 }
 
 /**

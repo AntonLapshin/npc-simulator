@@ -66,6 +66,40 @@ script started are torn down on Ctrl-C. Env equivalents: `ENGINE_PORT` /
   [`src/ui/graphic/README.md`](src/ui/graphic/README.md)).
 - Milestone 5 (scenario editor): not started.
 
+## Experiment economics (read before a long run)
+
+Measured on a 16 GB VRAM machine (RTX 5070 Ti), local `qwen3:14b`
+(`LLM_THINK=0`), autonomous `--auto` office runs:
+
+| Run | GPU offload | Mean turn | LLM calls/turn | Clean turns |
+|---|---|---|---|---|
+| exp-7 (2026-10-08) | 18% (laya-serve squatting on VRAM) | **6.1 min** | 7.8 | 1/12 |
+| exp-7 projected, 100% offload | 100% | ~2–3 min | 7.8 | 1/12 |
+| exp-7 fixes (this branch), 100% offload | 100% | **~1 min** (est.) | ~3 | — |
+
+The turn cost is ~100% LLM-bound and dominated by **consequence retries**
+(exp-7: 5.3 consequence terminals/turn; retry feedback does not steer the
+model — attempt 1 is the best attempt ~72% of the time). The single biggest
+levers, in order:
+
+1. **Full GPU offload.** `ollama ps` must show 100% GPU. A second model on
+   the card (exp-7: `laya-serve` holding 5.8 GB) drops a 14B model to
+   ~20% GPU and triples every call. `npm run diagnose:ai` now flags VRAM
+   squatters (`vram contention` check); serve scripts pass `--device`
+   explicitly when the binary supports it.
+2. **Few calls, not faster calls.** Outer consequence attempts are capped
+   at 2 (`EngineConfig.consequenceMaxAttempts`); deterministic in-loop
+   repairs (movement repair, stationary downgrade, prop stub) already run
+   on attempt 1, salvage handles the rest.
+3. **Iterate on the 3B abliterated model, reserve qwen3:14b for finals.**
+   Mechanics (movement, salvage, bans) are model-independent and
+   observable in seconds per turn on the small model; the 14B only changes
+   prose quality. A 20-turn 14B run still costs ~20–60 min of GPU time.
+
+`--auto` prints per-turn timing and a running ETA. Rule of thumb: if the
+first 3 turns average >3 min on a 14B local model, stop and run
+`npm run diagnose:ai` — something is offloading to CPU.
+
 ## Setup
 
 ```bash

@@ -14,6 +14,7 @@
 
 import type { LogEntry } from "./logTypes.js";
 import { paintActor, paintError } from "./colors.js";
+import { sanitizeDisplayText } from "../util/sanitize.js";
 import type {
   Action,
   ActorPatch,
@@ -64,12 +65,17 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
 /**
  * World.history entries are `{ text, perceivers }` objects in the new shape;
  * tolerate legacy plain-string entries defensively (old saves, mock adapters).
+ *
+ * Exp-7 item A10: the returned text is sanitized for display — the
+ * NOT_DONE_SENTINEL (U+10FFFF) and control codes are stripped so "(not
+ * done)" lines never render garbage (T3). Stored entries are untouched
+ * (F22 machine detection reads the stored text).
  */
 export function historyEntryText(entry: unknown): string | undefined {
-  if (typeof entry === "string") return entry;
+  if (typeof entry === "string") return sanitizeDisplayText(entry);
   const rec = asRecord(entry);
   const text = rec?.["text"];
-  return typeof text === "string" ? text : undefined;
+  return typeof text === "string" ? sanitizeDisplayText(text) : undefined;
 }
 
 function findEntry(entries: LogEntry[], module: string, event: string): LogEntry | undefined {

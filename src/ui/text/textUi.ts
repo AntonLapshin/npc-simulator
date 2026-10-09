@@ -26,7 +26,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { readFile } from "node:fs/promises";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, basename, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Action, Actor, World } from "../../types.js";
 import { loadScenario } from "../../engine/scenarioLoader.js";
@@ -57,6 +57,17 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../../..");
 const DEFAULT_SCENARIO = join(ROOT, "scenarios/office.json");
 
+/**
+ * Exp-7 item A12: filename stem of a scenario path ("office-anton" for
+ * scenarios/office-anton.json) — used for save filenames so same-id
+ * scenarios don't collide.
+ */
+export function scenarioStemOf(path: string): string {
+  const base = basename(path);
+  const ext = extname(base);
+  return (ext.length > 0 ? base.slice(0, -ext.length) : base) || "scenario";
+}
+
 export type TextUiOptions = {
   scenarioPath?: string;
   useMock?: boolean;
@@ -86,6 +97,8 @@ export class TextSession {
   lastSuggestions: string[] = [];
   lastNarrative = "";
   lastAction: Action | null = null;
+  /** Exp-7 item A12: scenario file stem for save filenames (set on load). */
+  scenarioStem: string | null = null;
 
   constructor(logger: Logger, deps: EngineDependencies, debug = false, usingMock = false) {
     this.logger = logger;
@@ -155,8 +168,10 @@ function buildDeps(
   useMock: boolean,
   autosave: boolean,
   llmOpts: Pick<TextUiOptions, "provider" | "model" | "baseUrl" | "auto"> = {},
+  saveNamePrefix?: string,
 ): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
-  const config = resolveConfig({ autosaveEnabled: autosave });
+  // Exp-7 item A12: the scenario file stem seeds save filenames.
+  const config = resolveConfig({ autosaveEnabled: autosave, saveNamePrefix });
   // Autonomous mode: no user turns — every actor runs the NPC pipeline.
   const forceAllNpc = llmOpts.auto === true;
   if (useMock) {
@@ -212,6 +227,16 @@ async function loadScenarioFile(path: string, session: TextSession, auto = false
   const raw = JSON.parse(await readFile(path, "utf-8"));
   const world = loadScenario(raw, session.logger);
   session.world = world;
+  // Exp-7 item A12: the scenario file stem drives save filenames from
+  // here on (also refreshes the engine config for autosaves mid-session
+  // after `start <other-scenario>`).
+  session.scenarioStem = scenarioStemOf(path);
+  if (session.deps.config !== undefined) {
+    session.deps = {
+      ...session.deps,
+      config: { ...session.deps.config, saveNamePrefix: session.scenarioStem },
+    };
+  }
   session.lastSuggestions = [];
   session.lastNarrative = world.narrative;
   session.lastAction = null;
@@ -219,6 +244,15 @@ async function loadScenarioFile(path: string, session: TextSession, auto = false
   // omit it (see TextSession.showScene).
   const mode = auto ? "autonomous mode: all characters are NPCs, no user" : `you play ${world.userActorId}`;
   return [`Loaded scenario: ${world.title} (${mode}).`, session.showScene(true)].join("\n");
+}
+
+/**
+ * Exp-7 item A12: save path for manual saves — scenario file stem when
+ * known, world.id otherwise.
+ */
+export function sessionSavePath(session: TextSession, tick: number): string {
+  const stem = session.scenarioStem ?? session.world?.id ?? "world";
+  return defaultSavePath(resolveConfig().saveDir, stem, tick);
 }
 
 /**
@@ -442,19 +476,33 @@ async function runAutoSession(session: TextSession, limit: number): Promise<numb
     throw new Error("auto mode: unexpected input prompt");
   };
   let ran = 0;
+  // Exp-7 item A13: per-turn timing + ETA. Autonomous runs cost minutes
+  // per turn on local models — print the running average and a remaining
+  // estimate so the operator can judge whether to keep waiting.
+  let totalTurnMs = 0;
+  const fmtDur = (ms: number): string => {
+    const s = Math.round(ms / 1000);
+    return s >= 60 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${s}s`;
+  };
   for (let i = 0; i < limit; i++) {
     if (!session.world) break;
     const actor = getCurrentActor(session.world);
     const tick = session.world.tick;
     let text: string;
+    const turnStart = Date.now();
     try {
       text = await runSingleTurn(session, neverAsk, undefined, { includeScene: false, auto: true });
     } catch (err) {
       console.log(`Turn ${i + 1} crashed (${err instanceof Error ? err.message : String(err)}) — stopping early.`);
       break;
     }
+    const turnMs = Date.now() - turnStart;
+    totalTurnMs += turnMs;
     ran++;
-    console.log(`── turn ${i + 1}/${limit} · tick ${tick} · ${actor.name} (${actor.id}) ──`);
+    const avgMs = totalTurnMs / ran;
+    const remaining = limit - ran;
+    const eta = remaining > 0 ? ` · ETA ${fmtDur(avgMs * remaining)} for ${remaining} remaining` : "";
+    console.log(`── turn ${i + 1}/${limit} · tick ${tick} · ${actor.name} (${actor.id}) · took ${fmtDur(turnMs)} (avg ${fmtDur(avgMs)}/turn${eta}) ──`);
     console.log(text);
     console.log("");
     if (text.startsWith("Turn failed:")) {
@@ -467,7 +515,7 @@ async function runAutoSession(session: TextSession, limit: number): Promise<numb
     return 1;
   }
   console.log(session.showScene());
-  const savePath = defaultSavePath(resolveConfig().saveDir, session.world.id, session.world.tick);
+  const savePath = sessionSavePath(session, session.world.tick);
   try {
     await saveWorld(savePath, session.world, session.logger);
     console.log(`\nDone: ran ${ran}/${limit} turn(s), final tick ${session.world.tick}. Saved to ${savePath}.`);
@@ -614,7 +662,7 @@ export async function handleLine(
     }
     case "save": {
       if (!session.world) return { output: "No scenario loaded. Use: start [path]", quit: false };
-      const path = parsed.path ?? defaultSavePath(resolveConfig().saveDir, session.world.id, session.world.tick);
+      const path = parsed.path ?? sessionSavePath(session, session.world.tick);
       try {
         await saveWorld(path, session.world, session.logger);
         return { output: `Saved to ${path}.`, quit: false };
@@ -712,7 +760,14 @@ async function main(): Promise<void> {
     logDir: resolveConfig().logDir,
     writeToFile: true,
   });
-  const { deps, usingMock, llmLabel } = buildDeps(logger, opts.useMock ?? false, opts.autosave ?? true, opts);
+  // Exp-7 item A12: seed save filenames with the scenario file stem.
+  const { deps, usingMock, llmLabel } = buildDeps(
+    logger,
+    opts.useMock ?? false,
+    opts.autosave ?? true,
+    opts,
+    scenarioStemOf(opts.scenarioPath ?? DEFAULT_SCENARIO),
+  );
   const session = new TextSession(logger, deps, opts.debug ?? false, usingMock);
 
   console.log(

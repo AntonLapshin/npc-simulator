@@ -107,6 +107,20 @@ export function stubBanLine(name: string = "Anton"): string {
     "A greeting with no quoted words and no physical detail fails validation."
   );
 }
+/**
+ * Exp-7 item A4/A5: echo ban with the concrete exp-7 failure as the
+ * negative example. Retry feedback demonstrably does not steer the model
+ * away from echoing (B2: tick-0's greeting recurred verbatim as Tanya's
+ * and Dana's narratives, up to 3 identical retries in one turn) — so the
+ * ban is stated up front, once, in both suffix modes.
+ */
+export const ECHO_BAN_LINE =
+  "ECHO-BAN: never lift a sentence from an earlier turn into this narrative — each actor speaks their own " +
+  "words, grounded in THIS turn's action text. " +
+  'BAD (real failure): reusing a previous turn\'s line "Morning, everyone — first day, be gentle." verbatim ' +
+  "as another actor's narrative. GOOD: fresh wording every turn; when the action has speech, quote only " +
+  "the action's own quoted words character-for-character.";
+
 export const STUB_BAN_LINE = stubBanLine();
 
 function movementExample(a: { id: string; name: string }, b: { id: string; name: string }): string {
@@ -217,6 +231,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
       // Roster-parameterized so non-Anton rosters never see an
       // Anton-shaped example (exp-2 item 1).
       stubBanLine(exA?.name),
+      // Exp-7 items A4/A5: echo ban (see ECHO_BAN_LINE).
+      ECHO_BAN_LINE,
       "PATCH MINIMALISM: patch the acting actor plus EVERY perceiving observer (fresh 'thoughts' each, especially addressees); objectPatches only for observably changed objects. Keep strings short.",
       // Exp-6 item 8: never name the pipeline in prose.
       "PIPELINE BAN: never write the words proposal, selection, consequence, semantic, actor, or patch in the narrative or reasoning.",
@@ -319,6 +335,8 @@ export function consequenceSuffix(mode: "short" | "full" = "full", rosterIds: st
     "Never invent new quoted dialogue that is not in the action text.",
     // Exp-6 item 1 (M1): the greeting-stub attractor.
     stubBanLine(exA?.name),
+    // Exp-7 items A4/A5: echo ban (see ECHO_BAN_LINE).
+    ECHO_BAN_LINE,
     "Do NOT describe any other actor perceiving, hearing, speaking, moving,",
     "glancing, looking up, or reacting in any way — even passively. You may name",
     "another actor only as a stationary spatial landmark for the acting actor's own",

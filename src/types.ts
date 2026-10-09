@@ -62,6 +62,13 @@ export type Actor = {
   pose?: ActorPose;
   prop?: ActorProp;
   look?: ActorLook;
+  /**
+   * Exp-7 item A6: third-person pronouns for narrative prose
+   * ("he/him", "she/her", "they/them"). Optional for backward
+   * compatibility; when present, prompts name them and the validator
+   * rejects prose that flips them.
+   */
+  pronouns?: string;
 };
 
 export type ScenarioVocabulary = {
@@ -276,6 +283,25 @@ export type EngineConfig = {
   maxHistoryEntries: number;
   defaultPerceptionRadius: number;
   maxRetries: number;
+  /**
+   * Exp-7: cap on outer consequence attempts per turn (validation-driven
+   * retries in resolveWithValidation). Default 2, down from the
+   * maxRetries+1=4 the loop previously used. Data-grounded: exp-3 showed
+   * attempt 1 is the best attempt in 72% of turns and RULE-C aborts
+   * non-improving tails; exp-7 showed retry feedback does not steer
+   * qwen3:14b (B2 echo persisted through 3 identical retries) while each
+   * retry costs 60-120 s. Deterministic in-loop repairs (movement repair,
+   * stationary downgrade, prop stub) already run on attempt 1; salvage
+   * handles the rest. Set higher only with evidence retries help.
+   */
+  consequenceMaxAttempts?: number;
+  /**
+   * Exp-7 item A12: filename stem for saves. Defaults to world.id — UIs
+   * that load scenarios from files set this to the scenario file's stem
+   * (e.g. "office-anton") so `office.json` and `office-anton.json` runs
+   * don't collide as `office_tickN.json`.
+   */
+  saveNamePrefix?: string;
   logDir: string;
   saveDir: string;
   autosaveEnabled: boolean;

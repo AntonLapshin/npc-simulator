@@ -257,7 +257,8 @@ describe("exp1-8/9/10 anchors and nudges", () => {
   it("identity anchor states role and excludes others", () => {
     const world = makeTinyWorld();
     const anchor = buildIdentityAnchor(world, "n");
-    expect(anchor).toContain("N (n)");
+    // Exp-7 item A6: the anchor names the actor's pronouns up front.
+    expect(anchor).toContain("N (n, they/them)");
     expect(anchor).toContain("You are NOT");
     expect(anchor).toContain("U (u)");
   });

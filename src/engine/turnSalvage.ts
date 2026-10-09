@@ -104,13 +104,41 @@ function withHonestNote(out: { salvaged: ConsequenceResult; warnings: Validation
   salvaged: ConsequenceResult;
   warnings: ValidationError[];
 } {
-  honestHistoryNotes.set(
-    out.salvaged,
-    out.warnings.length > 0
-      ? `partial: ${out.warnings.map((w) => `[${w.code}] ${w.message}`).join(" | ").slice(0, 240)}`
-      : "partial",
-  );
+  // Exp-7 item A9: history entries are user-facing AND re-ingested into
+  // prompts — validator jargon ([speech.invented_dialogue] etc.) must not
+  // leak into either. The note is plain language; the full [code] message
+  // list stays on the `partial_applied` log record only.
+  honestHistoryNotes.set(out.salvaged, plainLanguageNote(out.warnings));
   return out;
+}
+
+/**
+ * Exp-7 item A9: map validator error codes to a plain-language caveat for
+ * history entries. Codes stay in the log records; humans (and future
+ * prompts) get this.
+ */
+export function plainLanguageNote(warnings: ValidationError[]): string {
+  // Exact codes with a friendlier phrasing than their prefix bucket.
+  const byCode: Record<string, string> = {
+    "salvage.quote_reinserted": "dropped dialogue was restored",
+  };
+  const byPrefix: Array<[string, string]> = [
+    ["speech.", "some dialogue was improvised"],
+    ["movement.", "the movement didn't fully happen"],
+    ["narrative.", "the wording was adjusted"],
+    ["object_grounding.", "an object interaction didn't fully happen"],
+    ["object.", "an object interaction didn't fully happen"],
+    ["actor.", "a character detail was corrected"],
+    ["action.", "part of the action didn't fully happen"],
+  ];
+  const phrases: string[] = [];
+  for (const w of warnings) {
+    const exact = byCode[w.code];
+    const hit = exact ?? byPrefix.find(([prefix]) => w.code.startsWith(prefix))?.[1];
+    const phrase = hit ?? "part of the turn was adjusted";
+    if (!phrases.includes(phrase)) phrases.push(phrase);
+  }
+  return phrases.length > 0 ? `partial — ${phrases.join("; ")}` : "partial";
 }
 /**
  * Deterministic movement repair for the salvage path (Phase 4): fill in (or

@@ -322,8 +322,14 @@ describe("exp5-2 salvaged-history honesty (ticks 3/15)", () => {
     // Narrative-based history: the dropped question is reinserted
     // deterministically (Exp-3 item 3) — the question is preserved in the
     // narrative AND the engine intervention is marked honestly.
+    // Exp-7 item A9: the history note is plain language; the validator
+    // code stays on the log record only.
     expect(next.history.at(-1)!.text).toMatch(/^U: U walks toward N\. U says "Where is my desk\?" \(partial\)/);
-    expect(next.history.at(-1)!.text).toContain("quote_reinserted");
+    expect(next.history.at(-1)!.text).toContain("partial — dropped dialogue was restored");
+    expect(next.history.at(-1)!.text).not.toContain("quote_reinserted");
+    const partialLog = logger.store.byEvent("partial_applied");
+    expect(partialLog).toHaveLength(1);
+    expect(JSON.stringify(partialLog[0])).toContain("salvage.quote_reinserted");
     expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
     // …and because the question is kept, it stays open for N.
     expect(getOpenQuestions(next, "n").length).toBe(1);

@@ -670,7 +670,9 @@ describe("C10 best-attempt salvage and early abort", () => {
     ]);
     const deps = makeTestDeps(logger, {
       consequenceEngine: engine,
-      config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 5 },
+      // Exp-7: the default outer cap is 2 — this RULE-C test needs the
+      // headroom it was written for, so raise it explicitly.
+      config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 5, consequenceMaxAttempts: 6 },
     });
     const action: Action = { actorId: "n", text: "Walk toward U and greet everyone." };
     const salvaged = await resolveWithValidation(makeTinyWorld(), action, deps);

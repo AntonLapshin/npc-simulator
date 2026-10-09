@@ -26,6 +26,7 @@
     "diagnose:ui": "tsx scripts/diagnose-ui.ts",
     "diagnose:ai": "tsx scripts/diagnose-ai.ts",
     "diagnose:ai:live": "tsx scripts/diagnose-ai.ts --live",
+    "probe:think": "tsx scripts/probe-think.ts",
     "eval:run-quality": "tsx scripts/eval-run-quality.ts",
     "clean:logs": "rm -rf logs && mkdir logs",
     "clean:saves": "rm -rf saves && mkdir saves",
