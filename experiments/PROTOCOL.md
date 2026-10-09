@@ -43,3 +43,30 @@ would have shown.
 - Typical calls/turn: **1–2** (cascade + 1 render), 3–4 on the
   LLM-decision fallback path. Anything above the budget is a bug or a
   phase-gate failure, not background noise.
+
+## Stage 3 re-run checklist (cascade-vs-LLM --compare)
+
+Stage 3 (2026-10-09) returned NO DECISION: the cascade leg burned MORE
+LLM decision calls than the LLM leg (23 vs 19) at quality parity, with
+0/10 turns converting on the cascade path. Do not re-run until C1 shows
+a converting smoke. When re-running:
+
+- [ ] **Match the decision toggles on both legs.** The code default is
+      cascade-on (`readLayaRuntimeConfig`: `LAYA_MODE=static`,
+      `LAYA_SELECTION=1`, `LAYA_LOCOMOTION=1`, `LAYA_RENDERABILITY=1`),
+      but a local `.env` may pin `LAYA_MODE=off` and every `LAYA_*`
+      toggle to 0 (the `.env` loader fills only unset vars). Set the
+      three decision toggles explicitly on the cascade leg; the LLM leg
+      is `LAYA_MODE=off` alone.
+- [ ] **Attribute the renderability screen.** It is cascade-stack-only
+      (needs `turnDeps.laya`), so its re-picks inflate the cascade leg's
+      selection count by construction. Either note it as a stacked cost
+      or scope the comparison to proposal+selection with the screen off
+      on both legs — but say which, in the report.
+- [ ] **Read delegation from `cascade_delegated`, not inference.** Every
+      fallback delegation now logs module=`laya` event=`cascade_delegated`
+      with the cause; the per-turn P/S columns count delegated provider
+      calls. A re-run report that hand-waves the fallback causes is
+      incomplete.
+- [ ] **The gate is still 3 consecutive live wins** (`LLM_DECISION_FALLBACK=1`
+      stays until then). One ambiguous re-run → re-scope, not Stage 4.

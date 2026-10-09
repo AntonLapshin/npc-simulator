@@ -69,6 +69,34 @@ function assemble(sections: string[]): string {
   );
 }
 
+/**
+ * Stage 3 C1: a history entry carries spoken dialogue when it embeds a
+ * multi-word quoted span. Double quotes are unambiguous; single quotes
+ * only count after a says-verb (bare apostrophes pair up across
+ * contractions — "doesn't … Tanya's" — and must never count as speech).
+ * The space requirement keeps single-word scare-quotes out.
+ */
+export function historyEntryHasSpeech(text: string): boolean {
+  return /"[^"]*\s[^"]*"|\bsays?,?\s*'[^']*\s[^']*'/.test(text);
+}
+
+/**
+ * Stage 3 C1: deterministic conversation-context hint for the intent
+ * cascade. When at least 2 of the last 3 history entries are dialogue,
+ * the actor most likely speaks next — the static cascade misclassified
+ * 9/10 turns of a dialogue-heavy office scene as interact/object, so the
+ * state now says the quiet part out loud. Pure and unit-tested; the live
+ * Laya model still makes the final call.
+ */
+export function conversationHint(world: World): string {
+  const recent = world.history.slice(-3);
+  if (recent.length < 2) return "";
+  const spoken = recent.filter((e) => historyEntryHasSpeech(e.text)).length;
+  return spoken >= 2
+    ? "Conversation context: the last few events are dialogue — the actor most likely speaks next unless they need an object or need to move."
+    : "";
+}
+
 /** Slim state for the intent cascade: who the actor is + what just happened. */
 export function buildIntentState(world: World, actorId: string): string {
   const actor = findActor(world, actorId);
@@ -77,6 +105,7 @@ export function buildIntentState(world: World, actorId: string): string {
     `You are ${actor.name}.`,
     personaBlock(actor, 500),
     recentEventsBlock(world, 600, 3),
+    conversationHint(world),
     rosterBlock(world, actorId, 300),
     landmarksBlock(world, 200),
   ]);
