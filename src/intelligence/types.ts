@@ -7,6 +7,7 @@ import type {
   World,
 } from "../types.js";
 import type { MovementOutcome } from "../engine/movementExecutor.js";
+import type { ManipulationOutcome } from "../engine/manipulationExecutor.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -33,6 +34,14 @@ export type ConsequenceResolveOpts = {
    * (older callers).
    */
   exactQuote?: string | null;
+  /**
+   * Phase 3: engine-executed manipulation for this turn (computed by the
+   * turn orchestrator before the render call). Engines surface it to the
+   * model as facts to narrate; the model never emits objectPatches or
+   * prop patches. Null = no manipulation executed; undefined = unknown
+   * (older callers).
+   */
+  engineManipulation?: ManipulationOutcome | null;
 };
 
 export interface ConsequenceEngine {
@@ -49,6 +58,9 @@ export interface ConsequenceEngine {
    *
    * Phase 1: `opts.engineMovement` carries the already-executed movement
    * for the render call to narrate.
+   *
+   * Phase 3: `opts.engineManipulation` carries the already-executed
+   * manipulation for the render call to narrate.
    */
   resolve(
     world: World,

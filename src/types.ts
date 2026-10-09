@@ -34,7 +34,15 @@ export type ActorLook = {
 
 export type ActorPose = "stand" | "sit" | "kneel" | "doggy" | "prone";
 
-export type ActorProp = "cup" | "laptop" | null;
+/**
+ * Phase 3: the held prop is engine-owned (see `src/core/objects.ts`).
+ * The value is the canonical prop name from the affordance table
+ * ("cup", "laptop", "papers", "report", "phone", "book", "bottle",
+ * "bag", …) — an open string, not a closed enum, so scenarios are not
+ * stuck with office props (F8). The graphic UI renders visuals for
+ * "cup"/"laptop" and ignores the rest gracefully.
+ */
+export type ActorProp = string | null;
 
 export type Actor = {
   id: string;
