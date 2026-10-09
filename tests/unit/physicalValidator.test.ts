@@ -12,7 +12,7 @@ type Prose = Pick<ConsequenceResult, "narrative" | "thoughts">;
 function facts(over: Partial<RenderFacts> = {}): RenderFacts {
   return {
     exactQuote: null,
-    moved: false,
+    moved: false, destinationActorId: null,
     pose: null,
     effectivePose: "stand",
     x: 1,

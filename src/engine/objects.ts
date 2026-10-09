@@ -62,6 +62,8 @@ export function buildManipulationSnapshot(world: World): ManipulationSnapshot {
       x: a.x,
       y: a.y,
       prop: a.prop ?? null,
+      // Stage-1 A3: the linked scene object backing the held prop.
+      heldObjectId: a.heldObjectId ?? null,
     })),
     objects: world.scene.objects.map((o) => ({
       id: o.id,

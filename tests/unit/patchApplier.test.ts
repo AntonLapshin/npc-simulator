@@ -50,6 +50,7 @@ describe("applyRenderResult (Phase 4: engine outcomes + prose)", () => {
       manipulation: {
         plan: { kind: "put-down", actorId: "u", objectId: "desk", propName: "cup", surfaceId: "desk", rule: "test" },
         actorProps: [{ actorId: "u", prop: null }],
+        heldObjectIds: [{ actorId: "u", heldObjectId: null }],
         objectMoves: [{ objectId: "cup", x: 2, y: 1 }],
       },
     });

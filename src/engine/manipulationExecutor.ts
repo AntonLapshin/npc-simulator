@@ -35,6 +35,13 @@ export type ManipulationOutcome = {
   plan: ManipulationPlan;
   /** Prop assignments: the acting actor always; the recipient on hand-over. */
   actorProps: Array<{ actorId: string; prop: string | null }>;
+  /**
+   * Stage-1 A3: scene-object link assignments. Pick-up links the object,
+   * put-down clears the link, hand-over transfers it to the recipient —
+   * so the movement applier can carry the exact object and later turns
+   * never re-link by proximity.
+   */
+  heldObjectIds: Array<{ actorId: string; heldObjectId: string | null }>;
   /** Scene-object relocations (objectId → holder's cell). */
   objectMoves: Array<{ objectId: string; x: number; y: number }>;
 };
@@ -76,8 +83,21 @@ export function executeManipulation(
       prop: plan.kind === "pick-up" ? plan.propName : null,
     },
   ];
+  // Stage-1 A3: the scene-object link follows the prop. Pick-up links the
+  // manipulated object; put-down clears the link; hand-over transfers it
+  // to the recipient (identity preserved — no proximity re-linking).
+  const heldObjectIds: ManipulationOutcome["heldObjectIds"] = [
+    {
+      actorId: action.actorId,
+      heldObjectId: plan.kind === "pick-up" ? plan.objectId : null,
+    },
+  ];
   if (plan.kind === "hand-over" && plan.targetActorId !== undefined) {
     actorProps.push({ actorId: plan.targetActorId, prop: plan.propName });
+    heldObjectIds.push({
+      actorId: plan.targetActorId,
+      heldObjectId: plan.objectId,
+    });
   }
   const objectMoves: ManipulationOutcome["objectMoves"] = [];
   if (plan.objectId !== null) {
@@ -93,7 +113,7 @@ export function executeManipulation(
       objectMoves.push({ objectId: plan.objectId, x: holder.x, y: holder.y });
     }
   }
-  return { plan, actorProps, objectMoves };
+  return { plan, actorProps, heldObjectIds, objectMoves };
 }
 
 export type IgnoredObjectPatch = {
