@@ -359,6 +359,13 @@ export type EngineConfig = {
    * the Laya cascade path, 3–4 on the LLM-fallback path.
    */
   turnCallBudget: number;
+  /**
+   * PLAN_V2 Phase 1: wall-time budget per turn, in ms. The orchestrator
+   * logs a loud `turn_time_exceeded` warning when a turn crosses this —
+   * never a hard abort (a slow turn that avoids a fallback beats a fast
+   * fallback). Default 30000 (30s — the v2 turn's binding constraint).
+   */
+  turnTimeBudgetMs: number;
 };
 
 /**

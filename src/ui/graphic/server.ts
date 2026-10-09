@@ -50,11 +50,12 @@ import type { World } from "../../types.js";
 import { loadScenario } from "../../engine/scenarioLoader.js";
 import { getCurrentActor } from "../../engine/worldStore.js";
 import { runTurn, type EngineDependencies } from "../../engine/turnOrchestrator.js";
-import { resolveConfig } from "../../config.js";
+import { readTurnTimeBudgetMs, resolveConfig } from "../../config.js";
 import { Logger } from "../../logging/logger.js";
 import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
+import { MockIntentEngine } from "../../mocks/mockIntentEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
 import { historyEntryText, renderTurnStory } from "../../logging/storyTrace.js";
 import { loadEnvFile } from "../../util/loadEnv.js";
@@ -150,7 +151,7 @@ function buildDeps(
   autosave: boolean,
   llmOpts: Pick<GraphicOptions, "provider" | "model" | "baseUrl"> = {},
 ): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
-  const config = resolveConfig({ autosaveEnabled: autosave });
+  const config = resolveConfig({ autosaveEnabled: autosave, turnTimeBudgetMs: readTurnTimeBudgetMs() });
   if (useMock) {
     return {
       usingMock: true,
@@ -158,6 +159,7 @@ function buildDeps(
         proposalEngine: new MockProposalEngine(logger),
         selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
+        intentEngine: new MockIntentEngine(logger),
         logger,
         config,
       },
@@ -182,6 +184,7 @@ function buildDeps(
         proposalEngine: new MockProposalEngine(logger),
         selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
+        intentEngine: new MockIntentEngine(logger),
         logger,
         config,
       },

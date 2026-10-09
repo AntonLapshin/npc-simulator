@@ -9,6 +9,7 @@
 import type { Logger } from "../logging/logger.js";
 import type {
   ConsequenceEngine,
+  IntentEngine,
   ProposalEngine,
   SelectionEngine,
   SemanticJudge,
@@ -31,6 +32,7 @@ import { LLMConsequenceEngine } from "./llmConsequenceEngine.js";
 import { LLMProposalEngine } from "./llmProposalEngine.js";
 import { LLMSelectionEngine } from "./llmSelectionEngine.js";
 import { LLMSemanticJudge } from "./llmSemanticJudge.js";
+import { LLMIntentEngine } from "./llmIntentEngine.js";
 import { readLayaRuntimeConfig, readLlmDecisionFallback } from "../config.js";
 import {
   createLayaClient,
@@ -72,6 +74,8 @@ export {
 export { LLMConsequenceEngine, FALLBACK_CONSEQUENCE } from "./llmConsequenceEngine.js";
 export { LLMProposalEngine, FALLBACK_PROPOSAL } from "./llmProposalEngine.js";
 export { LLMSelectionEngine, FALLBACK_SELECTION } from "./llmSelectionEngine.js";
+export { LLMIntentEngine, buildIntentPrompt } from "./llmIntentEngine.js";
+export type { IntentEngine } from "../intelligence/types.js";
 export { LLMSemanticJudge, buildSemanticJudgePrompt } from "./llmSemanticJudge.js";
 export { LLM_SYSTEM_PROMPT } from "./prompts.js";
 export { buildRosterDisciplineLine, buildRosterRetryLine, rosterExampleActors } from "./rosterDiscipline.js";
@@ -82,6 +86,12 @@ export type LlmEngines = {
   selectionEngine: SelectionEngine;
   consequenceEngine: ConsequenceEngine;
   semanticJudge: SemanticJudge;
+  /**
+   * PLAN_V2 Phase 1: the intent call (single structured call replacing
+   * proposal+selection on the TURN_LOOP=v2 path). Simple-tier routing —
+   * the intent call is scene understanding, not hard reasoning.
+   */
+  intentEngine: IntentEngine;
   /**
    * Item C2 (exp local-8b): per-turn engine routing. NPC turns use the
    * standard tiered routing unchanged; user turns get hard-tier
@@ -278,6 +288,10 @@ export function createLlmEngines(
   const chatSelectionEngine = new LLMSelectionEngine(logger, selectionProvider, engineOptions);
   const consequenceEngine = new LLMConsequenceEngine(logger, providerFor("consequence"), engineOptions);
   const chatSemanticJudge = new LLMSemanticJudge(logger, providerFor("semantic"), engineOptions);
+  // PLAN_V2 Phase 1: the intent call rides the simple tier (same provider
+  // as selection — scene understanding on the local model, not hard
+  // reasoning on the hosted tier).
+  const intentEngine = new LLMIntentEngine(logger, selectionProvider, engineOptions);
 
   // Phase 5: the Laya decision cascade is the DEFAULT proposal/selection
   // path (readLayaRuntimeConfig defaults LAYA_MODE=static with the
@@ -324,5 +338,5 @@ export function createLlmEngines(
     }
     return { proposal: proposalEngine, selection: selectionEngine, consequence: consequenceEngine, judge: semanticJudge, plannerChatComplete };
   };
-  return { proposalEngine, selectionEngine, consequenceEngine, semanticJudge, getEnginesForTurn };
+  return { proposalEngine, selectionEngine, consequenceEngine, semanticJudge, intentEngine, getEnginesForTurn };
 }

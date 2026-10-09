@@ -56,6 +56,13 @@ export const defaultConfig: EngineConfig = {
    * Loud warning + `budget_exceeded` event when crossed; never an abort.
    */
   turnCallBudget: 4,
+  /**
+   * PLAN_V2 Phase 1: wall-time budget per turn, in ms (see
+   * EngineConfig.turnTimeBudgetMs). Loud `turn_time_exceeded` event when
+   * crossed; never an abort. Env override: TURN_TIME_BUDGET_MS (applied
+   * at the UI wiring via readTurnTimeBudgetMs).
+   */
+  turnTimeBudgetMs: 30_000,
 };
 
 export function resolveConfig(partial: Partial<EngineConfig> = {}): EngineConfig {
@@ -119,6 +126,28 @@ export function readLlmDecisionFallback(
 /** True when the intent-first ordering applies: Laya on + selection routing on. */
 export function isLayaIntentFirst(config: LayaConfig): boolean {
   return config.mode !== "off" && config.toggles.selection;
+}
+
+/**
+ * PLAN_V2 Phase 1: TURN_LOOP=v2 gates the v2 turn path — the single
+ * intent call replaces proposal+selection. Anything else (unset
+ * included) keeps the v1 path 100% untouched. Pure — pass a fake env in
+ * tests.
+ */
+export function readTurnLoopV2(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env["TURN_LOOP"] === "v2";
+}
+
+/**
+ * PLAN_V2 Phase 1: wall-time budget per turn in ms. Env
+ * TURN_TIME_BUDGET_MS, default 30000. Pure — pass a fake env in tests.
+ */
+export function readTurnTimeBudgetMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return parsePositiveNumber(env["TURN_TIME_BUDGET_MS"], 30_000);
 }
 
 function parsePositiveNumber(raw: string | undefined, defaultValue: number): number {

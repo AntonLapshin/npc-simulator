@@ -9,6 +9,7 @@ import type {
 import type { MovementOutcome } from "../engine/movementExecutor.js";
 import type { ManipulationOutcome } from "../engine/manipulationExecutor.js";
 import type { Intent } from "../decision/decisionTypes.js";
+import type { IntentResult } from "../core/intent.js";
 
 export interface ProposalEngine {
   propose(world: World, actorId: string): Promise<ProposalResult>;
@@ -26,6 +27,21 @@ export interface SelectionEngine {
   /**
    * Phase 6: true when select() performs provider (LLM) calls.
    * See ProposalEngine.providerBacked.
+   */
+  readonly providerBacked?: boolean;
+}
+
+/**
+ * PLAN_V2 Phase 1: the intent call — one structured LLM call that decides
+ * the actor's next action directly ({ action, quote }), replacing the
+ * proposal+selection option set. The engine executes the returned intent;
+ * on failure the engine falls back deterministically (FALLBACK_INTENT).
+ */
+export interface IntentEngine {
+  intent(world: World, actorId: string): Promise<IntentResult>;
+  /**
+   * Phase 6: true when intent() performs provider (LLM) calls — counted
+   * in the turn budget's proposal slot. See ProposalEngine.providerBacked.
    */
   readonly providerBacked?: boolean;
 }

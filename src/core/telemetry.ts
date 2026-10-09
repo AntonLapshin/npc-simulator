@@ -56,6 +56,37 @@ export const TURN_TIME_GATE_MS = 90_000;
 /** Phase 6: default provider-call budget per turn (EngineConfig.turnCallBudget). */
 export const DEFAULT_TURN_CALL_BUDGET = 4;
 
+/** PLAN_V2 Phase 1: default wall-time budget per turn, in ms (EngineConfig.turnTimeBudgetMs). */
+export const DEFAULT_TURN_TIME_BUDGET_MS = 30_000;
+
+/**
+ * Evaluate one turn's wall time against its budget. Pure. Exceeding is a
+ * warning, never an abort — a slow turn that avoids a fallback beats a
+ * fast fallback.
+ */
+export function evaluateTurnTime(
+  turnWallMs: number,
+  budgetMs: number,
+): { exceeded: boolean; overByMs: number } {
+  const overByMs = turnWallMs - budgetMs;
+  return { exceeded: overByMs > 0, overByMs: Math.max(0, overByMs) };
+}
+
+/**
+ * The loud warning logged with a `turn_time_exceeded` event. Pure.
+ * Mirrors budgetWarningMessage.
+ */
+export function turnTimeWarningMessage(
+  actorId: string,
+  turnWallMs: number,
+  budgetMs: number,
+): string {
+  return (
+    `TURN TIME EXCEEDED: turn for ${actorId} took ${formatDuration(turnWallMs)} ` +
+    `(budget ${formatDuration(budgetMs)}). Telemetry only — the turn was not aborted.`
+  );
+}
+
 /**
  * Evaluate one turn's provider-call count against its budget. Pure.
  * Exceeding is a warning, never an abort — a turn that needs 5 calls to

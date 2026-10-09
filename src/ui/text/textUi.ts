@@ -34,11 +34,12 @@ import { getCurrentActor } from "../../engine/worldStore.js";
 import { loadWorld, saveWorld, defaultSavePath } from "../../engine/persistence.js";
 import { getActorById, getAudibleActors, getVisibleActors } from "../../engine/perceptionHelpers.js";
 import { runTurn, type EngineDependencies } from "../../engine/turnOrchestrator.js";
-import { resolveConfig } from "../../config.js";
+import { readTurnTimeBudgetMs, resolveConfig } from "../../config.js";
 import { Logger } from "../../logging/logger.js";
 import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
 import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
+import { MockIntentEngine } from "../../mocks/mockIntentEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
 import {
   parseCommand,
@@ -179,7 +180,7 @@ function buildDeps(
   saveNamePrefix?: string,
 ): { deps: EngineDependencies; usingMock: boolean; llmLabel?: string } {
   // Exp-7 item A12: the scenario file stem seeds save filenames.
-  const config = resolveConfig({ autosaveEnabled: autosave, saveNamePrefix });
+  const config = resolveConfig({ autosaveEnabled: autosave, saveNamePrefix, turnTimeBudgetMs: readTurnTimeBudgetMs() });
   // Autonomous mode: no user turns — every actor runs the NPC pipeline.
   const forceAllNpc = llmOpts.auto === true;
   if (useMock) {
@@ -189,6 +190,7 @@ function buildDeps(
         proposalEngine: new MockProposalEngine(logger),
         selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
+        intentEngine: new MockIntentEngine(logger),
         logger,
         config,
         forceAllNpc,
@@ -223,6 +225,7 @@ function buildDeps(
         proposalEngine: new MockProposalEngine(logger),
         selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
+        intentEngine: new MockIntentEngine(logger),
         logger,
         config,
         forceAllNpc,
