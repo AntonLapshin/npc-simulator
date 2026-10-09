@@ -59,7 +59,7 @@ describe("turn discipline", () => {
     world.actors.find((a) => a.id === "n")!.name = "Nadia";
     const action = { actorId: "u", text: "Hi!" };
     const facts = {
-      exactQuote: null, moved: false, pose: null, effectivePose: "stand",
+      exactQuote: null, moved: false, destinationActorId: null, pose: null, effectivePose: "stand",
       x: 1, y: 1, engineManipulation: null,
     };
 
