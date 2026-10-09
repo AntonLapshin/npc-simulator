@@ -1,6 +1,7 @@
-// PLAN_V2 Phase 1: the TURN_LOOP=v2 turn path with scripted providers.
-// No network — MockIntentEngine + the standard mock engines drive the turn.
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+// PLAN_V2 Phase 6: the v2 turn path is the ONLY turn path (the
+// TURN_LOOP flag and the v1 path are deleted). Scripted providers —
+// MockIntentEngine + the standard mock engines — drive the turn.
+import { describe, expect, it, vi } from "vitest";
 import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import type { EngineDependencies } from "../../src/engine/turnOrchestrator.js";
 import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
@@ -8,20 +9,8 @@ import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js"
 import type { IntentEngine, ConsequenceEngine } from "../../src/intelligence/types.js";
 import type { Action, ConsequenceResult, World } from "../../src/types.js";
 import { createTestLogger } from "../../src/logging/logger.js";
-import { defaultConfig, readTurnLoopV2 } from "../../src/config.js";
+import { defaultConfig } from "../../src/config.js";
 import { makeTestDeps, makeTinyWorld } from "../helpers.js";
-
-const TURN_LOOP_ENV = "TURN_LOOP";
-let savedTurnLoop: string | undefined;
-
-beforeEach(() => {
-  savedTurnLoop = process.env[TURN_LOOP_ENV];
-});
-
-afterEach(() => {
-  if (savedTurnLoop === undefined) delete process.env[TURN_LOOP_ENV];
-  else process.env[TURN_LOOP_ENV] = savedTurnLoop;
-});
 
 function makeV2Deps(
   sessionId: string,
@@ -49,24 +38,14 @@ function makeV2Deps(
   return { deps, logger };
 }
 
-describe("readTurnLoopV2", () => {
-  it("is true only for TURN_LOOP=v2", () => {
-    expect(readTurnLoopV2({ TURN_LOOP: "v2" })).toBe(true);
-    expect(readTurnLoopV2({})).toBe(false);
-    expect(readTurnLoopV2({ TURN_LOOP: "V2" })).toBe(false);
-    expect(readTurnLoopV2({ TURN_LOOP: "v1" })).toBe(false);
-  });
-});
-
-describe("TURN_LOOP=v2 turn path", () => {
-  it("replaces proposal+selection with the intent call; downstream is unchanged", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
+describe("v2 turn path", () => {
+  it("the intent call decides the action; downstream is unchanged", async () => {
     const { deps, logger } = makeV2Deps("v2turn1");
     let world = makeTinyWorld();
     world = await runTurn(world, deps); // user turn (u)
-    world = await runTurn(world, deps); // NPC turn (n) — the v2 path
+    world = await runTurn(world, deps); // NPC turn (n)
 
-    // The intent call ran; proposal/selection never did.
+    // The intent call ran; proposal/selection engines don't exist anymore.
     expect(logger.store.byEvent("intent_completed")).toHaveLength(1);
     expect(logger.store.byEvent("proposal_completed")).toHaveLength(0);
     expect(logger.store.byEvent("selection_completed")).toHaveLength(0);
@@ -76,7 +55,7 @@ describe("TURN_LOOP=v2 turn path", () => {
     const chosen = logger.store.byEvent("action_chosen").find((e) => e.actorId === "n")!;
     expect(chosen.output).toMatchObject({ actorId: "n", text: "N waves at U." });
 
-    // The turn completes like a v1 turn: render ran, history appended, tick advanced.
+    // The turn completes: render ran, history appended, tick advanced.
     expect(
       logger.store.byEvent("render_accepted").filter((e) => e.actorId === "n"),
     ).toHaveLength(1);
@@ -85,7 +64,6 @@ describe("TURN_LOOP=v2 turn path", () => {
   });
 
   it("the intent fallback still produces a completing turn", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     // No script for "n" — the mock returns FALLBACK_INTENT.
     const logger = createTestLogger("v2turn2");
     const deps = makeTestDeps(logger, {
@@ -104,8 +82,7 @@ describe("TURN_LOOP=v2 turn path", () => {
     expect(world.tick).toBe(2);
   });
 
-  it("human turns are unchanged on the v2 path — the user's text IS the intent", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
+  it("human turns are unchanged — the user's text IS the intent", async () => {
     const getUserAction = vi.fn(async () => "User does a custom thing.");
     const { deps, logger } = makeV2Deps("v2turn3", { getUserAction });
     const world = await runTurn(makeTinyWorld(), deps); // user turn
@@ -115,20 +92,7 @@ describe("TURN_LOOP=v2 turn path", () => {
     expect(world.history[0]!.text).toContain("User does a custom thing.");
   });
 
-  it("throws a clear error when the flag is set but no intent engine is wired", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
-    const logger = createTestLogger("v2turn4");
-    const deps = makeTestDeps(logger, {
-      getUserAction: async () => "User looks around.",
-    });
-    expect(deps.intentEngine).toBeUndefined();
-    let world = makeTinyWorld();
-    world = await runTurn(world, deps); // user turn — fine without it
-    await expect(runTurn(world, deps)).rejects.toThrow(/TURN_LOOP=v2 requires an IntentEngine/);
-  });
-
   it("the intent call counts in the turn budget's proposal slot when provider-backed", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const logger = createTestLogger("v2turn5");
     const deps = makeTestDeps(logger, {
       intentEngine: new MockIntentEngine(
@@ -160,36 +124,27 @@ describe("TURN_LOOP=v2 turn path", () => {
     expect(exceeded[0]!.output).toMatchObject({ providerCalls: 2, budget: 1 });
     expect(world.tick).toBe(2);
   });
-});
 
-describe("v1 path untouched", () => {
-  it("with the flag unset, the intent engine is never called", async () => {
-    delete process.env[TURN_LOOP_ENV];
-    const logger = createTestLogger("v1untouched");
-    const intentSpy = vi.fn(async (_world: World, _actorId: string) => {
-      throw new Error("intent must not be called on the v1 path");
-    });
-    const intentEngine: IntentEngine = {
-      intent: intentSpy,
-      providerBacked: true,
+  it("an intent engine failure surfaces via throw", async () => {
+    const logger = createTestLogger("v2turn6");
+    const failingIntent: IntentEngine = {
+      async intent() {
+        throw new Error("provider down");
+      },
     };
     const deps = makeTestDeps(logger, {
-      intentEngine,
-      getUserAction: async () => "User looks around.",
+      intentEngine: failingIntent,
+      getUserAction: async () => "act",
     });
-    let world = makeTinyWorld();
-    world = await runTurn(world, deps); // user turn
-    world = await runTurn(world, deps); // NPC turn — v1 proposal+selection
-    expect(intentSpy).not.toHaveBeenCalled();
-    expect(logger.store.byEvent("proposal_completed").length).toBeGreaterThanOrEqual(1);
-    expect(logger.store.byEvent("selection_completed").length).toBeGreaterThanOrEqual(1);
-    expect(world.tick).toBe(2);
+    // User turns skip the intent call, so advance past the user turn first
+    // and let the NPC turn hit the failing intent engine.
+    let world = await runTurn(makeTinyWorld(), deps);
+    await expect(runTurn(world, deps)).rejects.toThrow("provider down");
   });
 });
 
 describe("turn_time_exceeded", () => {
   it("fires when a turn crosses the wall-time budget — and the turn still completes", async () => {
-    delete process.env[TURN_LOOP_ENV];
     const logger = createTestLogger("time1");
     const slow: ConsequenceEngine = {
       async resolve(_world: World, action: Action): Promise<ConsequenceResult> {
@@ -219,11 +174,9 @@ describe("turn_time_exceeded", () => {
   });
 
   it("stays silent when the turn is within budget", async () => {
-    delete process.env[TURN_LOOP_ENV];
     const { deps, logger } = makeV2Deps("time2", {
       config: { ...defaultConfig, autosaveEnabled: false, turnTimeBudgetMs: 30_000 },
     });
-    process.env[TURN_LOOP_ENV] = "v2";
     const world = await runTurn(makeTinyWorld(), deps);
     expect(logger.store.byEvent("turn_time_exceeded")).toHaveLength(0);
     expect(world.tick).toBe(1);

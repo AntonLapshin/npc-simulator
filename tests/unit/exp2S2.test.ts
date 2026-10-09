@@ -20,7 +20,6 @@ import {
   stripAttributionPrefix,
 } from "../../src/engine/validate/narrative.js";
 import { resolveRender } from "../../src/engine/turnOrchestrator.js";
-import { FALLBACK_CONSEQUENCE } from "../../src/llm/llmConsequenceEngine.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import { defaultConfig } from "../../src/config.js";
@@ -104,7 +103,7 @@ describe("exp2-5 S2 final accept gate: tick-11 stay-action teleport", () => {
     expect(errors.some((e) => e.code === "movement.narrated_without_move")).toBe(true);
   });
 
-  it("end-to-end: the render retry never applies the stay-teleport narrative", async () => {
+  it("end-to-end: the stay-teleport narrative is marked but never applied", async () => {
     const logger = createTestLogger();
     const world = officeWorld();
     const scripted: ConsequenceResult = {
@@ -119,9 +118,9 @@ describe("exp2-5 S2 final accept gate: tick-11 stay-action teleport", () => {
       config: { ...defaultConfig, autosaveEnabled: false, maxRetries: 1 },
     });
     const out = await resolveRender(world, action, deps);
-    expect(out.render.narrative).toBe(FALLBACK_CONSEQUENCE.narrative);
-    expect(out.render.narrative).not.toContain("conference room");
-    // Dan never moved.
+    // PLAN_V2 Phase 4: the flawed paragraph is accepted and marked honest —
+    // but it is never APPLIED: Dan never moved.
+    expect(out.render.narrateAcceptedDespiteViolations).toBe(true);
     expect(world.actors.find((a) => a.id === "dan")!.x).toBe(15);
   });
 });

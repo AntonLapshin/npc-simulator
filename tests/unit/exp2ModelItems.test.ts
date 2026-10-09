@@ -165,7 +165,9 @@ describe("exp-2 item 4 (Phase 3): no prop hint in the consequence prompt", () =>
     expect(completed).toBeDefined();
     const prompt = String((completed as { prompt?: unknown }).prompt ?? "");
     expect(prompt).not.toContain("PROP HINT");
-    expect(prompt).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
+    // PLAN_V2: engine ownership is the executed-facts contract — the
+    // narrator narrates engine-executed facts, never invents manipulation.
+    expect(prompt).toContain("Narrate ONLY the executed facts above");
   });
 
   it("non-manipulation actions get no PROP HINT either", async () => {

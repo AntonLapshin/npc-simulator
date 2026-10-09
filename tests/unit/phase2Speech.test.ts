@@ -16,7 +16,7 @@ import { makeTestDeps } from "../helpers.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { resolveRender, runTurn } from "../../src/engine/turnOrchestrator.js";
 import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
-import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import {
   exactQuoteFacts,
   planSpeech,
@@ -140,10 +140,10 @@ describe("Phase 2 golden run: altered quote (B1)", () => {
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
   });
 
-  it("the render input carries the exact quote as facts", () => {
+  it("the narrate input carries the exact quote as facts", () => {
     const world = danaWorld();
-    const ctx = buildConsequenceContext(
-      world, { actorId: "dana", text: ACTION }, undefined, undefined, undefined, QUOTE,
+    const ctx = buildNarrateContext(
+      world, { actorId: "dana", text: ACTION }, undefined, { exactQuote: QUOTE },
     );
     expect(ctx).toContain("EXACT QUOTE");
     expect(ctx).toContain(`Dana says "${QUOTE}"`);

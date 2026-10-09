@@ -13,8 +13,6 @@ import type {
   ActionSemantics,
   World,
 } from "../types.js";
-import type { Intent } from "../decision/decisionTypes.js";
-import { isFullyTypedIntent } from "../decision/decisionTypes.js";
 import {
   assertMovementInvariants,
   computeMovementOutcome,
@@ -43,42 +41,15 @@ export type PlannedMovement = Pick<
 export function planMovementSemantics(
   world: World,
   action: Action,
-  intent?: Intent,
   /**
    * PLAN_V2 Phase 2 (Laya as parser): pre-parsed ActionSemantics from the
    * parse step. When provided it is authoritative over the deterministic
    * text parsers below — the judge saw the same sentence. When absent
-   * the text path runs exactly as before (v1, and the fail-open fallback
-   * when Laya is down/unavailable).
+   * the text path runs (the fail-open fallback when Laya is
+   * down/unavailable).
    */
   semantics?: ActionSemantics,
 ): PlannedMovement {
-  // Phase 5: a fully-typed cascade intent (kind "move" + resolved
-  // targetId from the Laya proposal engine) is authoritative — it
-  // generated the action text, so the destination comes straight from
-  // the intent with no text re-parsing (no translation layer). Any other
-  // intent (or none) falls through to the text parsers as before.
-  if (
-    isFullyTypedIntent(intent) &&
-    intent.kind === "move" &&
-    intent.targetId !== undefined
-  ) {
-    const targetId = intent.targetId;
-    const targetKind = intent.targetKind;
-    if (targetKind === "actor" && targetId !== action.actorId) {
-      return { moves: true, destinationActorId: targetId };
-    }
-    if (targetKind === "landmark" || targetKind === "object") {
-      return {
-        moves: true,
-        destinationObjectId: targetId,
-        destinationObjectExplicit: true,
-      };
-    }
-    // Fully-typed move with targetKind "none" (wander): locomotion with
-    // no destination — the step computation picks the greedy cell.
-    return { moves: true };
-  }
   // PLAN_V2 Phase 2: pre-parsed semantics skip the text parsers entirely
   // (pure translation in src/core/semantics.ts).
   if (semantics !== undefined) {
