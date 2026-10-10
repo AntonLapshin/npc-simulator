@@ -1,15 +1,17 @@
-# Experiment protocol (phase-gate)
+# Experiment protocol (phase-gate) — PLAN_V2
 
-From `PLAN.md` §5, formalized. Follow it verbatim for every experiment
-run — it exists because exp-7 burned 73 minutes to learn what 3 turns
-would have shown.
+From `PLAN.md` §5, formalized, rewritten for the v2 turn loop. Follow it
+verbatim for every experiment run — it exists because exp-7 burned 73
+minutes to learn what 3 turns would have shown.
 
 ## The gate (in order — no skipping)
 
 - [ ] **1. Preflight — `npm run diagnose:ai`.** 100% GPU offload or stop.
       The exp-7 failure was a VRAM squatter (`laya-serve` on 5.8 GB);
       the diagnose script checks for contention. Do not start a run on a
-      contested GPU.
+      contested GPU. Laya must be reachable too (`laya-serve` up) —
+      otherwise every turn logs `parser_fallback` and you are measuring
+      the deterministic-parsing path, not the parse path.
 - [ ] **2. 5-turn smoke on the 3B model.** `--auto --limit-turns 5`.
       Mechanics must be clean. Mechanics are model-independent — prove
       them on the cheap model first.
@@ -22,10 +24,11 @@ would have shown.
       (hand-computed tables are how the tick off-by-one survived into the
       exp-7 report's first draft).
 - [ ] **6. Budgets:** `turnCallBudget` (default 4) — the run's report must
-      show zero `budget_exceeded` turns. Any turn over the 90 s turn-time
-      gate gets a written explanation, not a shrug.
+      show zero `budget_exceeded` turns. `TURN_TIME_BUDGET_MS` (default
+      30000, Anton's hard line): any turn over 30 s logs
+      `turn_time_exceeded` and gets a written explanation, not a shrug.
 
-## Phase-gate discipline (from PLAN_PHASES.md ordering notes)
+## Phase-gate discipline
 
 - Each phase has acceptance criteria. If a criterion fails, the phase is
   **re-scoped, not force-merged**. A phase that can't meet its bar is
@@ -36,37 +39,48 @@ would have shown.
 - No 20-turn runs before a 5-turn smoke passes clean.
 - Judge mechanics on the 3B model, prose on the 14B. Never the reverse.
 
-## What "clean" means (post-renderer-architecture)
+## What "clean" means (v2 turn loop)
 
-- Turn = proposal → selection → execute (engine) → render (LLM).
-- Consequence is 1 render call, occasionally 2 for prose issues.
-- Typical calls/turn: **1–2** (cascade + 1 render), 3–4 on the
-  LLM-decision fallback path. Anything above the budget is a bug or a
-  phase-gate failure, not background noise.
+- Turn = **intent** (1 LLM call) → **parse** (1 local Laya decide) →
+  **execute/clamp** (engine, 0 calls) → **narrate** (1 LLM call) →
+  director injection when staleness fires.
+- Typical cost: **exactly 2 LLM calls + 1 Laya decide** per NPC turn
+  (1 + 1 on user turns — intent is skipped). Anything above is a bug or
+  a phase-gate failure, not background noise. The scripted proxy
+  (`tests/integration/v2TurnCost.test.ts`) asserts this shape; live runs
+  confirm it via the `turn_telemetry` events.
+- A clean turn: `render_accepted` on attempt 1, no `clamp_applied`
+  surprises, no `parser_fallback`, no `fallback_used`, no
+  `liveness_applied`, and no `turn_time_exceeded`.
 
-## Stage 3 re-run checklist (cascade-vs-LLM --compare)
+## Anton's acceptance step: live 20-turn v2 run
 
-Stage 3 (2026-10-09) returned NO DECISION: the cascade leg burned MORE
-LLM decision calls than the LLM leg (23 vs 19) at quality parity, with
-0/10 turns converting on the cascade path. Do not re-run until C1 shows
-a converting smoke. When re-running:
+PLAN_V2 is cut over — there is no v1 path left to A/B against in the
+code. The acceptance run is therefore a **v2 live run measured against
+the v2 budget**, with the historical v1 numbers (Stage-3 report:
+~59 s mean turn, 40% fallback) as the comparison baseline:
 
-- [ ] **Match the decision toggles on both legs.** The code default is
-      cascade-on (`readLayaRuntimeConfig`: `LAYA_MODE=static`,
-      `LAYA_SELECTION=1`, `LAYA_LOCOMOTION=1`, `LAYA_RENDERABILITY=1`),
-      but a local `.env` may pin `LAYA_MODE=off` and every `LAYA_*`
-      toggle to 0 (the `.env` loader fills only unset vars). Set the
-      three decision toggles explicitly on the cascade leg; the LLM leg
-      is `LAYA_MODE=off` alone.
-- [ ] **Attribute the renderability screen.** It is cascade-stack-only
-      (needs `turnDeps.laya`), so its re-picks inflate the cascade leg's
-      selection count by construction. Either note it as a stacked cost
-      or scope the comparison to proposal+selection with the screen off
-      on both legs — but say which, in the report.
-- [ ] **Read delegation from `cascade_delegated`, not inference.** Every
-      fallback delegation now logs module=`laya` event=`cascade_delegated`
-      with the cause; the per-turn P/S columns count delegated provider
-      calls. A re-run report that hand-waves the fallback causes is
-      incomplete.
-- [ ] **The gate is still 3 consecutive live wins** (`LLM_DECISION_FALLBACK=1`
-      stays until then). One ambiguous re-run → re-scope, not Stage 4.
+- [ ] **20 turns on qwen3:14b**, `--auto`, office-anton scenario.
+- [ ] **p90 turn time < 30 s** (hard line). p50 is informative; p90 is
+      the gate.
+- [ ] **Clean-turn rate** (attempt-1 `render_accepted`, no fallback, no
+      liveness): target > 80% — the PLAN.md bar the renderer
+      architecture was built to clear.
+- [ ] **Attempt-1 narrate rate**: narrate accepted on the first attempt
+      (no `render_failed`) — measures whether the executed-facts prompt
+      is sufficient, without the retry crutch.
+- [ ] **Cost check**: mean LLM calls/turn ≈ 2.0 (intent + narrate),
+      `parser_fallback` rate near 0 (Laya up), zero `budget_exceeded`.
+- [ ] Report via `npm run report:turns`; the findings table is
+      generated, never hand-written. If p90 ≥ 30 s or clean-turn rate
+      < 80%, the run is a re-scope signal, not a merge signal.
+
+## Retired: Stage-3 cascade-vs-LLM --compare
+
+Stage 3 (2026-10-09) returned NO DECISION on the cascade-vs-LLM
+comparison, and Phase 6 deleted the cascade outright (see
+ARCHITECTURE.md "Decision layer"). The `--compare` mode of
+`scripts/eval-run-quality.ts` remains for historical log analysis, with
+the Stage-3 lesson encoded: failed attempts carrying `usage` payloads
+count in the per-turn call tallies (`failedDecisionCalls`) —
+`tests/unit/evalCompare.test.ts`.

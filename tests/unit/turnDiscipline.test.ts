@@ -3,9 +3,7 @@ import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { applyRenderResult } from "../../src/engine/patchApplier.js";
 import { validateRenderProse } from "../../src/engine/validate/render.js";
 import {
-  buildConsequenceContext,
-  buildProposalContext,
-  buildSelectionContext,
+  buildNarrateContext,
 } from "../../src/engine/contextBuilder.js";
 import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import type { TurnProgressEvent } from "../../src/engine/turnOrchestrator.js";
@@ -42,14 +40,6 @@ describe("thoughts field", () => {
     // Observers are never touched by the prose: their response belongs to
     // their own turn.
     expect(next.actors.find((a) => a.id === "n")!.thoughts).toBe("");
-  });
-
-  it("proposal and selection contexts include the actor's thoughts", () => {
-    const world = makeTinyWorld();
-    const target = world.actors.find((a) => a.id === "n")!;
-    target.thoughts = "That greeting surprised me.";
-    expect(buildProposalContext(world, "n")).toContain("That greeting surprised me.");
-    expect(buildSelectionContext(world, "n", ["Wave back."])).toContain("That greeting surprised me.");
   });
 });
 
@@ -95,16 +85,14 @@ describe("turn discipline", () => {
     expect(next.actors.find((a) => a.id === "u")!.x).toBe(2);
   });
 
-  it("consequence context instructs observers to use thoughts, not actions", () => {
+  it("narrate context instructs observers to use thoughts, not actions", () => {
     const world = makeTinyWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Hi!" });
-    expect(ctx).toContain("Acting actor this turn: u");
-    expect(ctx).toContain("MUST NOT speak");
-    expect(ctx).toContain("MUST NOT move");
-    expect(ctx).toContain("'thoughts'");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Hi!" }, undefined, {});
+    expect(ctx).toContain("Describe ONLY the acting actor's directly observable behavior");
+    expect(ctx).toContain("Observers react in their own thoughts, on their own turns");
   });
 
-  it("an out-of-turn observer action triggers retry then fallback", async () => {
+  it("an out-of-turn observer action triggers retry then accept-and-mark", async () => {
     const logger = new Logger({ sessionId: "discipline", writeToFile: false });
     const consequenceEngine = new MockConsequenceEngine(logger, {
       "hi!": observerSubjectResult(),
@@ -119,9 +107,11 @@ describe("turn discipline", () => {
     renamed.actors.find((a) => a.id === "n")!.name = "Nadia";
     const final = await runTurn(renamed, deps);
     expect(logger.store.byEvent("render_failed").length).toBeGreaterThanOrEqual(1);
-    expect(logger.store.byEvent("fallback_used")).toHaveLength(1);
-    expect(final.history[final.history.length - 1]!.text).toContain("Hi!");
-    expect(logger.store.byEvent("fallback_used")[0]!.output).toMatchObject({ narrative: "Nothing changes." });
+    // PLAN_V2 Phase 4: one retry, then accept-and-mark honest — no fallback.
+    expect(logger.store.byEvent("narrate_accepted_despite_violations")).toHaveLength(1);
+    expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
+    // The accepted (flawed) paragraph is what lands in history.
+    expect(final.history[final.history.length - 1]!.text).toContain("Nadia walks over");
   });
 });
 

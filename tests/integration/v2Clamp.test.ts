@@ -5,24 +5,11 @@ import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import type { EngineDependencies } from "../../src/engine/turnOrchestrator.js";
 import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { defaultConfig } from "../../src/config.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import type { World } from "../../src/types.js";
 import { makeTestDeps } from "../helpers.js";
-
-const TURN_LOOP_ENV = "TURN_LOOP";
-let savedTurnLoop: string | undefined;
-
-beforeEach(() => {
-  savedTurnLoop = process.env[TURN_LOOP_ENV];
-});
-
-afterEach(() => {
-  if (savedTurnLoop === undefined) delete process.env[TURN_LOOP_ENV];
-  else process.env[TURN_LOOP_ENV] = savedTurnLoop;
-});
 
 /** 12x6 hall, Anton at (1,1), Tanya at (11,1) — exactly 10 cells apart. */
 function makeHandshakeWorld(): World {
@@ -126,7 +113,6 @@ function narratePromptFor(
 
 describe("Phase 3 — attempted-vs-executed on the v2 path", () => {
   it("a handshake from 10 cells away records the honest gap in the narrate input", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const { deps, logger } = makeV2Deps("v2clamp1", "Tanya shakes Anton's hand.");
     let world = makeHandshakeWorld();
     world = await runTurn(world, deps); // user turn (anton)
@@ -164,7 +150,6 @@ describe("Phase 3 — attempted-vs-executed on the v2 path", () => {
   });
 
   it("the impossible turn burns no extra LLM calls vs a normal turn", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     // Impossible turn: handshake from 10 cells.
     const hard = makeV2Deps("v2clamp2a", "Tanya shakes Anton's hand.");
     let hardWorld = makeHandshakeWorld();
@@ -190,7 +175,6 @@ describe("Phase 3 — attempted-vs-executed on the v2 path", () => {
   });
 
   it("a fully-executed turn carries no clamp block in the narrate input", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const { deps, logger } = makeV2Deps("v2clamp3", "Tanya waves at Anton.");
     let world = makeHandshakeWorld();
     world = await runTurn(world, deps);
@@ -198,38 +182,5 @@ describe("Phase 3 — attempted-vs-executed on the v2 path", () => {
     // No gap → no clamp record, no prompt block.
     expect(logger.store.byEvent("clamp_applied").filter((e) => e.actorId === "tanya")).toHaveLength(0);
     expect(narratePromptFor(logger, "tanya")).not.toContain("ATTEMPTED vs EXECUTED");
-  });
-});
-
-describe("Phase 3 — v1 path untouched", () => {
-  it("a v1 turn never sees the clamp block (byte-identical narrate input)", async () => {
-    delete process.env[TURN_LOOP_ENV];
-    const logger = createTestLogger("v1clamp1");
-    const deps = makeTestDeps(logger, {
-      selectionEngine: new MockSelectionEngine(logger, {
-        tanya: { action: "Tanya shakes Anton's hand.", reasoning: "scripted" },
-      }),
-      consequenceEngine: new MockConsequenceEngine(logger, {
-        "tanya shakes anton's hand.": {
-          narrative: HANDSHAKE_NARRATIVE,
-          thoughts: "Too far.",
-          emotion: "sheepish",
-          reasoning: "scripted v1",
-        },
-      }),
-      config: { ...defaultConfig, autosaveEnabled: false },
-      getUserAction: async () => "Anton looks around.",
-    });
-    let world = makeHandshakeWorld();
-    world = await runTurn(world, deps); // user turn (anton)
-    world = await runTurn(world, deps); // NPC turn (tanya) — v1 proposal+selection
-
-    expect(logger.store.byEvent("clamp_applied")).toHaveLength(0);
-    const prompt = narratePromptFor(logger, "tanya");
-    expect(prompt).not.toContain("ATTEMPTED vs EXECUTED");
-    expect(prompt).not.toContain("clamp");
-    // The turn still completes exactly as before.
-    expect(world.tick).toBe(2);
-    expect(world.history.map((e) => e.text).join("\n")).toContain("the handshake never lands");
   });
 });

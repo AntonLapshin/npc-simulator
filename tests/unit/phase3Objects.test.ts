@@ -16,8 +16,6 @@
 import { describe, expect, it } from "vitest";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps } from "../helpers.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
 import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import {
   executeManipulation,
@@ -26,7 +24,7 @@ import {
 import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import { consequenceResultSchema } from "../../src/schemas.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
-import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import { defaultConfig } from "../../src/config.js";
 import type { ConsequenceResult, World } from "../../src/types.js";
 
@@ -98,8 +96,6 @@ describe("Phase 3 acceptance: pick-up", () => {
     const logger = new Logger({ sessionId: "phase3-pickup", writeToFile: false });
     const world = officeWorld();
     const deps = makeTestDeps(logger, {
-      proposalEngine: new MockProposalEngine(logger),
-      selectionEngine: new MockSelectionEngine(logger),
       consequenceEngine: scriptedConsequence(
         silentResult("Dana picks up her laptop and opens it."),
       ),
@@ -248,14 +244,11 @@ describe("Phase 3 acceptance: stripping and phantom gate", () => {
   it("the render input carries the executed manipulation as facts", () => {
     const world = officeWorld();
     const outcome = executeManipulation(world, { actorId: "dana", text: "Pick up the laptop." })!;
-    const ctx = buildConsequenceContext(
+    const ctx = buildNarrateContext(
       world,
       { actorId: "dana", text: "Pick up the laptop." },
       undefined,
-      defaultConfig,
-      undefined,
-      undefined,
-      outcome,
+      { engineManipulation: outcome },
     );
     expect(ctx).toContain("EXECUTED MANIPULATION");
     expect(ctx).toContain("Dana picked up the laptop");

@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { World } from "../../../src/types.js";
 import {
-  buildCandidateState,
-  buildIntentState,
   buildJudgeState,
   conversationHint,
   estimateTokens,
@@ -74,58 +72,6 @@ describe("truncateToChars", () => {
   });
 });
 
-describe("buildIntentState", () => {
-  it("stays within the char budget and names the actor", () => {
-    const state = buildIntentState(makeWorld(), "a1");
-    expect(state.length).toBeLessThanOrEqual(STATE_CHAR_BUDGET);
-    expect(estimateTokens(state)).toBeLessThanOrEqual(450);
-    expect(state).toContain("Anton");
-    expect(state).toContain("Ship the release");
-    expect(state).toContain("Dana");
-    expect(state).toContain("whiteboard");
-  });
-
-  it("throws for an unknown actor", () => {
-    expect(() => buildIntentState(makeWorld(), "nope")).toThrow();
-  });
-
-  it("tolerates a missing thoughts field (untyped worlds, e.g. diagnose-ai stub)", () => {
-    // scripts/diagnose-ai.ts is not typechecked (scripts/ excluded from
-    // tsconfig) and builds its stub world without `thoughts`; the state
-    // build must not crash on it (S9: "Cannot read properties of undefined
-    // (reading 'trim')").
-    const world = makeWorld();
-    delete (world.actors[0] as unknown as Record<string, unknown>)["thoughts"];
-    let state = "";
-    expect(() => {
-      state = buildIntentState(world, "a1");
-    }).not.toThrow();
-    expect(state).toContain("Anton");
-    expect(state).not.toContain("Thinking:");
-  });
-
-  it("holds the budget even with huge inputs", () => {
-    const world = makeWorld();
-    world.actors[0]!.persona = "x".repeat(10000);
-    world.actors[0]!.thoughts = "y".repeat(10000);
-    world.history = Array.from({ length: 50 }, (_, i) => ({
-      text: `event ${i} `.repeat(200),
-      perceivers: ["a1"],
-    }));
-    const state = buildIntentState(world, "a1");
-    expect(state.length).toBeLessThanOrEqual(STATE_CHAR_BUDGET);
-  });
-});
-
-describe("buildCandidateState", () => {
-  it("appends numbered candidates within budget", () => {
-    const state = buildCandidateState(makeWorld(), "a1", ["Do X.", "Do Y."]);
-    expect(state.length).toBeLessThanOrEqual(STATE_CHAR_BUDGET);
-    expect(state).toContain("1. Do X.");
-    expect(state).toContain("2. Do Y.");
-  });
-});
-
 describe("buildJudgeState", () => {
   it("includes the action text and name inventories", () => {
     const state = buildJudgeState("Anton walks to the whiteboard.", ["Anton", "Dana"], ["whiteboard"]);
@@ -193,19 +139,5 @@ describe("conversationHint (Stage 3 C1)", () => {
     expect(conversationHint(w)).toBe("");
   });
 
-  it("appears in the intent state on dialogue-heavy turns", () => {
-    const w = worldWithHistory([
-      'Anton says "Where is my desk?"',
-      'Tanya says "It is by the lamp."',
-      'Anton says "Thanks!"',
-    ]);
-    const state = buildIntentState(w, "a1");
-    expect(state).toContain("Conversation context:");
-    expect(state.length).toBeLessThanOrEqual(STATE_CHAR_BUDGET);
-  });
 
-  it("does not appear in the intent state on quiet turns", () => {
-    const state = buildIntentState(makeWorld(), "a1");
-    expect(state).not.toContain("Conversation context:");
-  });
 });

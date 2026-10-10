@@ -114,38 +114,42 @@ describe("C2 user-turn capable-tier routing", () => {
   it("explicit provider instances make the tier opaque (silent fallback)", () => {
     const env = { LLM_BACKEND: "ollama", LLM_SIMPLE_BACKEND: "laya-local" } as unknown as NodeJS.ProcessEnv;
     expect(
-      userCapableTierBackend(env, undefined, { proposal: new StubProvider() }),
+      userCapableTierBackend(env, undefined, { consequence: new StubProvider() }),
     ).toBeUndefined();
   });
 
-  it("a per-task consequence override does not drag the user tier down", () => {
+  it("a per-task intent override does not drag the user tier down", () => {
+    const env = {
+      LLM_BACKEND: "ollama",
+      LLM_SIMPLE_BACKEND: "laya-local",
+      LLM_BACKEND_INTENT: "joingonka",
+    } as unknown as NodeJS.ProcessEnv;
+    // The capable tier stays the hard-task default (ollama) — the intent
+    // override is a simple-tier task and doesn't move the hard tier.
+    expect(userCapableTierBackend(env)).toBe("ollama");
+  });
+
+  it("a consequence override onto the simple tier is a silent no-op", () => {
     const env = {
       LLM_BACKEND: "ollama",
       LLM_SIMPLE_BACKEND: "laya-local",
       LLM_BACKEND_CONSEQUENCE: "laya-local",
     } as unknown as NodeJS.ProcessEnv;
-    // The capable tier stays the hard-task default (ollama), not the
-    // weakened per-task consequence backend.
-    expect(userCapableTierBackend(env)).toBe("ollama");
+    // Consequence is the representative hard task: the override moves the
+    // tier onto the simple tier, so the capable tier is a no-op.
+    expect(userCapableTierBackend(env)).toBeUndefined();
   });
 
-  it("getEnginesForTurn: NPC turns unchanged, user turns get hard-tier proposal+consequence", () => {
+  it("getEnginesForTurn: NPC turns unchanged, user turns get the hard-tier consequence engine", () => {
     const env = {
       LLM_BACKEND: "ollama",
       LLM_SIMPLE_BACKEND: "laya-local",
     } as unknown as NodeJS.ProcessEnv;
     const engines = createLlmEngines(createTestLogger(), { env });
     const npc = engines.getEnginesForTurn(false);
-    expect(npc.proposal).toBe(engines.proposalEngine);
-    expect(npc.selection).toBe(engines.selectionEngine);
     expect(npc.consequence).toBe(engines.consequenceEngine);
-    expect(npc.judge).toBe(engines.semanticJudge);
     const user = engines.getEnginesForTurn(true);
-    expect(user.proposal).not.toBe(engines.proposalEngine);
     expect(user.consequence).not.toBe(engines.consequenceEngine);
-    // Selection is skipped for users anyway; the judge stays standard.
-    expect(user.selection).toBe(engines.selectionEngine);
-    expect(user.judge).toBe(engines.semanticJudge);
   });
 
   it("getEnginesForTurn falls back silently when tiers are identical", () => {
@@ -155,7 +159,6 @@ describe("C2 user-turn capable-tier routing", () => {
     } as unknown as NodeJS.ProcessEnv;
     const engines = createLlmEngines(createTestLogger(), { env });
     const user = engines.getEnginesForTurn(true);
-    expect(user.proposal).toBe(engines.proposalEngine);
     expect(user.consequence).toBe(engines.consequenceEngine);
   });
 });

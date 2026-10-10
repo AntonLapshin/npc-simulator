@@ -3,11 +3,9 @@
 import { describe, expect, it } from "vitest";
 import { validateRenderProse, type RenderFacts } from "../../src/engine/validate/render.js";
 import {
-  buildConsequenceContext,
-  buildProposalContext,
   buildRosterAnchor,
-  buildSelectionContext,
   extractPronouns,
+  buildNarrateContext,
 } from "../../src/engine/contextBuilder.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { computeMovementOutcome } from "../../src/core/movement.js";
@@ -270,27 +268,19 @@ describe("exp2-9/12/13 roster anchor, pronouns, de-dup", () => {
     expect(anchor).toMatch(/never invent/i);
   });
 
-  it("proposal/selection/consequence contexts all carry the roster", () => {
+  it("the narrate context carries the roster rule", () => {
     const world = officeWorld();
     world.history.push(hist(world, "Anton: Nadia, where is my desk?"));
     world.history.push(hist(world, "Nadia: Welcome to the team, Anton!"));
     world.history.push(hist(world, "Anton: Nadia, please stop greeting me."));
-    const proposal = buildProposalContext(world, "n");
-    expect(proposal).toContain("ROSTER");
-    expect(proposal).toMatch(/never invent/i);
-    expect(proposal).toMatch(/do NOT repeat/i);
-    const selection = buildSelectionContext(world, "n", ["Point at the desk."]);
-    expect(selection).toContain("ROSTER");
-    expect(selection).toMatch(/ANSWER/i);
-    const consequence = buildConsequenceContext(world, { actorId: "u", text: "Hi!" });
-    expect(consequence).toContain("ROSTER RULE");
-    expect(consequence).toMatch(/no one else exists/i);
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Hi!" }, undefined, {});
+    expect(ctx).toContain("ROSTER RULE");
+    expect(ctx).toMatch(/no one else exists/i);
   });
 
   it("roster anchor leaks no private goals/memories", () => {
     const world = makeTinyWorld();
     world.actors.find((a) => a.id === "n")!.goal = "SECRET-PLAN-123";
     expect(buildRosterAnchor(world)).not.toContain("SECRET-PLAN-123");
-    expect(buildProposalContext(world, "u")).not.toContain("SECRET-PLAN-123");
   });
 });

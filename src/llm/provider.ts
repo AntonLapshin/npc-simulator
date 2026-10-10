@@ -33,7 +33,7 @@
 // (default joingonka, e.g. zai-org/GLM-5.3-Flash or DeepSeek). Simple tasks
 // (selection/semantic — single-pick decisions, moves/speaks classification)
 // run on LLM_SIMPLE_BACKEND (default ollama, local small model).
-// Per-task overrides: LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}.
+// Per-task overrides: LLM_BACKEND_{INTENT,CONSEQUENCE,SEMANTIC}.
 // Simple-tier model override: LLM_SIMPLE_MODEL.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -413,26 +413,26 @@ export type LlmBackend = "joingonka" | "laya-local" | "ollama";
  * LLM task kinds routed to providers.
  * - hard (large/hosted): proposal, consequence — creative, long-context,
  *   physics + roster discipline, memory/belief/relationship compounding.
- * - simple (small/local): selection, semantic — short classification /
- *   single-pick decisions over an already-built candidate set.
+ * - simple (small/local): intent, semantic — the single intent call
+ *   (scene understanding, fluent intent) and short classifications.
  */
-export type LlmTask = "proposal" | "selection" | "consequence" | "semantic";
+export type LlmTask = "intent" | "consequence" | "semantic";
 
 /** Tasks that default to the large hosted model (worth the cost). */
-export const HARD_LLM_TASKS: readonly LlmTask[] = ["proposal", "consequence"] as const;
+export const HARD_LLM_TASKS: readonly LlmTask[] = ["consequence"] as const;
 /** Tasks that default to the small local model (cheap, fast, good enough). */
-export const SIMPLE_LLM_TASKS: readonly LlmTask[] = ["selection", "semantic"] as const;
+export const SIMPLE_LLM_TASKS: readonly LlmTask[] = ["intent", "semantic"] as const;
 
 export function isSimpleLlmTask(task: LlmTask): boolean {
   return (SIMPLE_LLM_TASKS as readonly string[]).includes(task);
 }
 
 export type LlmEnvConfig = {
-  /** Default backend for HARD tasks (proposal/consequence). */
+  /** Default backend for HARD tasks (consequence). */
   backend: LlmBackend;
-  /** Default backend for SIMPLE tasks (selection/semantic). Defaults to local. */
+  /** Default backend for SIMPLE tasks (intent/semantic). Defaults to local. */
   simpleBackend: LlmBackend;
-  /** Per-task backend overrides (LLM_BACKEND_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}). */
+  /** Per-task backend overrides (LLM_BACKEND_{INTENT,CONSEQUENCE,SEMANTIC}). */
   taskBackends: Partial<Record<LlmTask, LlmBackend>>;
   /** Optional model override applied to SIMPLE tasks only (LLM_SIMPLE_MODEL). */
   simpleModel?: string;
@@ -449,8 +449,8 @@ export type LlmEnvConfig = {
    */
   jsonMode: boolean;
   /**
-   * F14: per-task temperatures (LLM_TEMPERATURE_{PROPOSAL,SELECTION,
-   * CONSEQUENCE,SEMANTIC}), each falling back to LLM_TEMPERATURE.
+   * F14: per-task temperatures (LLM_TEMPERATURE_{INTENT,CONSEQUENCE,
+   * SEMANTIC}), each falling back to LLM_TEMPERATURE.
    * Entries are present only when the corresponding env var (or the
    * global LLM_TEMPERATURE) is set; unset tasks use
    * DEFAULT_TASK_TEMPERATURES. Mirrors the LLM_MAX_TOKENS_* pattern,
@@ -459,7 +459,7 @@ export type LlmEnvConfig = {
   temperatureByTask: Partial<Record<LlmTask, number>>;
   /**
    * Exp-6 item 6: token budgets proportional to payload
-   * (LLM_MAX_TOKENS_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}) — the
+   * (LLM_MAX_TOKENS_{INTENT,CONSEQUENCE,SEMANTIC}) — the
    * consequence prompt is the long pole, the semantic judge the short one.
    */
   maxTokensByTask: Partial<Record<LlmTask, number>>;
@@ -581,25 +581,23 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
   // only for hard tasks that are worth it.
   const simpleBackend = parseBackend(env["LLM_SIMPLE_BACKEND"]) ?? "ollama";
   const taskBackends: Partial<Record<LlmTask, LlmBackend>> = {};
-  const proposal = parseBackend(env["LLM_BACKEND_PROPOSAL"]);
-  const selection = parseBackend(env["LLM_BACKEND_SELECTION"]);
+  const intent = parseBackend(env["LLM_BACKEND_INTENT"]);
   const consequence = parseBackend(env["LLM_BACKEND_CONSEQUENCE"]);
   const semantic = parseBackend(env["LLM_BACKEND_SEMANTIC"]);
-  if (proposal) taskBackends.proposal = proposal;
-  if (selection) taskBackends.selection = selection;
+  if (intent) taskBackends.intent = intent;
   if (consequence) taskBackends.consequence = consequence;
   if (semantic) taskBackends.semantic = semantic;
   const simpleModel = env["LLM_SIMPLE_MODEL"]?.trim() || undefined;
   // Exp-6 item 6: token budgets proportional to payload
-  // (LLM_MAX_TOKENS_{PROPOSAL,SELECTION,CONSEQUENCE,SEMANTIC}).
+  // (LLM_MAX_TOKENS_{INTENT,CONSEQUENCE,SEMANTIC}).
   const maxTokensByTask: Partial<Record<LlmTask, number>> = {};
-  for (const task of ["proposal", "selection", "consequence", "semantic"] as const) {
+  for (const task of ["intent", "consequence", "semantic"] as const) {
     const raw = env[`LLM_MAX_TOKENS_${task.toUpperCase()}`];
     const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
     if (Number.isFinite(n) && n > 0) maxTokensByTask[task] = Math.floor(n);
   }
-  // F14: per-task temperatures (LLM_TEMPERATURE_{PROPOSAL,SELECTION,
-  // CONSEQUENCE,SEMANTIC}), each falling back to LLM_TEMPERATURE. Chain:
+  // F14: per-task temperatures (LLM_TEMPERATURE_{INTENT,CONSEQUENCE,
+  // SEMANTIC}), each falling back to LLM_TEMPERATURE. Chain:
   // LLM_TEMPERATURE_<TASK> → LLM_TEMPERATURE → DEFAULT_TASK_TEMPERATURES.
   // Unlike maxTokens, temperature 0 is meaningful (deterministic), so the
   // validity floor is >= 0 rather than > 0.
@@ -608,7 +606,7 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
     globalTempRaw !== undefined && globalTempRaw !== "" ? Number(globalTempRaw) : NaN;
   const globalTempValid = Number.isFinite(globalTempN) && globalTempN >= 0;
   const temperatureByTask: Partial<Record<LlmTask, number>> = {};
-  for (const task of ["proposal", "selection", "consequence", "semantic"] as const) {
+  for (const task of ["intent", "consequence", "semantic"] as const) {
     const raw = env[`LLM_TEMPERATURE_${task.toUpperCase()}`];
     const n = raw !== undefined && raw !== "" ? Number(raw) : NaN;
     if (Number.isFinite(n) && n >= 0) temperatureByTask[task] = n;
@@ -635,10 +633,10 @@ export function resolveLlmEnv(env: NodeJS.ProcessEnv = process.env): LlmEnvConfi
       apiKey: env["OLLAMA_API_KEY"],
     },
     timeoutMs: defaultTimeoutMsFor(
-      taskBackends.proposal ?? backend,
-      (taskBackends.proposal ?? backend) === "laya-local"
+      taskBackends.consequence ?? backend,
+      (taskBackends.consequence ?? backend) === "laya-local"
         ? (env["LAYA_MODEL"] ?? LocalLayaProvider.DEFAULT_MODEL)
-        : (taskBackends.proposal ?? backend) === "ollama"
+        : (taskBackends.consequence ?? backend) === "ollama"
           ? (env["OLLAMA_MODEL"] ?? OllamaProvider.DEFAULT_MODEL)
           : (env["JOINGONKA_MODEL"] ?? JoinGonkaProvider.DEFAULT_MODEL),
       env["LLM_TIMEOUT_MS"] !== undefined && env["LLM_TIMEOUT_MS"] !== ""
@@ -710,12 +708,11 @@ export function createProviderFromEnv(
 
 /**
  * F14: built-in per-task temperature defaults, used when neither
- * LLM_TEMPERATURE_<TASK> nor LLM_TEMPERATURE is set. Classification tasks
- * (selection, semantic) want determinism; creative tasks keep 0.9.
+ * LLM_TEMPERATURE_<TASK> nor LLM_TEMPERATURE is set. The intent call and
+ * semantic judge want determinism; the narrator keeps 0.9.
  */
 export const DEFAULT_TASK_TEMPERATURES: Record<LlmTask, number> = {
-  proposal: 0.9,
-  selection: 0.2,
+  intent: 0.2,
   consequence: 0.9,
   semantic: 0.2,
 };

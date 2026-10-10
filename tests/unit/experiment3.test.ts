@@ -16,11 +16,9 @@ import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { Logger } from "../../src/logging/logger.js";
 import { makeTestDeps, makeTinyWorld, errorText, triedHist } from "../helpers.js";
 import {
-  buildConsequenceContext,
   buildObjectIdCatalog,
-  buildProposalContext,
   buildRelationshipRefresh,
-  buildSelectionContext,
+  buildNarrateContext,
 } from "../../src/engine/contextBuilder.js";
 import { renderSuffix } from "../../src/llm/prompts.js";
 import { mockClassifyAction, MockSemanticJudge } from "../../src/mocks/mockSemanticJudge.js";
@@ -281,16 +279,14 @@ describe("exp3-7 fuzzy object-ID repair (ticks 10/11)", () => {
 });
 
 describe("exp3-9/10/11/12/13 prompting", () => {
-  it("consequence context carries the object-ID catalog and copy rule", () => {
+  it("narrate context carries the executed-facts contract and copy rule", () => {
     const world = officeWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Pour a coffee." });
-    expect(ctx).toContain("OBJECT IDS");
-    expect(ctx).toContain("anton_mug");
-    // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
-    expect(ctx).toContain("EXACT QUOTE RULE");
-    // Phase 3: the patch demand is replaced by the engine-ownership rule.
-    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
-    expect(ctx).toContain("at most 6 cells");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Pour a coffee." }, undefined, {});
+    expect(ctx).toContain("NARRATE THE EXECUTED FACTS");
+    // The copy rule is rewritten around the engine-dictated exact quote.
+    expect(ctx).toContain("the narrative MUST contain it character-for-character");
+    // Engine ownership: never invent actions the facts don't show.
+    expect(ctx).toContain("Narrate ONLY the executed facts above");
   });
 
   it("relationship refresh names known colleagues, never strangers", () => {
@@ -324,10 +320,10 @@ describe("exp3-9/10/11/12/13 prompting", () => {
     expect(suffix).not.toContain("quotedSpeech");
   });
 
-  it("proposal/selection contexts carry the relationship refresh", () => {
+  it("the narrate context carries the relationship refresh", () => {
     const world = officeWorld();
-    expect(buildProposalContext(world, "u")).toContain("KNOWN COLLEAGUES");
-    expect(buildSelectionContext(world, "u", ["Wave."])).toContain("KNOWN COLLEAGUES");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Wave." }, undefined, {});
+    expect(ctx).toContain("KNOWN COLLEAGUES");
   });
 });
 
@@ -711,9 +707,10 @@ describe("phase4 render-only contract (actual Phase 4)", () => {
     });
     await resolveRender(makeTinyWorld(), { actorId: "u", text: "Wave." }, cleanDeps);
 
-    // Liveness turn: the render keeps failing prose validation and the
-    // actor has hit the consecutive-fallback threshold — the liveness
-    // floor synthesizes prose instead of freezing the turn.
+    // Liveness turn: the narrate engine throws and the actor has hit the
+    // consecutive-fallback threshold — the liveness floor synthesizes prose
+    // instead of freezing the turn. (PLAN_V2 Phase 4: prose violations are
+    // accepted-and-marked; only a throwing engine reaches liveness.)
     const liveWorld = officeWorld();
     liveWorld.actors.find((a) => a.id === "u")!.x = 3;
     liveWorld.actors.find((a) => a.id === "u")!.y = 3;
@@ -722,7 +719,7 @@ describe("phase4 render-only contract (actual Phase 4)", () => {
     }
     const liveDeps = makeTestDeps(logger, {
       consequenceEngine: {
-        resolve: async () => ({ narrative: "U waves at Liam.", reasoning: "bad" }),
+        resolve: async () => { throw new Error("provider down"); },
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
@@ -733,19 +730,24 @@ describe("phase4 render-only contract (actual Phase 4)", () => {
     );
     expect(lived.liveness).toBe(true);
 
-    // Fallback turn: the render fails and the actor is below the liveness
-    // threshold (a user turn never gets liveness).
+    // Fallback turn: the narrate engine throws and the actor is below the
+    // liveness threshold (a user turn never gets liveness).
     const farWorld = makeTinyWorld();
     farWorld.scene.width = 20;
     farWorld.scene.height = 20;
     farWorld.userActorId = "u";
     const fallbackDeps = makeTestDeps(logger, {
       consequenceEngine: {
-        resolve: async () => ({ narrative: "U waves at Liam.", reasoning: "bad" }),
+        resolve: async () => { throw new Error("provider down"); },
       } as never,
       config: { ...makeTestDeps(logger).config!, maxRetries: 0, autosaveEnabled: false },
     });
-    const fell = await resolveRender(farWorld, { actorId: "u", text: "Wave." }, fallbackDeps);
+    const fell = await resolveRender(
+      farWorld,
+      { actorId: "u", text: "Wave." },
+      fallbackDeps,
+      { allowLiveness: false },
+    );
     expect(fell.render.narrative).toBe("Nothing changes.");
 
     const summary = summarizeTurnOutcomes(logger.store.all());

@@ -26,18 +26,22 @@ does.
 
 ## Design principles (as implemented)
 
-### P1. LLMs propose, deterministic code decides
+### P1. LLMs decide intent and narrate; deterministic code executes (PLAN_V2)
 
-Three LLM roles exist — **Proposal** (invent 2–10 candidate action sentences),
-**Selection** (pick the final action), and **Render** (describe what happened
-as prose). None of them can mutate the world. Every render is a
-`ConsequenceResult` — prose only (`narrative`, `thoughts`, `emotion`,
-`reasoning?`) — that must pass `validateRenderProse`
-(`src/engine/validate/render.ts`) before `applyRenderResult`
-(`src/engine/patchApplier.ts`) touches state. Psychology (thoughts, emotion,
-goal, memories) is free-form text; physics and turn structure are hard rules.
-The engine executes first (Phases 1–3: movement, speech quotes, manipulation);
-the render narrates the executed facts.
+Two LLM roles exist — **Intent** (decide the ONE thing the actor does next:
+`{ action, quote }`, one third-person sentence the engine executes
+literally) and **Narrate** (describe what happened as prose). Neither can
+mutate the world. Every narration is a `ConsequenceResult` — prose only
+(`narrative`, `thoughts`, `emotion`, `reasoning?`) — that must pass
+`validateRenderProse` (`src/engine/validate/render.ts`) before
+`applyRenderResult` (`src/engine/patchApplier.ts`) touches state.
+Psychology (thoughts, emotion, goal, memories) is free-form text; physics
+and turn structure are hard rules. The pipeline is: intent → Laya parse →
+engine executes and clamps → narrate the executed facts. The old
+propose-then-pick pipeline (LLM proposal + LLM/Laya selection engines,
+intent cascade, renderability screen) was deleted in PLAN_V2 Phase 6 —
+it was over-engineered scar tissue that cost 3–4 provider calls per turn
+against a 30-second turn budget.
 
 ### P2. Patch-based world mutation
 
@@ -85,13 +89,16 @@ before the loop, so there is no movement failure left to repair.
 
 ### P7. Tiered intelligence routing
 
-Proposal and Consequence ("hard": creative, long-context, memory/belief
-compounding) default to the hosted backend (`joingonka`, GLM-5.3-Flash);
-Selection and SemanticJudge ("simple": single-pick classification) default to
-a local Ollama model. Per-task `LLM_BACKEND_*` overrides exist
-(`src/llm/provider.ts`). All backends speak the OpenAI Chat Completions
-dialect through one `OpenAICompatibleProvider` base class. Mock engines
-(`src/mocks/`) implement the same interfaces for offline/test runs.
+Consequence ("hard": creative, long-context prose) defaults to the hosted
+backend (`joingonka`, GLM-5.3-Flash); Intent and SemanticJudge ("simple":
+one structured decision) default to a local Ollama model. Per-task
+`LLM_BACKEND_*` overrides exist (`src/llm/provider.ts` —
+`LLM_BACKEND_INTENT`, `LLM_BACKEND_CONSEQUENCE`, `LLM_BACKEND_SEMANTIC`).
+Per-task temperatures (`LLM_TEMPERATURE_*`: intent 0.2, consequence 0.9,
+semantic 0.2) and token budgets (`LLM_MAX_TOKENS_*`) ride the same pattern.
+All backends speak the OpenAI Chat Completions dialect through one
+`OpenAICompatibleProvider` base class. Mock engines (`src/mocks/`)
+implement the same interfaces for offline/test runs.
 
 ### P8. Perception is spatial, memory compounds
 
@@ -135,118 +142,145 @@ economics: budget predicate, duration formatting, generated-findings
 report) under `src/engine/turnTelemetry.ts` (`ProviderCallCounter`) and
 the orchestrator's per-turn `turn_telemetry` event.
 
-## Turn pipeline
+## Turn pipeline (PLAN_V2 — the only turn loop)
 
 `runTurn(world, deps)`:
 
 1. **Turn start** — acting actor = `order[turnIndex % order.length]`; logs
    `turn_started` with a full world clone.
-2. **Action choice** — user actor: action comes straight from the UI
-   (proposal/selection skipped). NPC: `proposalEngine.propose` →
-   `selectionEngine.select` → prefix stripping → `validateSelectionForActor`
-   (POV-swap and verb+noun-repeat screens; substitutes the first clean
-   candidate or the `"Stay where you are and observe the situation."`
-   fallback).
-3. **Execute + render (Phase 4)** — `resolveRender`:
-   - **Execute (engine, Phases 1–3)** — before the render call, the engine
-     executes the turn deterministically:
-     - *Movement* — `planMovementSemantics` resolves movement intent from
-       the action text, and `executeMovement` (`movementExecutor.ts` →
-       `src/core/movement.ts`) computes the step: destination from semantics
-       (`destinationActorId` → `destinationObjectId` → `contactActorId`,
-       contact promoted so handshakes close distance), pathfind via
-       4-directional A*, final cell returned with the path. `null` for
-       stationary intents. Contact verbs (`hasContactVerb` in
-       `src/core/movement.ts`) name the contact actor deterministically.
-     - *Speech* — `planSpeech` extracts the action text's exact quote
-       deterministically (`speechExecutor.ts` → `src/core/speech.ts`;
-       multi-quote actions are out of scope — the FIRST segment is the
-       contract).
-     - *Manipulation* — `executeManipulation` (`manipulationExecutor.ts` →
-       `src/core/objects.ts`) plans the acting actor's pick-up / put-down /
-       hand-over deterministically from the action text and the affordance
-       table.
-     - *Pose* — `planPose` (`src/core/text.ts`) resolves sit/stand from the
-       action text.
-   - **Render (LLM)** — a single render call (`llmConsequenceEngine.ts`)
-     narrates the executed facts. The prompt says "here is what happened
-     (executed, final); narrate it," with the executed-facts block
-     (movement, quote, manipulation, pose) as its source of truth.
-     Narrative *invention* beyond the facts is a voice violation. The
-     schema is prose-only — any `actorPatches` / `objectPatches` / `effects`
-     the model emits are stripped and ignored (logged at debug).
-   - **Prose-only validation** — `validateRenderProse(world, action,
-     render, facts)`: voice, pronouns, echo/placeholder, observer-discipline,
-     exact-quote containment, identity, and grounding vs the engine facts
-     (movement, pose, manipulation, contact adjacency, speech coverage,
-     thought grounding). No patch validators in the path.
-   - Max 2 attempts (`RENDER_MAX_ATTEMPTS`); per attempt the deterministic
-     repairs run first (quote backstop via `reinsertQuote`, doubled-prefix
-     collapse), then validation; failures build targeted retry feedback
-     (`renderRetryFeedback`).
-   - Post-loop: the prose liveness floor (`buildLivenessConsequence` when
-     `consecutiveFallbacks ≥ livenessFallbackThreshold`, default 3; NPC
-     turns only) — a deterministic minimal prose turn so dialogue can
-     advance by words when bodies cannot.
-   - `structuredClone(FALLBACK_CONSEQUENCE)` ("Nothing changes.").
-4. **Apply** — `applyRenderResult` with fallback/liveness/honest-history options; memory
-   caps trim oldest (memories 50, beliefs/relationships 30); history capped at
-   200.
-5. **Advance** — `incrementTick` + `advanceTurn`; autosave to
-   `saves/<id>_tick<N>.json`; `turn_completed` logged with another full world
-   clone.
+2. **Intent (1 LLM call)** — the user actor's action comes straight from the
+   UI (no model call). Every NPC: `intentEngine.intent(world, actorId)` →
+   `{ action, quote }`: ONE third-person sentence the engine executes
+   literally (no teleporting, no invented props) plus the exact quoted
+   speech (or `""`). Exactly 1 retry, then the deterministic
+   `FALLBACK_INTENT` ("waits and observes the situation."). Logged
+   `intent_started` / `intent_completed` / `intent_failed`; occupies the
+   `proposal` slot of the turn call budget.
+3. **Parse (1 local Laya decide)** — `parseActionSemantics`
+   (`src/engine/semanticParser.ts`) runs the Laya semantic judge over the
+   single action sentence: ONE batched `decide()` with the judge question
+   set (`q_moves` / `q_speaks` / `q_addressee` / `q_destination` /
+   `q_contact`, `src/decision/judgeQuestions.ts`) → `ActionSemantics` for
+   the executors. Laya is a parser here, never a decider — it never sees
+   scene-level classification (this kills the Stage-3 miscalibration
+   failure by construction: there is no scene-level classification left to
+   get wrong). Fail-open: any parse failure (Laya down, protocol error,
+   `LAYA_MODE=off`) returns `undefined` and the executors' deterministic
+   text parsers take over; the turn never blocks on the parser. Logged
+   `parser_completed` / `parser_fallback` (module "laya"). The locomotion
+   veto (`checkLocomotionVeto`) also runs here when the plan moves — a
+   genuine physics guard: Laya only ever VETOES a planned move it is
+   confident needs no relocation; failure or low confidence keeps the
+   deterministic verdict.
+4. **Execute + clamp (engine, 0 calls)** — `resolveRender` executes the
+   turn deterministically from the action text (+ pre-parsed semantics
+   when present): movement (`movementExecutor.ts` → `src/core/movement.ts`),
+   speech quote (`speechExecutor.ts` → `src/core/speech.ts`), manipulation
+   (`manipulationExecutor.ts` → `src/core/objects.ts`), pose (`planPose` →
+   `src/core/text.ts`). The clamp policy (`src/core/clamp.ts` →
+   `src/engine/clampPolicy.ts`) records attempted-vs-executed
+   (`clampMovement` / `clampContact` / `clampManipulation` →
+   `AttemptRecord`); a failed attempt is a story beat ("she reaches for
+   his hand, but he's across the room"), never `(not done)`. Logged
+   `clamp_applied`.
+5. **Narrate (1 LLM call)** — `LLMConsequenceEngine.resolve` narrates the
+   executed facts (`buildNarrateContext`): movement / quote / manipulation /
+   pose facts + the clamp record + grounding rules + identity/roster +
+   the director style guide. The prompt carries NO history section (the
+   echo attractor is gone) and NO per-actor memory dump — the executed
+   facts are the narrator's only source of truth. The schema is prose-only
+   (stray patch keys are stripped and ignored). One retry on validation
+   failure, then accept-and-mark honest (`narrate_accepted_despite_violations`)
+   — a flawed paragraph beats a dead turn. When the engine itself throws:
+   the NPC liveness floor (`buildLivenessConsequence` when
+   `consecutiveFallbacks ≥ livenessFallbackThreshold`, default 3) or the
+   "Nothing changes." fallback (user turns, and NPCs below threshold).
+   `narrateAcceptedDespiteViolations` is recorded on the result.
+6. **Director (Phase 5)** — two halves: the style guide verbatim in the
+   narrate prompt (how to handle drama — never invent it) + the
+   deterministic staleness trigger (`src/core/director.ts`): when an actor
+   repeats the same verb|noun action core with a byte-identical physical
+   world for `directorStalenessThreshold` turns (default 6), the scenario's
+   next `directorEvents` incident is injected as a WORLD FACT in the next
+   NPC intent prompt and as a history entry (so the picture shows it).
+   Each incident fires at most once across save/load.
+7. **Apply** — `applyRenderResult` writes the acting actor's
+   thoughts/emotion from the prose; observers are never touched (their
+   response belongs to their own turn). Memory caps trim oldest
+   (memories 50, beliefs/relationships 30); history capped at 200, one
+   tickless entry per turn.
+8. **Advance** — `incrementTick` + `advanceTurn`; autosave to
+   `saves/<id>_tick<N>.json`; `turn_completed` + `turn_telemetry` (the
+   per-stage provider-call breakdown) logged.
 
-**Render validation** (`src/engine/validate/render.ts`, Phase 4): the schema
-strips unknown keys (old `actorPatches` / `objectPatches` / `effects` are
+**Turn economics.** A clean NPC turn costs exactly 2 LLM calls (intent +
+narrate) + 1 local Laya decide (parse); a user turn costs 1 + 1 (intent
+skipped). `ProviderCallCounter` (`src/engine/turnTelemetry.ts`) counts
+provider-backed engine invocations per turn (engines opt in via
+`providerBacked`; the Laya parser is local and costs nothing) — intent
+occupies the `proposal` slot, narrate the `render` slot, `selection`
+stays 0. Asserted by `tests/integration/v2TurnCost.test.ts` (scripted
+proxy: provider-backed stub engines + a counting Laya client).
+`TURN_TIME_BUDGET_MS` (default 30000, Anton's hard line) logs a loud
+`turn_time_exceeded` event — telemetry only, never an abort.
+
+**Observer triage: cut (Phase 6 decision).** The old pipeline ran a
+triage/salience classification to decide which observers react, and wrote
+their thoughts/emotions from the acting turn's consequence call. In v2
+the narrate contract forbids describing any other actor's perception or
+reaction ("Observers react in their own thoughts, on their own turns"),
+and `applyRenderResult` writes thoughts/emotion for the acting actor
+only — an observer's inner life updates when their own turn's narrate
+call runs. The triage machinery is therefore genuinely unused: no code
+path reads it, no prompt needs it, and keeping a classifier for a job
+the architecture no longer has would be dead weight. Cut outright; if
+observer reactions ever feel flat in long runs, the fix belongs in the
+director (a staleness-style trigger for ambient reactions), not in a
+revived triage step.
+
+**Render validation** (`src/engine/validate/render.ts`): the schema strips
+unknown keys (old `actorPatches` / `objectPatches` / `effects` are
 ignored, logged at debug); then prose-only checks run against the
-engine-executed facts — voice, pronouns, echo/placeholder, observer-discipline,
-exact-quote containment, identity, and grounding (narrated movement requires
-an engine move; narrated locomotion aimed at the wrong actor contradicts the
-engine destination — `movement.destination_mismatch`; narrated pose changes
-require the engine pose; narrated manipulation requires an executed
-manipulation; narrated contact requires post-move adjacency; questions and
-utterances must survive rendering; thoughts stay grounded).
+engine-executed facts — voice, pronouns, echo/placeholder,
+observer-discipline, exact-quote containment, identity, and grounding
+(narrated movement requires an engine move; narrated locomotion aimed at
+the wrong actor contradicts the engine destination —
+`movement.destination_mismatch`; narrated pose changes require the engine
+pose; narrated manipulation requires an executed manipulation; narrated
+contact requires post-move adjacency; questions and utterances must
+survive rendering; thoughts stay grounded).
 
-Deliberate non-goal (Stage-1 A4 decision): validators police *false claims*,
-not *missing coverage*. A narrative that omits an executed fact ("looks at
-the door" for a type-on-laptop turn) is infelicitous but not fiction, and
-forcing mentions risks retry inflation on small models. The repetition
-screen, however, is engine machinery — its cores derive from the
-ground-truth action text (`HistoryEntry.actionText`), never from the
+Deliberate non-goal (Stage-1 A4 decision): validators police *false
+claims*, not *missing coverage*. A narrative that omits an executed fact
+("looks at the door" for a type-on-laptop turn) is infelicitous but not
+fiction, and forcing mentions risks retry inflation on small models. The
+repetition screen, however, is engine machinery — its cores derive from
+the ground-truth action text (`HistoryEntry.actionText`), never from the
 narrative, so a mis-render cannot poison downstream dedup. Omission rates
 are a Stage-2 (14B) measurement before any scoping.
 
-**Movement physics** (Phase 1 — engine-owned): the model never emits
-coordinates. `src/core/movement.ts` (pure) resolves the destination and
-computes the step; `src/engine/movementExecutor.ts` (orchestration) runs it
-once per turn and merges the result. Per-turn cap 6 cells (half perception
+**Movement physics** (engine-owned): the model never emits coordinates.
+`src/core/movement.ts` (pure) resolves the destination and computes the
+step; `src/engine/movementExecutor.ts` (orchestration) runs it once per
+turn and merges the result. Per-turn cap 6 cells (half perception
 radius); path existence via 4-directional A* on an integer grid
-(`src/core/pathfinding.ts`); directed steps must get *strictly closer* to the
-named destination — the engine always takes the closest legal cell within the
-cap, so real progress holds by construction (no token shuffles possible);
-arrival prose must end within 4 cells of the landmark. Validator movement
-checks are engine-output invariants (`assertMovementInvariants`), not retry
-triggers: `movement.no_position_change`, `movement.position_unchanged`,
-`movement.no_progress_actor`, and `movement.no_progress_object` are deleted.
+(`src/core/pathfinding.ts`); directed steps must get *strictly closer*
+to the named destination — the engine always takes the closest legal
+cell within the cap, so real progress holds by construction (no token
+shuffles possible); arrival prose must end within 4 cells of the
+landmark.
 
-**Speech** (Phase 2 — engine-owned): the model never invents dialogue.
+**Speech** (engine-owned): the model never invents dialogue.
 `src/core/speech.ts` (pure) owns exact-quote extraction
 (`extractExactQuote` — first quoted segment of the action text; the
 documented multi-quote rule), verbatim containment (`quoteContained` —
 character-for-character modulo quote-style canonicalization), and
 deterministic reinsertion (`reinsertQuote`); `src/engine/speechExecutor.ts`
-(orchestration) runs the turn pre-pass once, states the render contract as
-`EXACT QUOTE` facts, and applies the in-loop backstop
-(`applyEngineSpeech`) before validation. The validator's
-`speech.exact_quote_missing` gate is the backstop (registered as a
-speech-nit code, so salvage tier 1 can still downgrade it); the old
-`repairDroppedQuotes` salvage tier delegates to the same pure core and is
-now a pure backstop rather than a repair path. Paraphrase is no longer an
-acceptable render of a quoted turn — the backstop appends the exact quote
-deterministically instead of burning a retry. Kills B1 (invented
-dialogue).
+(orchestration) runs the turn pre-pass once, states the render contract
+as `EXACT QUOTE` facts, and applies the in-loop backstop
+(`applyEngineSpeech`) before validation.
 
-**Object manipulation** (Phase 3 — engine-owned): the model never emits
+**Object manipulation** (engine-owned): the model never emits
 objectPatches or `prop` patches. `src/core/objects.ts` (pure) owns the
 canonical affordance kind table (`affordanceForObject` — pickable /
 propName / surface / container / brewSource, first match wins), the
@@ -257,19 +291,14 @@ that imply holding, the "shake hands" exclusion), `planManipulation`
 (transfer events only — stative holds and use verbs are not events), and
 `assertManipulationInvariants`. `src/engine/manipulationExecutor.ts`
 (orchestration) runs the turn pre-pass once, refreshes the plan against
-the merged contact in-loop, and merges via `applyEngineManipulation`;
-`src/engine/objects.ts` builds the immutable snapshot from the world.
+the merged contact in-loop, and merges via `applyEngineManipulation`.
 The manipulated scene object travels with its holder (pick-up → actor's
 cell, put-down → actor's feet, hand-over → recipient's cell). Grounding
 is one-directional: the engine may execute a transfer the narrative
 never names (fine), but narrative describing a transfer the engine did
-not execute fails validation (`object.phantom_manipulation`, tier-2
-salvageable — wording miss, not world corruption). The old prop-stub
-repair, the "model forgot the physical world" retry category, and the
-object/prop patch demands are deleted. Kills prop-stub retries and
-phantom props. Non-goals: multi-step crafting / container nesting
-(single manipulation per turn, documented); object *creation* (still
-model-narrated, engine-ignored).
+not execute fails validation (`object.phantom_manipulation`). Non-goals:
+multi-step crafting / container nesting (single manipulation per turn,
+documented); object *creation* (still model-narrated, engine-ignored).
 
 **LLM constraint ladder** (`src/llm/complete.ts`, `src/schemas.ts`):
 Zod strict schemas for proposal/selection; a lenient "repair" tier for
@@ -281,103 +310,74 @@ detection, id validation against the real roster), and retries with an
 appended repair prompt. `response_format: {type: "json_object"}` is sent by
 default (set `LLM_JSON_MODE=0` to disable).
 
-## Turn economics (Phase 6 — budgets, telemetry, protocol)
+## Turn economics (budgets, telemetry, protocol)
 
 Turn cost is multiplicative: (calls per turn) × (seconds per call).
-Eleven experiment rounds attacked seconds-per-call; the calls-per-turn
-side — where ~70% of exp-7's time went — had no instrumentation. Phase 6
-makes the economics structural. Telemetry only: nothing here changes
-engine behavior.
+PLAN_V2 attacked calls-per-turn structurally: the v2 turn is 2 LLM calls
++ 1 local Laya decide (see Turn pipeline above). The remaining tooling is
+telemetry only — nothing here changes engine behavior.
 
 - **Call budget** (`EngineConfig.turnCallBudget`, default 4): the
   orchestrator counts provider-backed engine invocations per turn
   (`ProviderCallCounter` in `src/engine/turnTelemetry.ts`; engines opt in
-  via `providerBacked` on the engine interfaces — the three LLM engines
-  declare it, the Laya cascade / deterministic stubs / mocks don't).
-  Crossing the budget logs a loud `budget_exceeded` event — never a hard
-  abort (a 5-call turn beats a fallback). Post-Phase-5 shape: ~1 call on
-  the cascade path, 3–4 on the LLM-decision fallback path.
+  via `providerBacked` — the two LLM engines declare it, the Laya parser /
+  deterministic stubs / mocks don't). Crossing the budget logs a loud
+  `budget_exceeded` event — never a hard abort (a 3-call turn beats a
+  fallback).
 - **Per-turn telemetry**: every turn logs a `turn_telemetry` JSONL event
-  with the `proposal / selection+execute / render` ms split, the per-stage
-  call counts, the budget verdict, and the outcome
-  (`clean | liveness | fallback`). The pure types, budget predicate, and
-  report formatting live in `src/core/telemetry.ts`; `--auto` prints a
-  one-row-per-turn running table via the `onTurnTelemetry` hook and warns
-  at the 90 s turn-time gate (`TURN_TIME_GATE_MS`).
+  with the per-stage ms split, the per-stage call counts
+  (`proposal`=intent / `selection`=0 / `render`=narrate), the budget
+  verdict, and the outcome (`clean | liveness | fallback`). The pure
+  types, budget predicate, and report formatting live in
+  `src/core/telemetry.ts`; `--auto` prints a one-row-per-turn running
+  table via the `onTurnTelemetry` hook. `TURN_TIME_BUDGET_MS` (default
+  30000) warns at Anton's 30 s hard line.
 - **Generated findings**: `npm run report:turns -- logs/<session>.jsonl`
-  (new; `scripts/report-turns.ts`) regenerates the exp-7-style findings
-  table — summary, per-turn economics, per-stage latency — from any run's
-  log. Findings docs are generated, never hand-written.
+  (`scripts/report-turns.ts`) regenerates the exp-7-style findings table —
+  summary, per-turn economics, per-stage latency — from any run's log.
+  Findings docs are generated, never hand-written.
+- **`--compare` honesty** (`scripts/eval-run-quality.ts`): the Stage-3
+  lesson is encoded — failed attempts carrying `usage` payloads
+  (`intent_failed` with usage; legacy `proposal_failed` /
+  `selection_failed` in old logs) count in the per-turn call tallies via
+  `failedDecisionCalls`, because a fallback engine that retries internally
+  burns provider calls without ever logging a `*_completed`. Covered by
+  `tests/unit/evalCompare.test.ts`.
 - **Protocol**: `experiments/PROTOCOL.md` is the phase-gate checklist
   (diagnose preflight → 3B smoke → 14B smoke → 20-turn run), plus the
   re-scope-don't-force-merge discipline.
 
-## Decision layer (Phase 5 — Laya cascade as default)
+## Decision layer (PLAN_V2 Phase 6 — the cascade is deleted)
 
-The two remaining LLM calls (proposal, selection) are replaced by the
-Laya decision cascade. A turn becomes: **cascade (seconds, local) + 1
-render call**. LLM proposal/selection remain as the fallback behind
-`LLM_DECISION_FALLBACK=1` (default ON during transition; the fallback is
-removed only after the cascade beats it on the eval harness for 3
-consecutive live runs).
+The Laya decision cascade (proposal/selection engines, the static
+diagrams, the intent cascade, the renderability screen) is deleted.
+It was the wrong shape for the job: scene-level classification is what
+Stage 3 falsified (the cascade never converted; the comparison measured
+"LLM path + Laya latency tax"). What survives of Laya is exactly two
+things:
 
-**Wiring.** `createLlmEngines` (`src/llm/index.ts`) now sources
-`LayaProposalEngine` / `LayaSelectionEngine` as the default proposal and
-selection engines whenever `LAYA_MODE≠off` (the new default is
-`LAYA_MODE=static`, `LAYA_SELECTION=1`, `LAYA_RENDERABILITY=1`,
-`LAYA_LOCOMOTION=1`; judge/triage/salience/planner/salvageSelect stay
-off). The fallback is the LLM engines when `LLM_DECISION_FALLBACK=1`,
-or the deterministic stubs (`DeterministicProposalEngine` /
-`DeterministicSelectionEngine`, fixed benign suggestions) when it is 0.
-Fail-open is preserved: locomotion veto never throws, the intent cascade
-and renderability screen catch Laya failures and return undefined, and
-every cascade step delegates to its injected fallback on low confidence
-or client failure.
+1. **The semantic parser** (`LayaSemanticJudge`,
+   `src/decision/layaSemanticJudge.ts` + `src/decision/judgeQuestions.ts`):
+   one batched local `decide()` over the single action sentence, producing
+   `ActionSemantics` for the executors (`src/engine/semanticParser.ts`,
+   fail-open). Laya as parser, never decider.
+2. **The locomotion veto** (`checkLocomotionVeto`): a genuine physics
+   guard — Laya only ever VETOES a planned move it is confident needs no
+   relocation. Kept because it guards the world, not because it decides.
 
-**The cascade** (`src/decision/layaProposalEngine.ts`):
-1. **Intent cascade** — the static `SELECTION_CASCADE` diagram (what kind
-   of action → target/addressee → manner), shared via
-   `src/decision/intentCascade.ts` with the intent-first wiring and the
-   selection engine (previously two copies in `layaTurn.ts` and
-   `layaSelectionEngine.ts`).
-2. **Dynamic target question** — built from the live roster/scene via
-   `src/core/decision.ts` (`buildTargetQuestion`), never hardcoded; the
-   winner resolves to an id via `resolveTargetId` (actors by name,
-   objects/landmarks to scene ids, nearest-wins on duplicates).
-3. **Candidate rendering** — deterministic templates
-   (`renderIntentCandidates`); no quotes are ever rendered (unquoted
-   speech is composed by the render call, per Phase 2).
-4. **Exact-intent choice** — one Laya choice over the rendered candidates;
-   the winner becomes the action text and the intent is attached to the
-   `ProposalResult` as fully typed (`{kind, targetKind, targetId,
-   manner?, quote?}`).
-
-**Typed intents → executors.** A fully-typed intent (kind + resolved
-`targetId`) is authoritative for the executors because it generated the
-action text — no translation layer, no text re-parsing:
-move → `movementExecutor` (destination straight from the intent),
-speak → `speechExecutor` (`intent.quote`, else the text parser),
-manipulation → `manipulationExecutor` (text-parsed; the candidate
-templates are written as inverses of the verb ontology, so the
-template → parse round-trip recovers the target deterministically).
-`turnOrchestrator` threads `proposal.intent ?? intentFirst` through
-selection (which skips its redundant cascade when it receives one) and
-`resolveRender`.
-
-**Salvage ranking.** The Phase 5 spec's "salvage ranking" referent was the
-patch-salvage machinery deleted in Phase 4; its living equivalent is the
-cascade's own ranked choice — the `candidate_fit` selection over
-suggestions and the probability-ordered exact-intent pick. Nothing was
-rebuilt.
-
-**Eval.** `scripts/eval-run-quality.ts` gains `--compare <cascadeSave>
-<cascadeLog> <llmSave> <llmLog> [tasks.json]`: side-by-side decision-cost
-(LLM proposal/selection invocations — the Laya engines log neither, so
-zero counts ARE the zero-call proof) and quality rows (fallback rate,
-tasks, memory precision, rejections, bans), with a verdict. Mock-harness
-wins are explicitly marked as not counting toward the live 3-win gate.
+Wiring is slim: `LayaWiring = { client, config }`
+(`src/engine/layaWiring.ts`), `LAYA_MODE=off` disables Laya entirely,
+legacy `static`/`dynamic` values map to `on`. `layaClient.ts` and the
+question-planner infra the parser needs stay; everything else is gone.
 
 ## Flaws
+
+> PLAN_V2 Phase 6 note: several flaws below reference machinery deleted
+> with the v1 turn loop (turnSalvage.ts, actionSemantics.ts,
+> addressee/proposal patch validators). They are kept as historical
+> observations of the old pipeline; the v2 analogues (if any) are noted
+> inline. A full re-audit of this section against the v2 pipeline is
+> future work.
 
 ### Design-level
 
@@ -583,29 +583,31 @@ separately.
 
 ## Open questions
 
-1. **Clean-turn history records the *wish* (action text), salvaged/liveness
-   turns record the *narrative*.** Comments justify both, but `getOpenQuestions`
-   and proposal grounding treat them identically — deliberate asymmetry, or
-   should clean turns record the narrative too?
-2. **The semantic judge is gone from the turn loop** (Phase 4 deleted the
-   judge-classification path — contact verbs and destinations resolve
-   deterministically). Any remaining `SemanticJudge` references are legacy;
-   flag them for removal if found.
-3. **Observer `goal`-rewriting** (F5) — deliberate social-influence lever or an
+1. **History records the narrative** (one tickless entry per turn); the
+   action text survives in `HistoryEntry.actionText` for the repetition
+   cores. The old clean-turn/wish asymmetry is gone with the v1 loop.
+2. **The Laya semantic judge is back in the turn loop as the parser**
+   (PLAN_V2 Phase 2): one batched decide over the action sentence,
+   fail-open. It classifies sentence semantics (moves? speaks? addressee?
+   destination? contact?) — never scene-level decisions. The old
+   "SemanticJudge references are legacy" note is superseded.
+3. **Observer thoughts/emotions (triage/salience): CUT** — decided in
+   Phase 6 (see "Observer triage: cut" above). No code remains.
+4. **Observer `goal`-rewriting** (F5) — deliberate social-influence lever or an
    over-broad allowlist?
-4. **`tick` increments once per turn for the whole world** — not per actor, not
+5. **`tick` increments once per turn for the whole world** — not per actor, not
    wall-clock. Any consumer expecting per-actor ticks or time will misread it.
-5. **Should `moves` grounding really be token-totalitarian** (F1)? The code and
+6. **Should `moves` grounding really be token-totalitarian** (F1)? The code and
    its own comment disagree; the mock judge's adjacency exemption suggests the
    *intent* was judge-aware. Which is the intended contract?
-6. **Exp-6 §4.2.1 destination precedence** — the model was right, the resolver
+7. **Exp-6 §4.2.1 destination precedence** — the model was right, the resolver
    wrong, the merge rule sided wrong. Was the fix (model-declared existing ids
    outrank the resolver) actually landed? Needs a check in
    `engine/deterministicSemantics.ts` / turn salvage.
-7. **Zero object-interaction across 4 experiments.** The engine verifies object
-   patches strictly but never elicits them (`buildObjectAffordanceNudge`
-   notwithstanding) — is object manipulation a real gameplay pillar or dead
-   weight in the validator?
+8. **Zero object-interaction across 4 experiments.** The engine verifies object
+   patches strictly but never elicits them — is object manipulation a real
+   gameplay pillar or dead weight in the validator? (The old
+   `buildObjectAffordanceNudge` reference is gone with the v1 prompts.)
 
 ## Notes on running it
 

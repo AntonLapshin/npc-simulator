@@ -2,23 +2,22 @@
 // Exit criteria: per-turn tokens flat (not linear), open questions persist
 // until answered, newcomer refresh fires in Tanya/Dana subjective contexts,
 // consequence ships a slim snapshot instead of the full world JSON.
+// (PLAN_V2 Phase 6: the narrator now gets executed facts only —
+// buildNarrateContext — no world dump at all.)
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { resolveConfig } from "../../src/config.js";
 import {
-  buildConsequenceContext,
   buildCoworkerAnchor,
-  buildProposalContext,
-  buildSelectionContext,
-  buildSlimObjectiveSnapshot,
   estimatePromptTokens,
   formatHistoryForPrompt,
   getOpenQuestions,
   memoryGrowthStats,
   summarizeListForPrompt,
   worldMemoryBytes,
+  buildNarrateContext,
 } from "../../src/engine/contextBuilder.js";
 import { applyRenderResult } from "../../src/engine/patchApplier.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
@@ -69,39 +68,25 @@ describe("phase5 config limits", () => {
   });
 });
 
-describe("phase5 slim objective snapshot", () => {
-  it("omits far-actor memories and far-object descriptions", () => {
+describe("phase6 narrate context (executed facts)", () => {
+  it("omits far-actor memories and far-object descriptions, ships positions", () => {
     const world = farWorld();
-    const snap = buildSlimObjectiveSnapshot(world, { actorId: "u", text: "Wave." });
-    expect(snap).not.toContain("SECRET-999");
-    expect(snap).not.toContain("SECRET-DESC");
-    // Positions still shipped (movement/adjacency reasoning needs them).
-    expect(snap).toContain("All actor positions");
-    expect(snap).toContain("(29, 29)");
-  });
-
-  it("always includes named movement targets even when far", () => {
-    const world = farWorld();
-    world.actors.find((a) => a.id === "n")!.name = "Nadia";
-    const snap = buildSlimObjectiveSnapshot(world, { actorId: "u", text: "Walk to Nadia." });
-    expect(snap).toContain("Nadia (n) at (29, 29)");
-  });
-
-  it("consequence context keeps the exact-id catalog and one-liners without full-world JSON", () => {
-    const world = farWorld();
-    const ctx = buildConsequenceContext(world, { actorId: "u", text: "Wave." });
-    expect(ctx).toContain("Objective Snapshot");
-    expect(ctx).not.toContain("Full Objective World");
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Wave." }, undefined, {});
     expect(ctx).not.toContain("SECRET-999");
     expect(ctx).not.toContain("SECRET-DESC");
-    // Unchanged Phase 1–4 prompt surface.
-    expect(ctx).toContain("OBJECT IDS");
-    // Phase 2: the copy rule is rewritten around the engine-dictated exact quote.
-    expect(ctx).toContain("EXACT QUOTE RULE");
-    // Phase 3: the patch demand is replaced by the engine-ownership rule.
-    expect(ctx).toContain("OBJECT MANIPULATION IS ENGINE-EXECUTED");
-    expect(ctx).toContain("at most 6 cells");
+    // Positions still shipped (the narrator grounds the scene).
     expect(ctx).toContain("All actor positions");
+    expect(ctx).toContain("(29, 29)");
+  });
+
+  it("carries the executed-facts contract and grounding rules", () => {
+    const world = farWorld();
+    const ctx = buildNarrateContext(world, { actorId: "u", text: "Wave." }, undefined, {});
+    expect(ctx).toContain("NARRATE THE EXECUTED FACTS");
+    expect(ctx).toContain("GROUNDING RULES");
+    expect(ctx).toContain("DIRECTOR STYLE GUIDE");
+    expect(ctx).toContain("IDENTITY RULE");
+    expect(ctx).toContain("ROSTER RULE");
   });
 });
 
@@ -122,7 +107,7 @@ describe("phase5 rolling summarization (flat tokens)", () => {
     expect(out).toBe("- Hi.");
   });
 
-  it("proposal tokens stay flat as stored memories compound", () => {
+  it("narrate prompt tokens stay flat as stored memories compound", () => {
     const makeThick = (n: number): World => {
       const w = makeTinyWorld();
       w.actors.find((a) => a.id === "u")!.memories = Array.from(
@@ -135,25 +120,26 @@ describe("phase5 rolling summarization (flat tokens)", () => {
       );
       return w;
     };
-    const thinLen = buildProposalContext(makeTinyWorld(), "u").length;
-    const sixty = buildProposalContext(makeThick(60), "u").length;
-    const hundredTwenty = buildProposalContext(makeThick(120), "u").length;
-    // Bounded absolute growth over the thin baseline (two sections at budget)…
-    expect(sixty - thinLen).toBeLessThan(4000);
-    expect(sixty).toBeLessThan(12000);
-    // …and ~zero marginal growth as stored entries double (digest absorbs it).
-    expect(hundredTwenty - sixty).toBeLessThan(500);
+    // The narrate prompt carries no per-actor memory dump at all — the
+    // executed facts are the narrator's only source of truth.
+    const thinLen = buildNarrateContext(makeTinyWorld(), { actorId: "u", text: "Wave." }, undefined, {}).length;
+    const sixty = buildNarrateContext(makeThick(60), { actorId: "u", text: "Wave." }, undefined, {}).length;
+    const hundredTwenty = buildNarrateContext(makeThick(120), { actorId: "u", text: "Wave." }, undefined, {}).length;
+    expect(sixty).toBe(thinLen);
+    expect(hundredTwenty).toBe(thinLen);
   });
 
-  it("consequence tokens stay flat as history compounds", () => {
+  it("narrate prompt tokens stay flat as history compounds", () => {
     const thin = makeTinyWorld();
     const thick = makeTinyWorld();
     for (let i = 0; i < 150; i++) {
       thick.history.push(hist(thick, `U: filler turn ${i} describing routine office activity in words.`));
     }
-    const thinLen = buildConsequenceContext(thin, { actorId: "u", text: "Wave." }).length;
-    const thickLen = buildConsequenceContext(thick, { actorId: "u", text: "Wave." }).length;
-    expect(thickLen / thinLen).toBeLessThan(2);
+    // The narrate prompt carries no history section (the echo attractor is
+    // gone) — compounding history cannot move its length.
+    const thinLen = buildNarrateContext(thin, { actorId: "u", text: "Wave." }, undefined, {}).length;
+    const thickLen = buildNarrateContext(thick, { actorId: "u", text: "Wave." }, undefined, {}).length;
+    expect(thickLen).toBe(thinLen);
   });
 
   it("history budget head-truncates with a note", () => {
@@ -174,7 +160,6 @@ describe("phase5 open questions persist until answered", () => {
     }
     // Still open after 25 unrelated turns (old code lost it past the slice).
     expect(getOpenQuestions(world, "n")).toHaveLength(1);
-    expect(buildProposalContext(world, "n")).toContain("where is my desk?");
     // Addressee responds -> their turn to move on; question closes.
     world.history.push(hist(world, "N: Over by the window, U!"));
     expect(getOpenQuestions(world, "n")).toHaveLength(0);
@@ -196,8 +181,6 @@ describe("phase5 per-actor newcomer refresh (Exp-2 item 13)", () => {
     expect(anchor).toContain("Anton (anton)");
     expect(anchor).toMatch(/Sixt/);
     expect(anchor).toMatch(/never a stranger\/candidate/);
-    expect(buildProposalContext(world, "tanya")).toContain("KNOWN HISTORY");
-    expect(buildSelectionContext(world, "tanya", ["Wave."])).toContain("KNOWN HISTORY");
   });
 
   it("Dana's context pins Anton too", () => {
@@ -208,7 +191,6 @@ describe("phase5 per-actor newcomer refresh (Exp-2 item 13)", () => {
   it("emits nothing when no referral/history facts exist (no prompt tax)", () => {
     const world = makeTinyWorld();
     expect(buildCoworkerAnchor(world, "u")).toBe("");
-    expect(buildProposalContext(world, "u")).not.toContain("KNOWN HISTORY");
   });
 
   it("uses only public persona facts — no leaked goals or thoughts", () => {

@@ -36,7 +36,6 @@ import {
 import { validateObjectGrounding } from "../../src/engine/validate/objects.js";
 import { executeManipulation } from "../../src/engine/manipulationExecutor.js";
 import { describePosition } from "../../src/engine/patchApplier.js";
-import { consecutiveIntentFailures } from "../../src/engine/turnLiveness.js";
 import { LIVENESS_HISTORY_MARKER } from "../../src/engine/patchApplier.js";
 import { stepTowardPoint } from "../../src/core/movement.js";
 import { capableTierNoopReason } from "../../src/llm/index.js";
@@ -188,33 +187,6 @@ describe("exp4 item 5 (S2): toward-steps as a movement toolkit", () => {
     const step = stepTowardPoint(world, "tanya", 9, 7);
     // Either null or a non-stacking step; never the actor's own cell.
     if (step) expect(`${step.x},${step.y}`).not.toBe("9,7");
-  });
-});
-
-describe("exp4 item 7 (S3): intent-ban streaks skip liveness entries", () => {
-  it("a liveness-floor turn does not reset the consecutive-failure streak", () => {
-    const world = officeWorld();
-    const fail = (text: string): string =>
-      `Tanya tried: ${text} (not done)${NOT_DONE_SENTINEL}`;
-    world.history.push(
-      { text: fail("I walk over to the open laptop on my desk, turning it to face Anton."), tick: 13, turnIndex: 0 } as never,
-      { text: fail("walk over to the open laptop on her desk, turning it to face Anton."), tick: 16, turnIndex: 1 } as never,
-      // Tick-19 liveness floor: applied, no sentinel — must not break the streak.
-      { text: `Tanya: Tanya holds position, taking in the room. (partial) ${LIVENESS_HISTORY_MARKER}`, tick: 19, turnIndex: 2 } as never,
-    );
-    // Both failures key to move|anton (walk → move stem, Anton mentioned).
-    expect(consecutiveIntentFailures(world, "tanya", "move|anton")).toBe(2);
-  });
-
-  it("a genuinely applied own turn still breaks the streak", () => {
-    const world = officeWorld();
-    const fail = (text: string): string =>
-      `Tanya tried: ${text} (not done)${NOT_DONE_SENTINEL}`;
-    world.history.push(
-      { text: fail("walk over to the open laptop on her desk."), tick: 16, turnIndex: 1 } as never,
-      { text: "Tanya: Tanya asks Anton for help with setting up her computer.", tick: 25, turnIndex: 2 } as never,
-    );
-    expect(consecutiveIntentFailures(world, "tanya", "move|anton")).toBe(0);
   });
 });
 

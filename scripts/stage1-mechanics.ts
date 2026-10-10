@@ -39,8 +39,7 @@ import { NOT_DONE_SENTINEL, type World } from "../src/types.js";
 import { loadScenario } from "../src/engine/scenarioLoader.js";
 import { getCurrentActor } from "../src/engine/worldStore.js";
 import { runTurn, type EngineDependencies } from "../src/engine/turnOrchestrator.js";
-import { MockProposalEngine } from "../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../src/mocks/mockConsequenceEngine.js";
 import { Logger } from "../src/logging/logger.js";
 import { defaultConfig } from "../src/config.js";
@@ -308,16 +307,12 @@ async function runBattery(label: string): Promise<{ world: World; stepMs: number
     }
     const tick = world.tick;
     const quiet = new Logger({ sessionId: `stage1-${label}` });
-    const proposal = new MockProposalEngine(quiet, {
-      [`${step.actorId}@tick${tick}`]: { suggestions: [step.action], reasoning: "stage1 battery" },
-    });
-    const selection = new MockSelectionEngine(quiet, {
-      [`${step.actorId}@tick${tick}`]: { action: step.action, reasoning: "stage1 battery" },
+    const intent = new MockIntentEngine(quiet, {
+      [`${step.actorId}@tick${tick}`]: { action: step.action, quote: "" },
     });
     const consequence = new MockConsequenceEngine(quiet);
     const deps: EngineDependencies = {
-      proposalEngine: proposal,
-      selectionEngine: selection,
+      intentEngine: intent,
       consequenceEngine: consequence,
       logger: quiet,
       config: { ...defaultConfig, autosaveEnabled: false },

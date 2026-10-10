@@ -39,12 +39,9 @@ import {
   executeMovement,
 } from "../../src/engine/movementExecutor.js";
 import {
-  suggestionClusterNouns,
   suggestionCore,
 } from "../../src/engine/contextBuilder.js";
 import {
-  consecutiveClusterFailures,
-  consecutiveIntentFailures,
 } from "../../src/engine/turnLiveness.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { NOT_DONE_SENTINEL } from "../../src/types.js";
@@ -327,64 +324,5 @@ describe("exp5 item 9 (S8): intent-ban keys and cluster bans", () => {
     expect(suggestionCore(world, OFFER, "tanya")).toBe("offer|anton");
   });
 
-  it("cluster nouns capture the shared object kind, not abstract nouns", () => {
-    expect(suggestionClusterNouns(OFFER)).toEqual(["desk", "laptop"]);
-    expect(suggestionClusterNouns(SUBSTITUTE)).toEqual(["laptop"]);
-    // Actor-only intents have no cluster (a failed walk must not ban greetings).
-    expect(suggestionClusterNouns("I wave at Anton.")).toEqual([]);
-  });
-
-  it("ticks-13/19/22 repro: exact-key ban fires; the substitute is cluster-banned", () => {
-    const world = officeWorld();
-    const fail = (text: string): string =>
-      `Tanya tried: ${text} (not done)${NOT_DONE_SENTINEL}`;
-    world.history.push(
-      { text: fail(OFFER), tick: 13, turnIndex: 1 } as never,
-      {
-        text: fail(
-          "I stand up and walk to Anton's desk, extending my hand for a handshake in greeting.",
-        ),
-        tick: 16,
-        turnIndex: 1,
-      } as never,
-      { text: fail(OFFER), tick: 19, turnIndex: 1 } as never,
-    );
-    // The interleaving different intent (tick 16) is skipped, not breaking:
-    // two matching failures → the exact-key streak hits the threshold.
-    expect(consecutiveIntentFailures(world, "tanya", "offer|anton")).toBe(2);
-    // The substitute shares the laptop cluster → banned after the same
-    // two failures, instead of dodging on a different verb|noun key.
-    expect(
-      consecutiveClusterFailures(
-        world,
-        "tanya",
-        suggestionClusterNouns(SUBSTITUTE),
-      ),
-    ).toBe(2);
-    // An unrelated cluster is untouched.
-    expect(
-      consecutiveClusterFailures(
-        world,
-        "tanya",
-        suggestionClusterNouns("I walk to the coffee machine."),
-      ),
-    ).toBe(0);
-  });
-
-  it("an applied own turn breaks the cluster streak", () => {
-    const world = officeWorld();
-    const fail = (text: string): string =>
-      `Tanya tried: ${text} (not done)${NOT_DONE_SENTINEL}`;
-    world.history.push(
-      { text: fail(OFFER), tick: 13, turnIndex: 1 } as never,
-      {
-        text: "Tanya: Tanya opens her laptop and starts the test run.",
-        tick: 20,
-        turnIndex: 1,
-      } as never,
-    );
-    expect(
-      consecutiveClusterFailures(world, "tanya", ["laptop"]),
-    ).toBe(0);
-  });
 });
+

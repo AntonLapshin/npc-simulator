@@ -6,24 +6,11 @@ import { runTurn } from "../../src/engine/turnOrchestrator.js";
 import type { EngineDependencies } from "../../src/engine/turnOrchestrator.js";
 import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { defaultConfig } from "../../src/config.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import type { World } from "../../src/types.js";
 import { makeTestDeps } from "../helpers.js";
-
-const TURN_LOOP_ENV = "TURN_LOOP";
-let savedTurnLoop: string | undefined;
-
-beforeEach(() => {
-  savedTurnLoop = process.env[TURN_LOOP_ENV];
-});
-
-afterEach(() => {
-  if (savedTurnLoop === undefined) delete process.env[TURN_LOOP_ENV];
-  else process.env[TURN_LOOP_ENV] = savedTurnLoop;
-});
 
 /** 12x6 hall, Anton at (1,1), Tanya at (11,1) — exactly 10 cells apart. */
 function makeHandshakeWorld(): World {
@@ -125,7 +112,6 @@ function providerCallsFor(
 
 describe("Phase 4 — narrate executed facts on the v2 path", () => {
   it("the v2 narrate prompt is built from the executed facts, not the intended action", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const { deps, logger } = makeV2Deps(
       "v2narrate1",
       "Tanya waves at Anton.",
@@ -155,7 +141,6 @@ describe("Phase 4 — narrate executed facts on the v2 path", () => {
   });
 
   it("the clamp block rides along in the v2 narrate prompt when a clamp fired", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const { deps, logger } = makeV2Deps(
       "v2narrate2",
       "Tanya shakes Anton's hand.",
@@ -174,7 +159,6 @@ describe("Phase 4 — narrate executed facts on the v2 path", () => {
   });
 
   it("one retry max, then accept-and-mark honest (no fallback, no sentinel)", async () => {
-    process.env[TURN_LOOP_ENV] = "v2";
     const { deps, logger } = makeV2Deps(
       "v2narrate3",
       "Tanya waves at Anton.",
@@ -206,49 +190,6 @@ describe("Phase 4 — narrate executed facts on the v2 path", () => {
     expect(historyText).not.toContain("Nothing changes.");
     expect(historyText).not.toContain("(not done)");
     expect(logger.store.byEvent("fallback_used")).toHaveLength(0);
-    expect(world.tick).toBe(2);
-  });
-});
-
-describe("Phase 4 — v1 narrate behavior untouched", () => {
-  it("a v1 turn keeps the legacy consequence prompt and retry→fallback", async () => {
-    delete process.env[TURN_LOOP_ENV];
-    const logger = createTestLogger("v1narrate1");
-    const deps = makeTestDeps(logger, {
-      selectionEngine: new MockSelectionEngine(logger, {
-        tanya: { action: "Tanya waves at Anton.", reasoning: "scripted" },
-      }),
-      consequenceEngine: new MockConsequenceEngine(logger, {
-        "tanya waves at anton.": {
-          narrative: INVENTED_WALK_NARRATIVE,
-          thoughts: "Bold move.",
-          emotion: "bold",
-          reasoning: "scripted phase-4 v1 turn",
-        },
-      }),
-      config: { ...defaultConfig, autosaveEnabled: false },
-      getUserAction: async () => "Anton looks around.",
-    });
-    let world = makeHandshakeWorld();
-    world = await runTurn(world, deps); // user turn (anton)
-    world = await runTurn(world, deps); // NPC turn (tanya) — v1 proposal+selection
-
-    // Legacy prompt shape, no executed-facts header.
-    const prompt = narratePromptsFor(logger, "tanya")[0]!;
-    expect(prompt).toContain("Action text:");
-    expect(prompt).not.toContain("NARRATE THE EXECUTED FACTS");
-
-    // Legacy outcome: two failed attempts, then the liveness/fallback
-    // path — NOT accept-and-mark.
-    expect(logger.store.byEvent("narrate_accepted_despite_violations")).toHaveLength(0);
-    const fallbackUsed = logger.store.byEvent("fallback_used");
-    expect(fallbackUsed).toHaveLength(1);
-    expect(fallbackUsed[0]!.output).toMatchObject({ narrative: "Nothing changes." });
-    // The fallback narrative lives in the logs; history records the
-    // attempted action as not-done (the legacy v1 contract).
-    const historyText = world.history.map((e) => e.text).join("\n");
-    expect(historyText).toContain("(not done)");
-    expect(historyText).not.toContain("shakes his hand warmly");
     expect(world.tick).toBe(2);
   });
 });

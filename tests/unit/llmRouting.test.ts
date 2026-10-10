@@ -1,5 +1,5 @@
-// Tiered LLM routing: hard tasks (proposal/consequence) on the hosted
-// large model, simple tasks (selection/semantic) on the local small model.
+// Tiered LLM routing: hard tasks (consequence) on the hosted large
+// model, simple tasks (intent/semantic) on the local small model.
 import { describe, expect, it } from "vitest";
 import { createTestLogger } from "../../src/logging/logger.js";
 import {
@@ -29,13 +29,11 @@ describe("tiered routing defaults", () => {
     const cfg = resolveLlmEnv({} as NodeJS.ProcessEnv);
     expect(cfg.backend).toBe("joingonka");
     expect(cfg.simpleBackend).toBe("ollama");
-    expect(resolveTaskBackend("proposal", cfg)).toBe("joingonka");
     expect(resolveTaskBackend("consequence", cfg)).toBe("joingonka");
-    expect(resolveTaskBackend("selection", cfg)).toBe("ollama");
+    expect(resolveTaskBackend("intent", cfg)).toBe("ollama");
     expect(resolveTaskBackend("semantic", cfg)).toBe("ollama");
-    expect(isSimpleLlmTask("selection")).toBe(true);
+    expect(isSimpleLlmTask("intent")).toBe(true);
     expect(isSimpleLlmTask("semantic")).toBe(true);
-    expect(isSimpleLlmTask("proposal")).toBe(false);
     expect(isSimpleLlmTask("consequence")).toBe(false);
   });
 
@@ -43,15 +41,14 @@ describe("tiered routing defaults", () => {
     const cfg = resolveLlmEnv({
       LLM_BACKEND: "joingonka",
       LLM_SIMPLE_BACKEND: "ollama",
-      LLM_BACKEND_SELECTION: "laya-local",
+      LLM_BACKEND_INTENT: "laya-local",
       LLM_BACKEND_SEMANTIC: "joingonka",
     } as unknown as NodeJS.ProcessEnv);
-    expect(cfg.taskBackends.selection).toBe("laya-local");
+    expect(cfg.taskBackends.intent).toBe("laya-local");
     expect(cfg.taskBackends.semantic).toBe("joingonka");
-    expect(resolveTaskBackend("selection", cfg)).toBe("laya-local");
+    expect(resolveTaskBackend("intent", cfg)).toBe("laya-local");
     expect(resolveTaskBackend("semantic", cfg)).toBe("joingonka");
     // Untouched tasks keep tier defaults.
-    expect(resolveTaskBackend("proposal", cfg)).toBe("joingonka");
     expect(resolveTaskBackend("consequence", cfg)).toBe("joingonka");
   });
 
@@ -63,7 +60,7 @@ describe("tiered routing defaults", () => {
   });
 
   it("createProviderForTask builds a local provider for simple tasks by default", () => {
-    const simple = createProviderForTask({} as NodeJS.ProcessEnv, "selection");
+    const simple = createProviderForTask({} as NodeJS.ProcessEnv, "intent");
     expect(simple.name).toBe("ollama");
     const semantic = createProviderForTask({} as NodeJS.ProcessEnv, "semantic");
     expect(semantic.name).toBe("ollama");
@@ -73,17 +70,14 @@ describe("tiered routing defaults", () => {
     const env = {
       LLM_SIMPLE_MODEL: "huihui_ai/llama3.2-abliterate:3b",
     } as unknown as NodeJS.ProcessEnv;
-    const provider = createProviderForTask(env, "selection") as OllamaProvider;
+    const provider = createProviderForTask(env, "intent") as OllamaProvider;
     expect(provider.name).toBe("ollama");
     expect(provider.model).toBe("huihui_ai/llama3.2-abliterate:3b");
   });
 
-  it("createLlmEngines wires all four engines and honors explicit per-task providers", async () => {
+  it("createLlmEngines wires the engines and honors explicit per-task providers", async () => {
     const logger = createTestLogger();
-    const proposalStub = new StubProvider(
-      JSON.stringify({ suggestions: ["Wave.", "Nod."], reasoning: "test" }),
-    );
-    const selectionStub = new StubProvider(JSON.stringify({ action: "Wave.", reasoning: "test" }));
+    const intentStub = new StubProvider(JSON.stringify({ action: "Wave.", quote: "" }));
     const consequenceStub = new StubProvider(
       JSON.stringify({ narrative: "U waves.", actorPatches: [], objectPatches: [], reasoning: "test" }),
     );
@@ -92,19 +86,16 @@ describe("tiered routing defaults", () => {
     );
     const engines = createLlmEngines(logger, {
       providers: {
-        proposal: proposalStub,
-        selection: selectionStub,
+        intent: intentStub,
         consequence: consequenceStub,
         semantic: semanticStub,
       },
     });
     expect(engines.semanticJudge).toBeDefined();
+    expect(engines.intentEngine).toBeDefined();
     const { makeTinyWorld } = await import("../helpers.js");
     const world = makeTinyWorld();
-    await expect(engines.proposalEngine.propose(world, "u")).resolves.toMatchObject({
-      suggestions: ["Wave.", "Nod."],
-    });
-    await expect(engines.selectionEngine.select(world, "u", ["Wave."])).resolves.toMatchObject({
+    await expect(engines.intentEngine.intent(world, "u")).resolves.toMatchObject({
       action: "Wave.",
     });
     await expect(
@@ -182,7 +173,7 @@ describe("F12 failover wiring", () => {
     } as unknown as NodeJS.ProcessEnv;
     const engines = createLlmEngines(logger, {
       env,
-      providers: { consequence: stub, proposal: stub, selection: stub, semantic: stub },
+      providers: { consequence: stub, intent: stub, semantic: stub },
     });
     const provider = (engines.consequenceEngine as unknown as { provider: LLMProvider }).provider;
     expect(provider).toBe(stub);
@@ -205,51 +196,47 @@ describe("F14 per-task temperatures", () => {
   const readTemperature = (p: LLMProvider): number =>
     (p as unknown as { options: { temperature: number } }).options.temperature;
 
-  it("built-in defaults: proposal/consequence 0.9, selection/semantic 0.2", () => {
+  it("built-in defaults: consequence 0.9, intent/semantic 0.2", () => {
     expect(DEFAULT_TASK_TEMPERATURES).toMatchObject({
-      proposal: 0.9,
       consequence: 0.9,
-      selection: 0.2,
+      intent: 0.2,
       semantic: 0.2,
     });
     const cfg = resolveLlmEnv({} as NodeJS.ProcessEnv);
-    expect(resolveTaskTemperature("proposal", cfg)).toBe(0.9);
     expect(resolveTaskTemperature("consequence", cfg)).toBe(0.9);
-    expect(resolveTaskTemperature("selection", cfg)).toBe(0.2);
+    expect(resolveTaskTemperature("intent", cfg)).toBe(0.2);
     expect(resolveTaskTemperature("semantic", cfg)).toBe(0.2);
     // Temperature is task-resolved, backend-independent — use a keyless backend.
     const localEnv = { LLM_BACKEND: "ollama" } as unknown as NodeJS.ProcessEnv;
-    expect(readTemperature(createProviderForTask(localEnv, "proposal"))).toBe(0.9);
-    expect(readTemperature(createProviderForTask(localEnv, "selection"))).toBe(0.2);
     expect(readTemperature(createProviderForTask(localEnv, "consequence"))).toBe(0.9);
+    expect(readTemperature(createProviderForTask(localEnv, "intent"))).toBe(0.2);
     expect(readTemperature(createProviderForTask(localEnv, "semantic"))).toBe(0.2);
   });
 
   it("LLM_TEMPERATURE_* overrides win; unset tasks fall back to LLM_TEMPERATURE", () => {
     const cfg = resolveLlmEnv({
       LLM_TEMPERATURE: "0.5",
-      LLM_TEMPERATURE_SELECTION: "0.1",
+      LLM_TEMPERATURE_INTENT: "0.1",
     } as unknown as NodeJS.ProcessEnv);
-    expect(cfg.temperatureByTask.selection).toBe(0.1);
-    expect(cfg.temperatureByTask.proposal).toBe(0.5);
+    expect(cfg.temperatureByTask.intent).toBe(0.1);
     expect(cfg.temperatureByTask.consequence).toBe(0.5);
     expect(cfg.temperatureByTask.semantic).toBe(0.5);
-    expect(resolveTaskTemperature("selection", cfg)).toBe(0.1);
-    expect(resolveTaskTemperature("proposal", cfg)).toBe(0.5);
+    expect(resolveTaskTemperature("intent", cfg)).toBe(0.1);
+    expect(resolveTaskTemperature("consequence", cfg)).toBe(0.5);
   });
 
   it("temperature 0 is accepted (deterministic); invalid values are ignored", () => {
     const cfg = resolveLlmEnv({
       LLM_TEMPERATURE_SEMANTIC: "0",
-      LLM_TEMPERATURE_SELECTION: "banana",
-      LLM_TEMPERATURE_PROPOSAL: "-1",
+      LLM_TEMPERATURE_INTENT: "banana",
+      LLM_TEMPERATURE_CONSEQUENCE: "-1",
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.temperatureByTask.semantic).toBe(0);
-    expect(cfg.temperatureByTask.selection).toBeUndefined();
-    expect(cfg.temperatureByTask.proposal).toBeUndefined();
+    expect(cfg.temperatureByTask.intent).toBeUndefined();
+    expect(cfg.temperatureByTask.consequence).toBeUndefined();
     expect(resolveTaskTemperature("semantic", cfg)).toBe(0);
     // Invalid per-task values fall through to the built-in default.
-    expect(resolveTaskTemperature("selection", cfg)).toBe(0.2);
+    expect(resolveTaskTemperature("intent", cfg)).toBe(0.2);
   });
 
   it("createProviderForTask applies the per-task temperature", () => {

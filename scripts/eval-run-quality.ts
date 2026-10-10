@@ -262,7 +262,7 @@ function memoryStats(world: World): MemoryStats {
   };
 }
 
-type DecisionStats = {
+export type DecisionStats = {
   /** LLM proposal engine invocations (proposal_completed events). */
   llmProposalCalls: number;
   /** LLM selection engine invocations (selection_completed events). */
@@ -271,6 +271,16 @@ type DecisionStats = {
   layaIntentDecisions: number;
   /** Events carrying a backend usage payload (token counts). */
   usageEvents: number;
+  /**
+   * PLAN_V2 Phase 6 (Stage-3 lesson): failed decision attempts that
+   * burned a provider call — proposal_failed / selection_failed /
+   * intent_failed events carrying a `usage` payload. A fallback engine
+   * that retries internally logs these without ever logging a
+   * *_completed, so counting only completions understates the true
+   * per-turn call cost (Stage 3 reported 23 vs 19; the honest count
+   * from usage-carrying failures was 36 vs 34).
+   */
+  failedDecisionCalls: number;
   selectionRejected: number;
   intentBanned: number;
   proposalFiltered: number;
@@ -281,16 +291,28 @@ type DecisionStats = {
  *
  * The LLM engines log proposal_completed / selection_completed; the Laya
  * cascade engines log neither — so zero counts on the cascade path ARE
- * the zero-LLM-call proof (each event is one engine invocation; internal
- * retries are not separately visible, which only understates LLM cost).
+ * the zero-LLM-call proof (each event is one engine invocation).
+ *
+ * PLAN_V2 Phase 6: internal retries inside a fallback engine log
+ * *_failed events WITH usage payloads but no *_completed — those burned
+ * real provider calls and are counted in failedDecisionCalls.
  */
-function decisionStats(events: any[]): DecisionStats {
+export function decisionStats(events: any[]): DecisionStats {
   const usageEvents = events.filter((e) => e.usage !== undefined && e.usage !== null).length;
+  const hasUsage = (e: any): boolean => e.usage !== undefined && e.usage !== null;
+  const failedDecisionCalls = events.filter(
+    (e) =>
+      hasUsage(e) &&
+      (e.event === "proposal_failed" ||
+        e.event === "selection_failed" ||
+        e.event === "intent_failed"),
+  ).length;
   return {
     llmProposalCalls: byEvent(events, "proposal_completed").length,
     llmSelectionCalls: byEvent(events, "selection_completed").length,
     layaIntentDecisions: byEvent(events, "intent_decided").length,
     usageEvents,
+    failedDecisionCalls,
     selectionRejected: byEvent(events, "selection_rejected").length,
     intentBanned: byEvent(events, "intent_banned").length + byEvent(events, "intent_cluster_banned").length,
     proposalFiltered: byEvent(events, "proposal_filtered").length,
@@ -534,12 +556,17 @@ function runCompare(
   const row = (metric: string, c: string, l: string) =>
     console.log(`  ${metric.padEnd(28)} cascade=${c}  llm=${l}`);
 
-  // Decision cost.
-  const cCalls = cascade.decisions.llmProposalCalls + cascade.decisions.llmSelectionCalls;
-  const lCalls = llm.decisions.llmProposalCalls + llm.decisions.llmSelectionCalls;
+  // Decision cost. PLAN_V2 Phase 6: failed attempts carrying usage
+  // payloads burned provider calls without a *_completed event — they
+  // count here (the Stage-3 36-vs-34 correction).
+  const cCalls = cascade.decisions.llmProposalCalls + cascade.decisions.llmSelectionCalls +
+    cascade.decisions.failedDecisionCalls;
+  const lCalls = llm.decisions.llmProposalCalls + llm.decisions.llmSelectionCalls +
+    llm.decisions.failedDecisionCalls;
   row("turns", String(cascade.outcomes.total), String(llm.outcomes.total));
   row("LLM proposal calls", String(cascade.decisions.llmProposalCalls), String(llm.decisions.llmProposalCalls));
   row("LLM selection calls", String(cascade.decisions.llmSelectionCalls), String(llm.decisions.llmSelectionCalls));
+  row("failed-attempt provider calls", String(cascade.decisions.failedDecisionCalls), String(llm.decisions.failedDecisionCalls));
   row("laya intent decisions", String(cascade.decisions.layaIntentDecisions), String(llm.decisions.layaIntentDecisions));
   row("usage payloads", String(cascade.decisions.usageEvents), String(llm.decisions.usageEvents));
   row("fallback rate",
@@ -597,6 +624,15 @@ function runCompare(
 // Main
 // ---------------------------------------------------------------------------
 
+// Importable for unit tests (decisionStats) — the CLI only runs as a script.
+import { pathToFileURL } from "node:url";
+const isMainEntry =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMainEntry) {
+  main();
+}
+
+function main(): void {
 const args = process.argv.slice(2);
 if (args[0] === "--compare") {
   const [, cascadeSave, cascadeLog, llmSave, llmLog, tasksPath] = args;
@@ -617,4 +653,5 @@ if (args[0] === "--compare") {
     process.exit(1);
   }
   runSingle(savePath, logPath, tasksPath);
+}
 }

@@ -253,7 +253,7 @@ history [n]               World history (default: last 10).
 save [path]               Save world JSON (default: saves/<id>_tick<tick>.json).
 load <path>               Load a saved world JSON.
 log tail [n]              Recent log entries.
-log module <module> [n]   Filter logs by module (turn, proposal, selection, ...).
+log module <module> [n]   Filter logs by module (turn, intent, laya, consequence, ...).
 log tick <tick> [n]       Filter logs by tick.
 debug on|off              Debug view: objective world + LLM prompts/responses/reasoning.
 help                      Show help.
@@ -273,9 +273,9 @@ Notes:
 ### Autonomous mode (no user — all characters are NPCs)
 
 For experiments where nobody plays: every character — including the one the
-scenario names as the user — runs the NPC pipeline (proposal → selection →
-consequence). There are no prompts and no REPL; the loop stops after the
-turn cap, prints the final scene, saves the world, and exits.
+scenario names as the user — runs the NPC pipeline (intent → Laya parse →
+execute/clamp → narrate). There are no prompts and no REPL; the loop stops
+after the turn cap, prints the final scene, saves the world, and exits.
 
 ```bash
 # 30 turns (default cap), mock engines, office scenario
@@ -368,18 +368,17 @@ src/
   engine/                            # scenarioLoader, worldStore, contextBuilder,
                                      # patchApplier, geometry, pathfinding,
                                      # perceptionHelpers, persistence,
-                                     # actionSemantics, deterministicSemantics,
-                                     # movementAssist
-    turnOrchestrator.ts              # turn loop: proposal → selection →
-                                     # consequence → validate → apply
-    turnSalvage.ts                   # degraded-path salvage tiers + honest notes
+                                     # deterministicSemantics, semanticParser,
+                                     # clampPolicy, layaWiring
+    turnOrchestrator.ts              # turn loop: intent → Laya parse →
+                                     # execute/clamp → narrate → apply
     turnLiveness.ts                  # NPC liveness floor (fallback streak)
     turnOutcomes.ts                  # per-turn outcome accounting (SLO)
     physicalValidator.ts             # validateConsequence entry point
     validate/                        # focused validation check groups:
                                      # movement, narrative, objects, speech,
                                      # textUtils (id suggestions)
-  intelligence/                      # Proposal/Selection/Consequence/SemanticJudge
+  intelligence/                      # Intent/Consequence/SemanticJudge
                                      # interfaces (types.ts)
   llm/                               # providers + real LLM engines (Milestone 2)
   mocks/                             # deterministic engines (Milestone 1)

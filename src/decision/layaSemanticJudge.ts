@@ -7,7 +7,7 @@ import type { Action, ActionSemantics, World } from "../types.js";
 import { parseActionQuotes } from "../engine/deterministicSemantics.js";
 import type { LayaAnswer } from "./decisionTypes.js";
 import { buildJudgeState } from "./decisionState.js";
-import { buildJudgeQuestions } from "./diagrams.js";
+import { buildJudgeQuestions } from "./judgeQuestions.js";
 import { LayaClient } from "./layaClient.js";
 
 export type LayaSemanticJudgeDeps = {

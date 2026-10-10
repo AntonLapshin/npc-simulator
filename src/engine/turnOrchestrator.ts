@@ -3,27 +3,14 @@ import type {
   ActionSemantics,
   ConsequenceResult,
   EngineConfig,
-  ProposalResult,
-  SelectionResult,
   World,
 } from "../types.js";
-import type { Intent } from "../decision/decisionTypes.js";
-import type { ChatComplete } from "../decision/questionPlanner.js";
-import { defaultConfig, isLayaIntentFirst, readTurnLoopV2 } from "../config.js";
-import {
-  layaWiringFromEnv,
-  runIntentCascade,
-  runRenderabilityScore,
-  type LayaTurnWiring,
-} from "./layaTurn.js";
+import { defaultConfig } from "../config.js";
+import { layaWiringFromEnv, type LayaWiring } from "./layaWiring.js";
 import { checkLocomotionVeto } from "../decision/layaLocomotion.js";
 import type {
   ConsequenceEngine,
-  DelegatingEngine,
   IntentEngine,
-  ProposalEngine,
-  SelectionEngine,
-  SelectionEngineWithIntent,
 } from "../intelligence/types.js";
 import { applyRenderResult, type ExecutedTurn } from "./patchApplier.js";
 import { parseActionSemantics } from "./semanticParser.js";
@@ -52,7 +39,7 @@ import {
   type TurnTelemetry,
 } from "../core/telemetry.js";
 import { ProviderCallCounter } from "./turnTelemetry.js";
-import { suggestionClusterNouns, suggestionCore, validateSelectionForActor } from "./contextBuilder.js";
+import { suggestionCore } from "./contextBuilder.js";
 import {
   directorConfigFor,
   evaluateDirectorStaleness,
@@ -60,7 +47,6 @@ import {
 } from "../core/director.js";
 import type { DirectorEvent } from "../types.js";
 import { collapseDoubledPrefix } from "./validate/narrative.js";
-import { FALLBACK_SELECTION } from "../llm/llmSelectionEngine.js";
 import { type TurnEngines } from "../llm/index.js";
 import { getCurrentActor } from "./worldStore.js";
 import { defaultSavePath, saveWorld } from "./persistence.js";
@@ -68,7 +54,7 @@ import {
   getHonestHistoryNote,
   isFallbackConsequence,
 } from "./turnSalvage.js";
-import { buildLivenessConsequence, consecutiveClusterFailures, consecutiveFallbacks, consecutiveIntentFailures } from "./turnLiveness.js";
+import { buildLivenessConsequence, consecutiveFallbacks } from "./turnLiveness.js";
 import type { Logger } from "../logging/logger.js";
 import type { LlmUsage } from "../logging/logTypes.js";
 import { errorMessage } from "../util/errors.js";
@@ -95,16 +81,13 @@ export type TurnProgressEvent = {
 };
 
 export type EngineDependencies = {
-  proposalEngine: ProposalEngine;
-  selectionEngine: SelectionEngine;
   consequenceEngine: ConsequenceEngine;
   /**
-   * PLAN_V2 Phase 1: the intent-call engine for the TURN_LOOP=v2 path
-   * (single structured call replacing proposal+selection). Optional so
-   * existing callers keep compiling; the v2 path throws a clear error
-   * when it is missing. Wired by createLlmEngines (LLMIntentEngine).
+   * PLAN_V2 Phase 6: the intent-call engine (single structured call
+   * deciding the actor's next action). Required — v2 is the only turn
+   * loop. Wired by createLlmEngines (LLMIntentEngine).
    */
-  intentEngine?: IntentEngine;
+  intentEngine: IntentEngine;
   logger: Logger;
   config?: EngineConfig;
   /** Resolve free-form user action text (UI layer). Required for user turns. */
@@ -123,21 +106,16 @@ export type EngineDependencies = {
   onProgress?: (event: TurnProgressEvent) => void;
   /**
    * Item C2: per-turn engine routing from createLlmEngines — user turns
-   * get the capable tier (hard-tier proposal+consequence). Carried
-   * through the `{...engines}` spread in the UIs; mock/test deps omit it.
+   * get the capable (hard) tier consequence engine. Carried through the
+   * `{...engines}` spread in the UIs; mock/test deps omit it.
    */
   getEnginesForTurn?: (isUserTurn: boolean) => TurnEngines;
   /**
-   * Phase 3–4 (LAYA_PLAN.md): Laya decision-layer wiring for this turn.
-   * runTurn resolves it from env when absent (off by default); tests inject
-   * a stub client here. Carries the LayaClient plus the flag snapshot.
+   * PLAN_V2 Phase 6: slim Laya wiring for this turn (client + config) —
+   * feeds the semantic parser (fail-open) and the locomotion veto.
+   * runTurn resolves it from env when absent; tests inject a stub.
    */
-  laya?: LayaTurnWiring;
-  /**
-   * Phase 4: chat completion hook for the dynamic question planner, wired
-   * by createLlmEngines when the Laya layer is on (undefined otherwise).
-   */
-  plannerChatComplete?: ChatComplete;
+  laya?: LayaWiring;
   /**
    * Phase 6: per-turn economics telemetry hook. Called once per turn with
    * the timing/call breakdown (the --auto UI uses it for the running
@@ -146,75 +124,12 @@ export type EngineDependencies = {
   onTurnTelemetry?: (telemetry: TurnTelemetry) => void;
 };
 
-/**
- * Phase 3 (intent-first): proposal engines that accept a decided intent.
- * LLMProposalEngine.propose takes an optional third parameter; the base
- * ProposalEngine interface declares two, so narrow at the call site.
- */
-type ProposalEngineWithIntent = ProposalEngine & {
-  propose(world: World, actorId: string, intent?: Intent): Promise<ProposalResult>;
-};
-
 function report(deps: EngineDependencies, event: TurnProgressEvent): void {
   try {
     deps.onProgress?.(event);
   } catch {
     // Progress reporting must never break the turn.
   }
-}
-
-/**
- * Stage 3 C2/C3: surface a fallback delegation a wrapping engine
- * performed internally (the Laya cascade engines delegating to their LLM
- * fallback). Two previously-invisible effects become honest:
- * - the delegated provider call counts in the turn budget (the wrapper
- *   itself is local, so the plain providerBacked note() skipped it —
- *   this is what made the per-turn P/S columns read 0 while the
- *   fallback burned real calls in Stage 3);
- * - a `cascade_delegated` event persists the delegation cause, so the
- *   next comparison can attribute per-turn causes instead of inferring
- *   them from intents + downstream events.
- * Telemetry only — never aborts or alters a turn.
- */
-function surfaceDelegation(
-  stage: "proposal" | "selection",
-  engine: unknown,
-  logger: Logger,
-  tick: number,
-  turnIndex: number,
-  actorId: string,
-  callCounter: ProviderCallCounter,
-): void {
-  const delegation = (engine as Partial<DelegatingEngine> | undefined)
-    ?.lastDelegation;
-  if (delegation === undefined) return;
-  logger.log({
-    module: "laya",
-    event: "cascade_delegated",
-    tick,
-    turnIndex,
-    actorId,
-    input: { stage },
-    output: {
-      cause: delegation.cause,
-      providerBacked: delegation.providerBacked,
-    },
-  });
-  if (delegation.providerBacked) {
-    callCounter.note(stage, { providerBacked: true });
-  }
-}
-
-/**
- * Stage 3 C4: true when the selection engine delegated its last select()
- * to a provider-backed (LLM) fallback. The renderability re-pick must
- * not burn a second provider call in that case — see the re-pick site.
- */
-function selectionDelegatedToProvider(engine: unknown): boolean {
-  return (
-    (engine as Partial<DelegatingEngine> | undefined)?.lastDelegation
-      ?.providerBacked === true
-  );
 }
 
 /**
@@ -348,25 +263,24 @@ export const RENDER_MAX_ATTEMPTS = 2;
  * (after N consecutive own fallbacks), else the "Nothing changes."
  * fallback.
  *
- * PLAN_V2 Phase 4 (v2 path only): the narrate prompt is built from the
- * executed facts (not the intended action), and when the one retry is
- * burned the last render is accepted and marked honest
+ * PLAN_V2 Phase 4: the narrate prompt is built from the executed facts
+ * (not the intended action), and when the one retry is burned the last
+ * render is accepted and marked honest
  * (`narrateAcceptedDespiteViolations`, event
  * `narrate_accepted_despite_violations`) — a flawed paragraph beats a
- * dead turn, and the (not done) family stays dead. V1 keeps the
- * retry→liveness→fallback behavior above.
+ * dead turn, and the (not done) family stays dead.
  */
 export async function resolveRender(
   world: World,
   action: Action,
   deps: EngineDependencies,
-  opts: { allowLiveness?: boolean; intent?: Intent; callCounter?: ProviderCallCounter;
+  opts: { allowLiveness?: boolean; callCounter?: ProviderCallCounter;
     /**
      * PLAN_V2 Phase 2 (Laya as parser): the action sentence's parsed
      * ActionSemantics from the parse step (one batched local decide,
      * fail-open). When present the executors use it directly; when
-     * absent they keep their deterministic text parsing (v1, and the
-     * fail-open fallback when Laya is down/unavailable).
+     * absent they keep their deterministic text parsing (the fail-open
+     * fallback when Laya is down/unavailable).
      */
     parsedSemantics?: ActionSemantics } = {},
 ): Promise<{
@@ -396,16 +310,11 @@ export async function resolveRender(
   // turn, before the first render call, so the render input carries the
   // executed facts to narrate.
   //
-  // Phase 5: a fully-typed cascade intent (kind + resolved targetId from
-  // the Laya proposal engine) is authoritative — it generated the action
-  // text, so the executors use its fields instead of re-parsing the text
-  // (no translation layer). On the LLM/chat path the intent is undefined
-  // and the text parsers run as before.
   // Phase 6: the deterministic pre-pass is timed separately from the
   // render calls — engine execution is microseconds, provider calls are
   // the cost.
   const executeStart = Date.now();
-  let plannedMovement = planMovementSemantics(world, action, opts.intent, opts.parsedSemantics);
+  let plannedMovement = planMovementSemantics(world, action, opts.parsedSemantics);
   // Exp-2-E item (b): Laya locomotion supplement (LAYA_LOCOMOTION=1, off
   // by default). Laya only ever VETOES a planned move — when it is
   // confident the action needs no relocation. Laya failure or low
@@ -437,7 +346,7 @@ export async function resolveRender(
       output: { engineMovement },
     });
   }
-  const exactQuote = planSpeech(action, opts.intent, opts.parsedSemantics);
+  const exactQuote = planSpeech(action, opts.parsedSemantics);
   if (exactQuote !== null) {
     logger.log({
       module: "speech",
@@ -449,10 +358,6 @@ export async function resolveRender(
       output: { exactQuote },
     });
   }
-  // Phase 5: manipulation stays text-parsed — the Laya proposal engine's
-  // candidate templates are written as inverses of planManipulation's
-  // verb ontology, so the template → parse round-trip recovers the
-  // intent's target deterministically (covered by round-trip tests).
   const engineManipulation = executeManipulation(world, action, opts.parsedSemantics);
   if (engineManipulation !== null) {
     logger.log({
@@ -468,19 +373,11 @@ export async function resolveRender(
   const enginePose = planPose(action.text);
   const executeMs = Date.now() - executeStart;
 
-  // PLAN_V2 Phase 4: the v2 path narrates from the executed facts and
-  // accepts the render after one retry instead of falling back. The v1
-  // path never sees any of this, so v1 turns are byte-identical.
-  const isV2 = readTurnLoopV2();
-
   // PLAN_V2 Phase 3: the clamp policy — one deterministic pass over the
   // parsed intent, recorded as attempted-vs-executed for the narrate
   // input. No LLM, no retries, no correction loops: a clamped turn costs
-  // exactly the same provider calls as a normal turn. V2-only — the v1
-  // path never sees it, so v1 turns are byte-identical in outcome.
-  const turnClamp = isV2
-    ? buildTurnClamp(world, action, plannedMovement, engineMovement, exactQuote, opts.parsedSemantics)
-    : null;
+  // exactly the same provider calls as a normal turn.
+  const turnClamp = buildTurnClamp(world, action, plannedMovement, engineMovement, exactQuote, opts.parsedSemantics);
   if (turnClamp !== null) {
     logger.log({
       module: "clamp",
@@ -551,14 +448,11 @@ export async function resolveRender(
               engineMovement,
               exactQuote,
               engineManipulation,
-              // PLAN_V2 Phase 3: the attempted-vs-executed clamp record
-              // (v2 only — undefined on v1 so the prompt never sees it).
+              // PLAN_V2 Phase 3: the attempted-vs-executed clamp record.
               clamp: turnClamp ?? undefined,
               // PLAN_V2 Phase 4: the engine-executed pose for the narrate
-              // facts, and the v2 narrate-from-facts prompt switch (v1
-              // keeps the legacy consequence context untouched).
+              // facts (narrate-from-executed-facts prompt).
               enginePose,
-              narrateExecutedFacts: isV2,
             }),
           timeLeft(),
         );
@@ -654,30 +548,27 @@ export async function resolveRender(
       validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
     });
     if (attempt >= RENDER_MAX_ATTEMPTS) {
-      if (isV2) {
-        // PLAN_V2 Phase 4: one retry burned — accept the flawed paragraph
-        // as honest instead of killing the turn with liveness/fallback.
-        // The (not done) family stays dead: a flawed paragraph beats a
-        // dead turn. The deterministic repairs above (quote reinsert,
-        // prefix collapse) already ran on this copy.
-        const accepted: ConsequenceResult = {
-          ...render,
-          narrateAcceptedDespiteViolations: true,
-        };
-        logger.log({
-          module: "validator",
-          event: "narrate_accepted_despite_violations",
-          tick: world.tick,
-          turnIndex: world.turnIndex,
-          actorId: action.actorId,
-          input: { action, render: accepted, attempt },
-          validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
-          error:
-            "render accepted despite prose-validation failures (retry budget spent) — marked honest, never rewritten",
-        });
-        return { render: accepted, executed, liveness: false, timings: { executeMs, renderMs: renderCallMs } };
-      }
-      break;
+      // PLAN_V2 Phase 4: one retry burned — accept the flawed paragraph
+      // as honest instead of killing the turn with liveness/fallback.
+      // The (not done) family stays dead: a flawed paragraph beats a
+      // dead turn. The deterministic repairs above (quote reinsert,
+      // prefix collapse) already ran on this copy.
+      const accepted: ConsequenceResult = {
+        ...render,
+        narrateAcceptedDespiteViolations: true,
+      };
+      logger.log({
+        module: "validator",
+        event: "narrate_accepted_despite_violations",
+        tick: world.tick,
+        turnIndex: world.turnIndex,
+        actorId: action.actorId,
+        input: { action, render: accepted, attempt },
+        validationErrors: errors.map((e) => `[${e.code}] ${e.message}`),
+        error:
+          "render accepted despite prose-validation failures (retry budget spent) — marked honest, never rewritten",
+      });
+      return { render: accepted, executed, liveness: false, timings: { executeMs, renderMs: renderCallMs } };
     }
     feedback = renderRetryFeedback(errors, world.actors.map((a) => a.id));
     report(deps, {
@@ -796,9 +687,9 @@ function appendDirectorIncident(
 
 /**
  * Run a single immediate turn for the current actor and return the next world.
- * User actors: no proposal/selection — the user decides freely via
- * getUserAction (called with no suggestions). NPC actors: propose + select.
- * Every stage is logged.
+ * User actors: the user decides freely via getUserAction (called with no
+ * suggestions). NPC actors: one intent call ({ action, quote }), then the
+ * engine parses, executes, clamps, and narrates. Every stage is logged.
  */
 export async function runTurn(world: World, deps: EngineDependencies): Promise<World> {
   const config = depsConfig(deps);
@@ -812,32 +703,22 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // only — the counter never aborts or alters the turn.
   const callCounter = new ProviderCallCounter();
   let proposalMs = 0;
-  let selectionStart = 0;
-  let selectionBlockMs = 0;
 
-  // Item C2: per-turn engine routing — user turns run proposal+consequence
-  // on the capable (hard) tier when the engines provide it; NPC turns keep
-  // the standard engines. Falls back to `deps` when no routing is wired
-  // (mock/test deps).
-  // Phase 3–4: the Laya turn wiring resolves here — injected by tests via
-  // deps.laya, otherwise from env (off by default, so plain chat runs are
-  // untouched). plannerChatComplete comes from createLlmEngines when the
-  // Laya layer is on.
+  // Item C2: per-turn engine routing — user turns run the consequence
+  // engine on the capable (hard) tier when the engines provide it; NPC
+  // turns keep the standard engines. Falls back to `deps` when no
+  // routing is wired (mock/test deps).
+  // The Laya wiring resolves here — injected by tests via deps.laya,
+  // otherwise from env (LAYA_MODE=off resolves to undefined).
   const turnEngines = deps.getEnginesForTurn?.(!deps.forceAllNpc && actor.id === world.userActorId);
-  const plannerChatComplete = turnEngines?.plannerChatComplete ?? deps.plannerChatComplete;
-  const layaWiring = layaWiringFromEnv({ injected: deps.laya, plannerChatComplete });
+  const layaWiring = layaWiringFromEnv({ injected: deps.laya });
   const engineOverrides =
     turnEngines !== undefined
-      ? {
-          proposalEngine: turnEngines.proposal,
-          selectionEngine: turnEngines.selection,
-          consequenceEngine: turnEngines.consequence,
-        }
+      ? { consequenceEngine: turnEngines.consequence }
       : {};
   const turnDeps: EngineDependencies = {
     ...deps,
     ...engineOverrides,
-    plannerChatComplete,
     laya: layaWiring,
   };
 
@@ -863,12 +744,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   report(turnDeps, { stage: "proposal_started", actorId: actor.id, message: `proposal engine — generating suggestions for ${actor.id}…` });
 
   let action: Action;
-  // Phase 5: the turn's decided intent (intent-first cascade and/or the
-  // Laya proposal engine's fully-typed intent). Threads to selection and
-  // the executors; undefined on user turns and the pure chat path.
-  let decidedIntent: Intent | undefined;
   // Autonomous mode (forceAllNpc): the "user" actor is simulated like any
-  // other NPC — proposal + selection + consequence, never getUserAction.
+  // other NPC — intent + consequence, never getUserAction.
   const isUserTurn = !turnDeps.forceAllNpc && actor.id === world.userActorId;
   if (isUserTurn) {
     // User turns: no proposal, no selection. The user decides how to act
@@ -911,284 +788,46 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
       output: action,
     });
   } else {
-    // PLAN_V2 Phase 1: TURN_LOOP=v2 replaces proposal+selection with the
-    // single intent call. The shared screening below still runs — it
-    // operates on the synthesized `proposal`/`selection`, and with an
-    // empty option set it degrades to its deterministic fallbacks (the
-    // selection engine is never invoked on this path).
-    let proposal: ProposalResult;
-    let selection: SelectionResult;
-    if (readTurnLoopV2()) {
-      const intentEngine = turnDeps.intentEngine;
-      if (intentEngine === undefined) {
-        throw new Error(
-          "TURN_LOOP=v2 requires an IntentEngine on EngineDependencies " +
-          "(wire LLMIntentEngine via createLlmEngines, or inject one in tests)",
-        );
-      }
-      // PLAN_V2 Phase 5 (the director): the previous turn may have
-      // injected an incident — carry it into this turn's intent prompt as
-      // a world fact, exactly once. The shallow copy keeps the caller's
-      // world untouched; the snapshot drops the pending flag so no later
-      // turn re-shows it. (User turns have no intent call — the incident
-      // stays pending until the next NPC turn. It's already in history,
-      // so the human sees it regardless.)
-      const directorIncident = world.directorPendingIncident;
-      if (directorIncident !== undefined) {
-        delete turnSnapshot.directorPendingIncident;
-      }
-      // The intent call occupies the proposal slot in the turn budget —
-      // it is the turn's decision-stage provider call.
-      const intentStart = Date.now();
-      callCounter.note("proposal", intentEngine);
-      const intentResult = await intentEngine.intent(
-        directorIncident !== undefined
-          ? { ...world, directorPendingIncident: directorIncident }
-          : world,
-        actor.id,
-      );
-      proposalMs = Date.now() - intentStart;
-      report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: "intent engine done — action decided" });
-      report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `intent engine — ${actor.id} is deciding…` });
-      selection = {
-        action: intentResult.action,
-        reasoning: "v2 intent path: the intent call decides the action directly",
-      };
-      proposal = {
-        suggestions: [],
-        reasoning: "v2 intent path: proposal+selection replaced by the intent call",
-      };
-      selectionStart = Date.now();
-      report(turnDeps, { stage: "selection_done", actorId: actor.id, message: "intent engine done — action chosen" });
-    } else {
-    // Phase 3 (intent-first, behind flags, default OFF): when the Laya
-    // layer is on with selection routing, run the intent cascade first and
-    // narrow the proposal prompt to the decided intent. Any cascade failure
-    // yields undefined and the proposal runs un-narrowed (fail open).
-    let intent: Intent | undefined;
-    if (turnDeps.laya !== undefined && isLayaIntentFirst(turnDeps.laya.config)) {
-      intent = await runIntentCascade(turnDeps.laya.client, world, actor.id, {
-        mode: turnDeps.laya.config.mode,
-        plannerEnabled: turnDeps.laya.config.toggles.planner,
-        goal: `decide ${actor.name}'s next intent`,
-        chatComplete: turnDeps.laya.plannerChatComplete,
-      }, logger);
+    // PLAN_V2 Phase 6: the intent call is the ONLY decision step — one
+    // structured call ({ action, quote }) decides the action directly.
+    // PLAN_V2 Phase 5 (the director): the previous turn may have
+    // injected an incident — carry it into this turn's intent prompt as
+    // a world fact, exactly once. The shallow copy keeps the caller's
+    // world untouched; the snapshot drops the pending flag so no later
+    // turn re-shows it. (User turns have no intent call — the incident
+    // stays pending until the next NPC turn. It's already in history,
+    // so the human sees it regardless.)
+    const directorIncident = world.directorPendingIncident;
+    if (directorIncident !== undefined) {
+      delete turnSnapshot.directorPendingIncident;
     }
-    // Phase 6: count + time the proposal invocation when provider-backed.
-    const proposalStart = Date.now();
-    callCounter.note("proposal", turnDeps.proposalEngine);
-    proposal = await (turnDeps.proposalEngine as ProposalEngineWithIntent).propose(world, actor.id, intent);
-    // Stage 3 C2/C3: a wrapping engine (Laya cascade) may have delegated
-    // to its fallback internally — count that provider call and log why.
-    surfaceDelegation("proposal", turnDeps.proposalEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
-    proposalMs = Date.now() - proposalStart;
-    report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: `proposal engine done (${proposal.suggestions.length} suggestions)` });
-    report(turnDeps, { stage: "selection_started", actorId: actor.id, message: `selection engine — ${actor.id} is deciding…` });
-    // Phase 5: the Laya proposal engine returns its fully-typed intent
-    // (kind + resolved targetId); it threads to selection (skips the
-    // redundant intent cascade) and to the executors (authoritative —
-    // it generated the action text). On the LLM path proposal.intent is
-    // undefined and the intent-first intent (if any) is advisory only.
-    decidedIntent = proposal.intent ?? intent;
-    // Phase 6: count + time the selection invocation(s) when
-    // provider-backed. The selectionExecuteMs bucket covers selection,
-    // screening, and the renderability re-pick below.
-    selectionStart = Date.now();
-    callCounter.note("selection", turnDeps.selectionEngine);
-    selection = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
-      world,
+    // The intent call occupies the proposal slot in the turn budget —
+    // it is the turn's decision-stage provider call.
+    const intentStart = Date.now();
+    callCounter.note("proposal", turnDeps.intentEngine);
+    const intentResult = await turnDeps.intentEngine.intent(
+      directorIncident !== undefined
+        ? { ...world, directorPendingIncident: directorIncident }
+        : world,
       actor.id,
-      proposal.suggestions,
-      decidedIntent,
     );
-    // Stage 3 C2/C3: surface an internal fallback delegation, if any.
-    surfaceDelegation("selection", turnDeps.selectionEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
-    report(turnDeps, { stage: "selection_done", actorId: actor.id, message: `selection engine done — action chosen` });
-    } // PLAN_V2 Phase 1: end of the v1 proposal+selection block
-    let actionText = stripCoordinateMentions(stripSelectionPrefix(selection.action));
-    // Exp-5 items 5+7: screen the pick BEFORE burning consequence attempts
-    // on it. A POV-swapped pick ("Anton walks…" on Dana's turn) or a
-    // verb+noun repeat of a recent own action (handshake attractor) is
-    // rejected here and replaced with the first clean candidate — the
-    // proposal engine already dedups its own output, but the selector may
-    // invent a repeat (or a mock may replay one).
-    //
-    // Exp-3 item 6 (S2): per-intent failure memory — an intent whose
-    // verb|noun key failed `intentFailureBanThreshold` consecutive own
-    // turns is banned the same way. Small models demonstrably ignore
-    // prompt lines ("do NOT repeat yourself"); the deterministic ban is
-    // the load-bearing half. The ban is per-actor and resets on the first
-    // applied own turn (consecutiveIntentFailures breaks the streak).
-    const banThreshold = config.intentFailureBanThreshold ?? 2;
-    const isIntentBanned = (text: string): boolean => {
-      const key = suggestionCore(world, text, actor.id);
-      return consecutiveIntentFailures(world, actor.id, key) >= banThreshold;
-    };
-    // Exp-5 item 9 (S8): intent-cluster bans — a near-variant of a
-    // repeatedly failed intent (same concrete object-kind nouns, different
-    // verb|noun key) is banned the same way, so the substitute can't dodge
-    // on a rewording (exp-5 ticks 13/19/22: laptop-setup offer banned, then
-    // the glance-at-test-plan variant failed too).
-    const isClusterBanned = (text: string): boolean => {
-      const nouns = suggestionClusterNouns(text);
-      return consecutiveClusterFailures(world, actor.id, nouns) >= banThreshold;
-    };
-    const rejection = validateSelectionForActor(world, actor.id, actionText);
-    const bannedKey = isIntentBanned(actionText)
-      ? suggestionCore(world, actionText, actor.id)
-      : undefined;
-    const bannedCluster =
-      bannedKey === undefined && isClusterBanned(actionText)
-        ? suggestionClusterNouns(actionText)
-        : undefined;
-    if (rejection !== undefined || bannedKey !== undefined || bannedCluster !== undefined) {
-      logger.log({
-        module: "selection",
-        event:
-          bannedKey !== undefined
-            ? "intent_banned"
-            : bannedCluster !== undefined
-              ? "intent_cluster_banned"
-              : "selection_rejected",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: actor.id,
-        input: { action: actionText, suggestions: proposal.suggestions },
-        output: {
-          rejection:
-            rejection ??
-            (bannedKey !== undefined
-              ? `intent "${bannedKey}" failed ${banThreshold} consecutive own turns — banned from selection`
-              : `intent cluster {${bannedCluster!.join(", ")}} failed ${banThreshold} consecutive own turns — banned from selection`),
-        },
-        error: rejection,
-      });
-      const clean = proposal.suggestions
-        .map((s) => stripSelectionPrefix(s))
-        .find(
-          (s) =>
-            s.length > 0 &&
-            validateSelectionForActor(world, actor.id, s) === undefined &&
-            !isIntentBanned(s) &&
-            !isClusterBanned(s),
-        );
-      actionText =
-        clean !== undefined ? stripCoordinateMentions(clean) : FALLBACK_SELECTION.action;
-      logger.log({
-        module: "selection",
-        event: "selection_substituted",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: actor.id,
-        input: { rejected: selection.action },
-        output: { action: actionText },
-      });
-    }
+    proposalMs = Date.now() - intentStart;
+    report(turnDeps, { stage: "proposal_done", actorId: actor.id, message: "intent engine done — action decided" });
+    const actionText = stripCoordinateMentions(stripSelectionPrefix(intentResult.action));
     action = { actorId: actor.id, text: actionText };
-
-    // Exp-3 item 6 (S2): Laya renderability screen — one 1–5 score on the
-    // FINAL action text (after screen/substitution), before burning
-    // consequence attempts on it. Score ≤2 drops the action from the
-    // candidate list and re-runs selection ONCE with the filtered list;
-    // the second pick stands regardless of its score (one re-pick, no
-    // loops). Fail-open throughout: Laya failure/undefined proceeds.
-    // OFF by default (LAYA_RENDERABILITY=1 to enable).
-    //
-    // Stage 3 C4: when the selection engine already delegated to a
-    // provider-backed fallback on the first pick, the engine re-pick is
-    // replaced by a deterministic first-clean-candidate pick — re-invoking
-    // would burn a second provider call where the chat path makes exactly
-    // one (the failure mode behind Stage 3's 14-vs-10 selection gap).
-    if (turnDeps.laya !== undefined && turnDeps.laya.config.toggles.renderability === true) {
-      const score = await runRenderabilityScore(
-        turnDeps.laya.client,
-        world,
-        actor.id,
-        actionText,
-      );
-      const rescored = score !== undefined && score <= 2;
-      logger.log({
-        module: "laya",
-        event: "renderability_scored",
-        tick: world.tick,
-        turnIndex: world.turnIndex,
-        actorId: actor.id,
-        input: { action: actionText },
-        output: { score: score ?? null, rescored },
-      });
-      if (rescored) {
-        const filtered = proposal.suggestions.filter(
-          (s) => stripCoordinateMentions(stripSelectionPrefix(s)) !== actionText,
-        );
-        if (filtered.length > 0) {
-          let repickText: string;
-          let repickDeterministic = false;
-          if (selectionDelegatedToProvider(turnDeps.selectionEngine)) {
-            // Stage 3 C4: the first pick already burned a provider call
-            // via delegation — take the first clean candidate
-            // deterministically (same rule as the substitution path)
-            // instead of burning a second one.
-            const clean = filtered
-              .map((s) => stripSelectionPrefix(s))
-              .find(
-                (s) =>
-                  s.length > 0 &&
-                  validateSelectionForActor(world, actor.id, s) === undefined &&
-                  !isIntentBanned(s) &&
-                  !isClusterBanned(s),
-              );
-            repickText =
-              clean !== undefined ? stripCoordinateMentions(clean) : FALLBACK_SELECTION.action;
-            repickDeterministic = true;
-          } else {
-            // Phase 6: the re-pick is a second selection provider call.
-            callCounter.note("selection", turnDeps.selectionEngine);
-            const repick = await (turnDeps.selectionEngine as SelectionEngineWithIntent).select(
-              world,
-              actor.id,
-              filtered,
-              decidedIntent,
-            );
-            // Stage 3 C2/C3: surface an internal fallback delegation, if any.
-            surfaceDelegation("selection", turnDeps.selectionEngine, logger, world.tick, world.turnIndex, actor.id, callCounter);
-            repickText = stripCoordinateMentions(stripSelectionPrefix(repick.action));
-          }
-          const repickRejection = validateSelectionForActor(world, actor.id, repickText);
-          actionText =
-            repickRejection === undefined && !isIntentBanned(repickText) && !isClusterBanned(repickText)
-              ? repickText
-              : FALLBACK_SELECTION.action;
-          action = { actorId: actor.id, text: actionText };
-          logger.log({
-            module: "selection",
-            event: "selection_substituted",
-            tick: world.tick,
-            turnIndex: world.turnIndex,
-            actorId: actor.id,
-            input: { rejected: selection.action, renderabilityScore: score, deterministic: repickDeterministic },
-            output: { action: actionText },
-          });
-        } else {
-          actionText = FALLBACK_SELECTION.action;
-          action = { actorId: actor.id, text: actionText };
-        }
-      }
-    }
   }
-  // Phase 6: close the selection bucket (selection + screening +
-  // renderability re-pick, if any).
-  selectionBlockMs = Date.now() - selectionStart;
+  // Phase 6: no selection stage in v2 — the selection bucket only ever
+  // holds the deterministic engine execution inside resolveRender.
+  const selectionBlockMs = 0;
 
   // PLAN_V2 Phase 2: Laya as parser — one batched local decide over the
-  // action sentence → ActionSemantics for the executors. Runs on the v2
-  // path for NPC turns (directly after the intent call) AND human turns
-  // (the human's text IS the intent) — no special casing, so the picture
-  // stays accurate for player actions too. Fail-open: Laya down or
-  // unwired → undefined and the executors' deterministic text parsers
-  // take over; the turn never blocks on the parser.
-  const parsedSemantics = readTurnLoopV2()
-    ? await parseActionSemantics(world, action, turnDeps.laya, logger)
-    : undefined;
+  // action sentence → ActionSemantics for the executors. Runs for NPC
+  // turns (directly after the intent call) AND human turns (the human's
+  // text IS the intent) — no special casing, so the picture stays
+  // accurate for player actions too. Fail-open: Laya down or unwired →
+  // undefined and the executors' deterministic text parsers take over;
+  // the turn never blocks on the parser.
+  const parsedSemantics = await parseActionSemantics(world, action, turnDeps.laya, logger);
 
   logger.log({
     module: "turn",
@@ -1200,16 +839,15 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   });
 
   report(turnDeps, { stage: "consequence_started", actorId: action.actorId, message: `render engine — resolving "${action.text.slice(0, 60)}${action.text.length > 60 ? "…" : ""}"…` });
-  // Phase 4: turn = proposal → selection → execute (engine) → render
-  // (LLM). The engine already executed movement/quote/manipulation/pose;
-  // the render call narrates the executed facts as prose.
+  // PLAN_V2: turn = intent (1 LLM call) → parse (1 Laya decide) →
+  // execute+clamp (engine) → narrate (1 LLM call). The engine already
+  // executed movement/quote/manipulation/pose; the render call narrates
+  // the executed facts as prose.
   const { render, executed, liveness, timings } = await resolveRender(world, action, turnDeps, {
     // Exp-5 item 6: the liveness floor rewrites failed turns — never the
     // user's own action text. In autonomous mode every actor is an NPC, so
     // the floor applies to all of them.
     allowLiveness: turnDeps.forceAllNpc === true || action.actorId !== world.userActorId,
-    // Phase 5: the cascade's fully-typed intent threads to the executors.
-    intent: decidedIntent,
     // Phase 6: the turn's provider-call counter (render invocations).
     callCounter,
     // PLAN_V2 Phase 2: pre-parsed semantics for the executors.
@@ -1231,10 +869,8 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // PLAN_V2 Phase 5 (the director): capture the engine-owned world-state
   // signature BEFORE applyRenderResult mutates the snapshot in place —
   // the end-of-turn staleness check compares the post-turn world against
-  // this. V2-only (null on v1 — v1 turns never touch director state).
-  const directorSignatureBefore = readTurnLoopV2()
-    ? worldStateSignature(turnSnapshot)
-    : null;
+  // this.
+  const directorSignatureBefore = worldStateSignature(turnSnapshot);
   const patched = applyRenderResult(world, action, render, executed, config, {
     fallback: isFallbackConsequence(render),
     honestHistoryNote: getHonestHistoryNote(render),
@@ -1273,7 +909,7 @@ export async function runTurn(world: World, deps: EngineDependencies): Promise<W
   // on the world; when it hits the threshold the next unconsumed event is
   // consumed, recorded in history, and parked as pending for the next NPC
   // turn's intent prompt (see the intent-call site above).
-  if (directorSignatureBefore !== null) {
+  {
     const stalenessConfig = directorConfigFor(nextWorld);
     if (stalenessConfig !== null) {
       // The just-completed turn's entry is history's tail; scan the

@@ -257,8 +257,8 @@ async function main(): Promise<void> {
   // chain-of-thought (exp-6: median 772 completion tokens for ~100-token
   // JSON). Flag it loudly when thinking is left on.
   {
-    const hardBackend = cfg.taskBackends.proposal ?? cfg.backend;
-    const hardModel = resolveTaskModel("proposal", cfg);
+    const hardBackend = cfg.taskBackends.consequence ?? cfg.backend;
+    const hardModel = resolveTaskModel("consequence", cfg);
     const thinkEnv = process.env["LLM_THINK"];
     const thinkOff = thinkEnv === "0" || thinkEnv?.toLowerCase() === "false";
     if (isThinkingModel(hardModel) && !thinkOff) {
@@ -447,8 +447,8 @@ async function main(): Promise<void> {
     // latency cache, and prints the derived default timeout. Hosted
     // backends are skipped (don't burn hosted tokens on telemetry).
     {
-      const hardBackend = cfg.taskBackends.proposal ?? cfg.backend;
-      const hardModel = resolveTaskModel("proposal", cfg);
+      const hardBackend = cfg.taskBackends.consequence ?? cfg.backend;
+      const hardModel = resolveTaskModel("consequence", cfg);
       if (hardBackend === "ollama" || hardBackend === "laya-local") {
         try {
           const provider = createProviderFromEnv(process.env, hardBackend);

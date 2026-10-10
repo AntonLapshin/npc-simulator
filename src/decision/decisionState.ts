@@ -99,34 +99,6 @@ export function conversationHint(world: World): string {
     : "";
 }
 
-/** Slim state for the intent cascade: who the actor is + what just happened. */
-export function buildIntentState(world: World, actorId: string): string {
-  const actor = findActor(world, actorId);
-  if (!actor) throw new Error(`buildIntentState: unknown actor "${actorId}"`);
-  return assemble([
-    `You are ${actor.name}.`,
-    personaBlock(actor, 500),
-    recentEventsBlock(world, 600, 3),
-    conversationHint(world),
-    rosterBlock(world, actorId, 300),
-    landmarksBlock(world, 200),
-  ]);
-}
-
-/** Slim state for the candidate-fit choice: intent state + numbered candidates. */
-export function buildCandidateState(
-  world: World,
-  actorId: string,
-  candidates: string[],
-): string {
-  const base = buildIntentState(world, actorId);
-  const numbered = candidates
-    .map((c, i) => `${i + 1}. ${c}`)
-    .join("\n");
-  const list = truncateToChars(`Candidate actions:\n${numbered}`, 700);
-  return assemble([base, list]);
-}
-
 /**
  * Slim state for the semantic judge set: the action text plus the name
  * inventories the choice questions resolve against.
@@ -191,41 +163,3 @@ export function buildPhysicalFacts(world: World, actorId: string): string {
   ]);
 }
 
-/**
- * Slim state for the renderability score: the actor (position/pose/prop),
- * the chosen action text, nearby people with positions, nearby objects
- * with positions, and whether the action contains quoted speech. The
- * renderability question is spatial ("can this be faithfully turned into
- * concrete world changes here?"), so positions are first-class.
- */
-export function buildRenderabilityState(
-  world: World,
-  actorId: string,
-  actionText: string,
-): string {
-  const actor = findActor(world, actorId);
-  if (!actor) throw new Error(`buildRenderabilityState: unknown actor "${actorId}"`);
-  const others = world.actors
-    .filter((a) => a.id !== actorId)
-    .map((a) => `- ${a.name} at (${a.x}, ${a.y}), ${a.pose || "stand"}`)
-    .join("\n");
-  const nearby = world.scene.objects
-    .map((o) => {
-      const cx = o.x + o.w / 2;
-      const cy = o.y + o.h / 2;
-      return { o, d: Math.hypot(actor.x - cx, actor.y - cy) };
-    })
-    .filter(({ d }) => d <= 6)
-    .sort((a, b) => a.d - b.d)
-    .slice(0, 8)
-    .map(({ o, d }) => `- ${o.name} at (${o.x}, ${o.y}), ${d.toFixed(1)} cells away`)
-    .join("\n");
-  const hasQuote = /"[^"]+"/.test(actionText);
-  return assemble([
-    `You are ${actor.name} at (${actor.x}, ${actor.y}), pose ${actor.pose || "stand"}${actor.prop ? `, holding ${actor.prop}` : ""}.`,
-    truncateToChars(`Action to render: ${actionText}`, 400),
-    others ? truncateToChars(`Others:\n${others}`, 300) : "",
-    nearby ? truncateToChars(`Nearby objects:\n${nearby}`, 400) : "",
-    hasQuote ? "The action contains quoted speech." : "The action contains no quoted speech.",
-  ]);
-}

@@ -32,7 +32,7 @@ import {
 } from "../../src/engine/turnOrchestrator.js";
 import { defaultConfig } from "../../src/config.js";
 import { ECHO_BAN_LINE, renderSuffix } from "../../src/llm/prompts.js";
-import { buildConsequenceContext } from "../../src/engine/contextBuilder.js";
+import { buildNarrateContext } from "../../src/engine/contextBuilder.js";
 import { historyEntryText } from "../../src/logging/storyTrace.js";
 import { scenarioStemOf } from "../../src/ui/text/textUi.js";
 import { Logger } from "../../src/logging/logger.js";
@@ -227,9 +227,11 @@ describe("exp7 A4/A5: echo hardening in the consequence prompt", () => {
       hist(world, "U: Hello there."),
       hist(world, "N: Morning, everyone — first day, be gentle."),
     );
-    const ctx = buildConsequenceContext(world, { actorId: "n", text: "Wave." }, undefined);
+    // The narrate prompt carries no history section at all (the echo
+    // attractor is gone) — neither recent turn appears.
+    const ctx = buildNarrateContext(world, { actorId: "n", text: "Wave." }, undefined, {});
     expect(ctx).not.toContain("first day, be gentle");
-    expect(ctx).toContain("Hello there.");
+    expect(ctx).not.toContain("Hello there.");
   });
 });
 
@@ -237,59 +239,6 @@ describe("exp7 A12: scenario-stem save naming", () => {
   it("derives the stem from the scenario path", () => {
     expect(scenarioStemOf("scenarios/office-anton.json")).toBe("office-anton");
     expect(scenarioStemOf("/tmp/x.json")).toBe("x");
-  });
-});
-
-describe("exp7 A14: intent-cluster ban regression (tick 10)", () => {
-  it("cluster-banned pick is substituted without burning consequence attempts", async () => {
-    const logger = new Logger({ sessionId: "exp7-ban", writeToFile: false });
-    const world = makeTinyWorld();
-    const [anton, tanya] = world.actors;
-    anton!.id = "anton";
-    anton!.name = "Anton";
-    tanya!.id = "tanya";
-    tanya!.name = "Tanya";
-    world.order = ["anton", "tanya"];
-    world.userActorId = "anton";
-    world.turnIndex = 1; // tanya's turn
-    // Two consecutive own fallbacks on the desk cluster, different intent
-    // keys (move|anton vs move|desk) — the exp-7 tick-10 shape: the intent
-    // ban does NOT fire, the cluster ban must.
-    world.history.push(
-      triedHist(world, "Tanya tried: Walk over to Anton's desk to greet him."),
-      triedHist(world, "Tanya tried: Head to the desk and set up the laptop."),
-    );
-    const { MockProposalEngine } = await import("../../src/mocks/mockProposalEngine.js");
-    const { MockSelectionEngine } = await import("../../src/mocks/mockSelectionEngine.js");
-    const { MockConsequenceEngine } = await import("../../src/mocks/mockConsequenceEngine.js");
-    const deps = makeTestDeps(logger, {
-      proposalEngine: new MockProposalEngine(logger, {
-        "tanya@tick0": {
-          suggestions: [
-            "Approach the desk to check the setup.",
-            "Pause and review the test plan quietly.",
-          ],
-          reasoning: "scripted",
-        },
-      }),
-      selectionEngine: new MockSelectionEngine(logger, {
-        "tanya@tick0": { action: "Approach the desk to check the setup.", reasoning: "scripted" },
-      }),
-      consequenceEngine: new MockConsequenceEngine(logger),
-    });
-    await runTurn(world, deps);
-    expect(logger.store.byEvent("intent_banned")).toHaveLength(0);
-    expect(logger.store.byEvent("intent_cluster_banned")).toHaveLength(1);
-    const substituted = logger.store.byEvent("selection_substituted");
-    expect(substituted).toHaveLength(1);
-    expect(substituted[0]!.output).toMatchObject({
-      action: "Pause and review the test plan quietly.",
-    });
-    const chosen = logger.store.byEvent("action_chosen");
-    expect(chosen).toHaveLength(1);
-    expect(chosen[0]!.output).toMatchObject({
-      text: "Pause and review the test plan quietly.",
-    });
   });
 });
 

@@ -13,8 +13,7 @@ import { fileURLToPath } from "node:url";
 import { runTurns } from "../../src/engine/turnOrchestrator.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { Logger } from "../../src/logging/logger.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import { defaultConfig } from "../../src/config.js";
 import type { World } from "../../src/types.js";
@@ -36,26 +35,16 @@ describe("golden office-anton replay", () => {
   it("ticks 1-2 render clean on attempt 1", async () => {
     const logger = new Logger({ sessionId: "golden_office_anton", writeToFile: false });
 
-    const proposalEngine = new MockProposalEngine(logger, {
-      "tanya@tick1": {
-        suggestions: [TANYA_ACTION, "Stay at the desk and continue working."],
-        reasoning: "Tanya noticed Anton and greets him while staying focused.",
-      },
-      "dana@tick2": {
-        suggestions: [DANA_ACTION, "Keep working."],
-        reasoning: "Dana is stressed and stays focused on urgent work.",
-      },
-    });
-
-    const selectionEngine = new MockSelectionEngine(logger, {
-      // Echoed candidate numbering exercises the stripSelectionPrefix guard.
+    // PLAN_V2 Phase 6: one intent call decides each NPC turn directly.
+    // Echoed candidate numbering exercises the stripSelectionPrefix guard.
+    const intentEngine = new MockIntentEngine(logger, {
       "tanya@tick1": {
         action: `3. ${TANYA_ACTION}`,
-        reasoning: "Tanya greets Anton briefly without leaving her desk.",
+        quote: "",
       },
       "dana@tick2": {
         action: DANA_ACTION,
-        reasoning: "Dana stays focused on the urgent draft.",
+        quote: "",
       },
     });
 
@@ -87,8 +76,7 @@ describe("golden office-anton replay", () => {
     const final = await runTurns(
       loadOfficeAntonScenario(),
       {
-        proposalEngine,
-        selectionEngine,
+        intentEngine,
         consequenceEngine,
         logger,
         config: { ...defaultConfig, autosaveEnabled: false },

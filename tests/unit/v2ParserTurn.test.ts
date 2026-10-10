@@ -2,18 +2,17 @@
 //
 // - Executors accept pre-parsed ActionSemantics (and keep their
 //   deterministic text behavior when it is absent).
-// - On the v2 path the parse runs right after the intent call (NPC) and
-//   on the human's text (player turns) — no special casing.
+// - The parse runs right after the intent call (NPC) and on the human's
+//   text (player turns) — no special casing.
 // - Fail-open: Laya down or unwired → deterministic parsers, the turn
 //   still completes honestly, `parser_fallback` is logged.
-// - v1 path: the parser is never invoked.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Action, ActionSemantics, World } from "../../src/types.js";
 import type { LayaAnswer } from "../../src/decision/decisionTypes.js";
 import { LayaClient } from "../../src/decision/layaClient.js";
-import type { LayaTurnWiring } from "../../src/engine/layaTurn.js";
-import { readLayaRuntimeConfig } from "../../src/config.js";
+import type { LayaWiring } from "../../src/engine/layaWiring.js";
+import { readLayaConfig } from "../../src/decision/wiring.js";
 import { createTestLogger } from "../../src/logging/logger.js";
 import { loadScenario } from "../../src/engine/scenarioLoader.js";
 import { makeTestDeps } from "../helpers.js";
@@ -71,19 +70,16 @@ function choice(winner: string, options: string[]): LayaAnswer {
   return { type: "choice", winner, probabilities, confidence: 0.9 };
 }
 
-function stubWiring(client: LayaClient): LayaTurnWiring {
-  const config = readLayaRuntimeConfig({ LAYA_MODE: "static", LAYA_SALIENCE: "1" });
+function stubWiring(client: LayaClient): LayaWiring {
+  const config = readLayaConfig({ LAYA_MODE: "on" });
   return {
     client,
-    // Isolate the parse step: the locomotion veto and the renderability
-    // screen (both default-on in static mode, pre-existing Phase 1 wiring
-    // on the shared NPC branch) would each burn their own decide call.
+    // Isolate the parse step: the locomotion veto (default-on) would
+    // burn its own decide call on moving turns.
     config: {
       ...config,
-      toggles: { ...config.toggles, locomotion: false, renderability: false },
+      toggles: { ...config.toggles, locomotion: false },
     },
-    salienceThreshold: 3,
-    plausibility: false,
   };
 }
 
@@ -173,7 +169,7 @@ describe("executors accept pre-parsed semantics", () => {
       quotedSpeech: [],
       destinationActorId: "tanya",
     };
-    expect(planMovementSemantics(world, action, undefined, semantics)).toEqual({
+    expect(planMovementSemantics(world, action, semantics)).toEqual({
       moves: true,
       destinationActorId: "tanya",
     });
@@ -182,8 +178,8 @@ describe("executors accept pre-parsed semantics", () => {
   it("planSpeech prefers the parsed quote list over re-parsing the text", () => {
     const action: Action = { actorId: "anton", text: "Anton keeps typing." };
     expect(planSpeech(action)).toBeNull();
-    expect(planSpeech(action, undefined, { quotedSpeech: ["Hi Tanya"] })).toBe("Hi Tanya");
-    expect(planSpeech(action, undefined, { quotedSpeech: [] })).toBeNull();
+    expect(planSpeech(action, { quotedSpeech: ["Hi Tanya"] })).toBe("Hi Tanya");
+    expect(planSpeech(action, { quotedSpeech: [] })).toBeNull();
   });
 
   it("executeManipulation takes the recipient from pre-parsed contact", () => {
@@ -209,16 +205,7 @@ describe("executors accept pre-parsed semantics", () => {
   });
 });
 
-describe("v2 turn: the parse step", () => {
-  const OLD = process.env.TURN_LOOP;
-  beforeEach(() => {
-    process.env.TURN_LOOP = "v2";
-  });
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.TURN_LOOP;
-    else process.env.TURN_LOOP = OLD;
-  });
-
+describe("the parse step", () => {
   it("runs the parser after the intent call and the executors use its output", async () => {
     const logger = createTestLogger("v2-parse-up");
     let decideCalls = 0;
@@ -316,32 +303,6 @@ describe("v2 turn: the parse step", () => {
     const completed = logger.store.byEvent("parser_completed");
     expect(completed).toHaveLength(1);
     expect(completed[0]!.input).toEqual({ actionText: userText });
-    expect(logger.store.byEvent("turn_completed")).toHaveLength(1);
-  });
-});
-
-describe("v1 path: the parser is never invoked", () => {
-  const OLD = process.env.TURN_LOOP;
-  beforeEach(() => {
-    delete process.env.TURN_LOOP;
-  });
-  afterEach(() => {
-    if (OLD === undefined) delete process.env.TURN_LOOP;
-    else process.env.TURN_LOOP = OLD;
-  });
-
-  it("does not call decide even with Laya wiring injected", async () => {
-    const logger = createTestLogger("v1-parse-untouched");
-    let decideCalls = 0;
-    const deps = makeTestDeps(logger, {
-      getUserAction: async () => "Anton keeps typing.",
-      laya: stubWiring(scriptedClient(parseScript(), () => decideCalls++)),
-    });
-    await runTurn(makeParserWorld(), deps);
-
-    expect(decideCalls).toBe(0);
-    expect(logger.store.byEvent("parser_completed")).toHaveLength(0);
-    expect(logger.store.byEvent("parser_fallback")).toHaveLength(0);
     expect(logger.store.byEvent("turn_completed")).toHaveLength(1);
   });
 });

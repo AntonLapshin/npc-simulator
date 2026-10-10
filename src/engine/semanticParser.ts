@@ -12,7 +12,7 @@
 
 import type { Action, ActionSemantics, World } from "../types.js";
 import { createLayaSemanticJudge } from "../decision/wiring.js";
-import type { LayaTurnWiring } from "./layaTurn.js";
+import type { LayaWiring } from "./layaWiring.js";
 import type { Logger } from "../logging/logger.js";
 import { errorMessage } from "../util/errors.js";
 
@@ -29,11 +29,11 @@ import { errorMessage } from "../util/errors.js";
 export async function parseActionSemantics(
   world: World,
   action: Action,
-  wiring: LayaTurnWiring | undefined,
+  wiring: LayaWiring | undefined,
   logger: Logger,
 ): Promise<ActionSemantics | undefined> {
   if (wiring === undefined) return undefined;
-  const judge = createLayaSemanticJudge({ client: wiring.client }, wiring.config);
+  const judge = createLayaSemanticJudge({ client: wiring.client });
   try {
     const semantics = await judge.classify(world, action);
     logger.log({

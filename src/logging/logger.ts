@@ -26,7 +26,7 @@ function newId(prefix: string): string {
 }
 
 /** Modules whose log records are LLM calls (Worker B: src/llm/complete.ts). */
-const LLM_CALL_MODULES = new Set(["proposal", "selection", "consequence", "semantic"]);
+const LLM_CALL_MODULES = new Set(["intent", "consequence", "semantic"]);
 
 /** Rotation policy (F29): keep the live file plus this many rotated copies. */
 const LOG_ROTATIONS_KEPT = 3;

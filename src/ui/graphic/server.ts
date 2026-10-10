@@ -52,8 +52,6 @@ import { getCurrentActor } from "../../engine/worldStore.js";
 import { runTurn, type EngineDependencies } from "../../engine/turnOrchestrator.js";
 import { readTurnTimeBudgetMs, resolveConfig } from "../../config.js";
 import { Logger } from "../../logging/logger.js";
-import { MockProposalEngine } from "../../mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../mocks/mockSelectionEngine.js";
 import { MockConsequenceEngine } from "../../mocks/mockConsequenceEngine.js";
 import { MockIntentEngine } from "../../mocks/mockIntentEngine.js";
 import { createLlmEngines, resolveLlmEnv } from "../../llm/index.js";
@@ -156,8 +154,6 @@ function buildDeps(
     return {
       usingMock: true,
       deps: {
-        proposalEngine: new MockProposalEngine(logger),
-        selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
         intentEngine: new MockIntentEngine(logger),
         logger,
@@ -173,7 +169,17 @@ function buildDeps(
       cfg.backend === "ollama" ? cfg.ollama.model : cfg.backend === "laya-local" ? cfg.laya.model : cfg.joingonka.model;
     const simpleModel = cfg.simpleModel ??
       (cfg.simpleBackend === "ollama" ? cfg.ollama.model : cfg.simpleBackend === "laya-local" ? cfg.laya.model : cfg.joingonka.model);
-    return { usingMock: false, deps: { ...engines, logger, config }, llmLabel: `hard=${cfg.backend}/${hardModel} simple=${cfg.simpleBackend}/${simpleModel}` };
+    return {
+      usingMock: false,
+      deps: {
+        consequenceEngine: engines.consequenceEngine,
+        intentEngine: engines.intentEngine,
+        getEnginesForTurn: engines.getEnginesForTurn,
+        logger,
+        config,
+      },
+      llmLabel: `hard=${cfg.backend}/${hardModel} simple=${cfg.simpleBackend}/${simpleModel}`,
+    };
   } catch (err) {
     console.log(
       `LLM setup failed (${err instanceof Error ? err.message : String(err)}). Falling back to mock engines. Use --mock to silence this.`,
@@ -181,8 +187,6 @@ function buildDeps(
     return {
       usingMock: true,
       deps: {
-        proposalEngine: new MockProposalEngine(logger),
-        selectionEngine: new MockSelectionEngine(logger),
         consequenceEngine: new MockConsequenceEngine(logger),
         intentEngine: new MockIntentEngine(logger),
         logger,

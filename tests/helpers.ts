@@ -5,8 +5,7 @@ import type { HistoryEntry, ValidationError, World } from "../src/types.js";
 import { NOT_DONE_SENTINEL } from "../src/types.js";
 import { loadScenario } from "../src/engine/scenarioLoader.js";
 import { Logger } from "../src/logging/logger.js";
-import { MockProposalEngine } from "../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../src/mocks/mockConsequenceEngine.js";
 import type { EngineDependencies } from "../src/engine/turnOrchestrator.js";
 import { defaultConfig } from "../src/config.js";
@@ -25,8 +24,7 @@ export function makeTestDeps(
   overrides: Partial<EngineDependencies> = {},
 ): EngineDependencies {
   return {
-    proposalEngine: new MockProposalEngine(logger),
-    selectionEngine: new MockSelectionEngine(logger),
+    intentEngine: new MockIntentEngine(logger),
     consequenceEngine: new MockConsequenceEngine(logger),
     logger,
     config: { ...defaultConfig, autosaveEnabled: false },

@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runTurns } from "../../src/engine/turnOrchestrator.js";
 import { Logger } from "../../src/logging/logger.js";
-import { MockProposalEngine } from "../../src/mocks/mockProposalEngine.js";
-import { MockSelectionEngine } from "../../src/mocks/mockSelectionEngine.js";
+import { MockIntentEngine } from "../../src/mocks/mockIntentEngine.js";
 import { MockConsequenceEngine } from "../../src/mocks/mockConsequenceEngine.js";
 import { defaultConfig } from "../../src/config.js";
 import { loadOfficeScenario } from "../helpers.js";
@@ -13,35 +12,15 @@ describe("golden office scenario", () => {
   it("runs three turns deterministically with mocks", async () => {
     const logger = new Logger({ sessionId: "golden_office", writeToFile: false });
 
-    const proposalEngine = new MockProposalEngine(logger, {
-      "ana@tick1": {
-        suggestions: [
-          "Stay at the desk and continue working.",
-          "Say hello to Jeff from the desk.",
-          "Walk over to Jeff and welcome him.",
-          "Ask Jeff whether he needs help finding his desk.",
-        ],
-        reasoning: "Ana has noticed Jeff and her persona makes her inclined to greet him.",
-      },
-      "dan@tick2": {
-        suggestions: [
-          "Keep working.",
-          "Briefly acknowledge Jeff from the desk.",
-          "Tell everyone that he is busy.",
-          "Ignore the introduction.",
-        ],
-        reasoning: "Dan is stressed and focused on urgent work.",
-      },
-    });
-
-    const selectionEngine = new MockSelectionEngine(logger, {
+    // PLAN_V2 Phase 6: one intent call decides each NPC turn directly.
+    const intentEngine = new MockIntentEngine(logger, {
       "ana@tick1": {
         action: "Walk over to Jeff and welcome him.",
-        reasoning: "Ana chooses to greet the new coworker directly.",
+        quote: "",
       },
       "dan@tick2": {
         action: "Keep working and do not interrupt the design task.",
-        reasoning: "Dan prioritizes the urgent design draft over social interaction.",
+        quote: "",
       },
     });
 
@@ -74,8 +53,7 @@ describe("golden office scenario", () => {
     const final = await runTurns(
       world0,
       {
-        proposalEngine,
-        selectionEngine,
+        intentEngine,
         consequenceEngine,
         logger,
         config: { ...defaultConfig, autosaveEnabled: false },
@@ -130,17 +108,19 @@ describe("golden office scenario", () => {
     const events = logger.store.events();
     for (const expected of [
       "turn_started",
-      "proposal_started",
-      "proposal_completed",
+      // PLAN_V2: one intent call per NPC turn (user turns skip it),
+      // then parse → execute → narrate.
+      "intent_started",
+      "intent_completed",
       "useractionsubmitted",
-      "selection_started",
-      "selection_completed",
+      "action_chosen",
       "consequence_started",
       "consequence_completed",
       "render_accepted",
       "patch_applied",
       "history_appended",
       "turn_completed",
+      "turn_telemetry",
     ]) {
       expect(events, `missing log event ${expected}`).toContain(expected);
     }

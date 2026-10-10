@@ -14,19 +14,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 
-const TURN_LOOP_ENV = "TURN_LOOP";
-let savedTurnLoop: string | undefined;
-
-beforeEach(() => {
-  savedTurnLoop = process.env[TURN_LOOP_ENV];
-  process.env[TURN_LOOP_ENV] = "v2";
-});
-
-afterEach(() => {
-  if (savedTurnLoop === undefined) delete process.env[TURN_LOOP_ENV];
-  else process.env[TURN_LOOP_ENV] = savedTurnLoop;
-});
-
 const ALARM = "The fire alarm starts ringing.";
 const COURIER = "A courier arrives with a large box.";
 
