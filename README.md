@@ -4,49 +4,60 @@ Turn-based, open-ended life simulation. One scenario holds an environment,
 objects, and characters. You control one character; all others are autonomous
 NPCs. Each turn, one character performs an immediate, free-form action —
 speech, movement, object interaction, social or emotional behavior, or any
-combination. LLM engines interpret the text and update the world; a physical
-validator keeps movement coherent and every step is logged.
+combination. The turn loop is deliberately small: one LLM **intent** call
+(`{action, quote}`) → one local **Laya parse** of the action sentence →
+deterministic engine **execution** (movement, speech quotes, object
+manipulation — impossible things are clamped, never corrected) → one LLM
+**narrate** call over the executed facts. A deterministic **director**
+injects scenario incidents when the scene goes stale. Every step is logged.
 
-See [`plan.md`](plan.md) for the full engineering plan.
+See [`plan.md`](plan.md) for the original engineering plan,
+[`PLAN_V2.md`](PLAN_V2.md) for the simplified turn loop, and
+[`ACTION_ITEMS.md`](ACTION_ITEMS.md) for what's next.
 
-## Quick start (everything at once)
+## Running
 
 ```bash
 npm install
-npm start
+cp .env.example .env   # optimal defaults are active; no key needed for local runs
+npm run setup:ollama   # pull models + build tuned variants (npc-qwen3-14b, npc-stheno-8b)
+npm run setup:laya     # Laya decision-model weights (~808 MB) for the semantic parser
 ```
 
-`npm start` (`scripts/start.sh`) brings up the whole stack and runs the
-engine-backed graphic console in the foreground:
-
-1. ensures the Ollama server is up (`ollama serve`, started detached if needed),
-2. ensures `laya-serve` is up on `:8000` (started detached if installed —
-   skipped with a warning when `npm run setup:laya` was never run),
-3. serves the sibling `../npc-simulator-ui` gallery/preview on
-   `http://localhost:8124/`,
-4. runs the engine console on `http://localhost:8123/` with these defaults:
-
-```text
-scenarios/office-anton.json --provider ollama --model qwen3:14b --debug
-```
-
-Everything is overridable without editing files — flags are forwarded to
-`npm run start:graphic`, sidecars can be skipped, ports moved:
+**Text UI** (terminal — you play one character):
 
 ```bash
-npm start -- --help                                                # all options
-npm start -- --dry-run                                             # print what would run, start nothing
-npm start -- --model huihui_ai/llama3.2-abliterate:3b               # fast 3B model, same scenario
-npm start -- scenarios/office.json --provider joingonka            # different scenario/backend
-npm start -- --mock                                                # offline deterministic engines
-npm start -- --no-debug                                            # hide objective world + LLM traces
-npm start -- --port 8123 --ui-port 8124                           # move either web server
-npm start -- --engine-only                                         # skip ollama/laya/UI management
+npm run start:text                                        # office scenario, your .env backends
+npm run start:text -- --provider ollama                   # all-local Ollama
+npm run start:text -- --provider ollama --model npc-stheno-8b   # fast 8B, lively turns
+npm run start:text -- --mock                              # offline deterministic engines
 ```
 
-Already-running servers are reused, never duplicated; only processes this
-script started are torn down on Ctrl-C. Env equivalents: `ENGINE_PORT` /
-`UI_PORT` (= `--port` / `--ui-port`), `OLLAMA_HOST`, `LAYA_SERVE_URL`.
+**Graphic UI** (2.5D web console + scene preview):
+
+```bash
+npm start                                                 # everything: ollama + laya-serve +
+                                                          # engine console (:8123) + scene preview (:8124)
+npm start -- --model npc-qwen3-14b                        # same, 14B for richer prose
+npm start -- --mock                                       # no models needed at all
+npm start -- --dry-run                                    # print what would run, start nothing
+npm start -- --help                                       # all options (ports, --engine-only, --no-debug, …)
+```
+
+**Autonomous mode** (experiments — every character is an NPC, no prompts):
+
+```bash
+npm run start:auto -- --limit-turns 20 scenarios/office-anton.json
+npm run report:turns -- logs/<session>.jsonl              # generated findings table
+```
+
+`npm start` (`scripts/start.sh`) sources `.env` with auto-export, so an
+Ollama daemon it launches itself picks up the tuned `OLLAMA_*` server
+settings (`OLLAMA_KEEP_ALIVE=30m`, `OLLAMA_NUM_PARALLEL=1`,
+`OLLAMA_FLASH_ATTENTION=1`). A system-service Ollama (e.g. `ollama.service`)
+does **not** see them — for that, set them on the service itself. The
+simulator only ever reads `OLLAMA_MODEL` (which model to request) despite
+the prefix; everything else `OLLAMA_*` is daemon-side.
 
 ## Status
 
@@ -55,8 +66,10 @@ script started are torn down on Ctrl-C. Env equivalents: `ENGINE_PORT` /
   geometry/pathfinding/perception helpers, mock intelligence, save/load,
   JSONL logging, golden office scenario.
 - **Milestone 2 — Real LLMs:** done. Pluggable `LLMProvider`
-  (hosted JoinGonka gateway + local Laya model), real Proposal / Selection /
+  (hosted JoinGonka gateway + local Ollama + local Laya model), real Intent /
   Consequence engines with retry + fallback, `npm run diagnose:ai` checks.
+  Superseded by the PLAN_V2 turn loop below — the old
+  propose-then-pick decision stack was deleted in Phase 6.
 - **Milestone 3 — Text UI:** done. Playable terminal interface
   (`src/ui/text/textUi.ts` + `commands.ts`, tested in
   `tests/unit/textUi.test.ts`).
@@ -68,37 +81,154 @@ script started are torn down on Ctrl-C. Env equivalents: `ENGINE_PORT` /
 
 ## Experiment economics (read before a long run)
 
-Measured on a 16 GB VRAM machine (RTX 5070 Ti), local `qwen3:14b`
-(`LLM_THINK=0`), autonomous `--auto` office runs:
+Measured on a 16 GB VRAM machine (RTX 5070 Ti), all-local Ollama,
+autonomous `--auto` office runs, v2 turn loop (intent → Laya parse →
+execute/clamp → narrate):
 
-| Run | GPU offload | Mean turn | LLM calls/turn | Clean turns |
+| Run | Model | Mean turn | LLM calls/turn | Clean turns |
 |---|---|---|---|---|
-| exp-7 (2026-10-08) | 18% (laya-serve squatting on VRAM) | **6.1 min** | 7.8 | 1/12 |
-| exp-7 projected, 100% offload | 100% | ~2–3 min | 7.8 | 1/12 |
-| exp-7 fixes (this branch), 100% offload | 100% | **~1 min** (est.) | ~3 | — |
+| v1 baseline (Stage 3) | qwen3:14b | **~59 s** | ~3.6 | 1/12 |
+| v2 acceptance (2026-10-09) | qwen3:14b | **25.5 s** | 2.3 | 20/20 |
+| v2 tuned re-run | npc-qwen3-14b | 32.0 s | 2.4 | 19/20 |
+| v2 8B run | npc-stheno-8b | **~1.6 s** (telemetry; ~5 s wall) | 2.1 | 20/20 |
 
-The turn cost is ~100% LLM-bound and dominated by **consequence retries**
-(exp-7: 5.3 consequence terminals/turn; retry feedback does not steer the
-model — attempt 1 is the best attempt ~72% of the time). The single biggest
-levers, in order:
+Notes:
 
-1. **Full GPU offload.** `ollama ps` must show 100% GPU. A second model on
-   the card (exp-7: `laya-serve` holding 5.8 GB) drops a 14B model to
-   ~20% GPU and triples every call. `npm run diagnose:ai` now flags VRAM
-   squatters (`vram contention` check); serve scripts pass `--device`
-   explicitly when the binary supports it.
-2. **Few calls, not faster calls.** Outer consequence attempts are capped
-   at 2 (`EngineConfig.consequenceMaxAttempts`); deterministic in-loop
-   repairs (movement repair, stationary downgrade, prop stub) already run
-   on attempt 1, salvage handles the rest.
-3. **Iterate on the 3B abliterated model, reserve qwen3:14b for finals.**
-   Mechanics (movement, salvage, bans) are model-independent and
-   observable in seconds per turn on the small model; the 14B only changes
-   prose quality. A 20-turn 14B run still costs ~20–60 min of GPU time.
+- The turn cost is ~100% LLM-bound: ~2k-token prompt ingest + generation at
+  ~60 tok/s on the 14B. Two calls ≈ 25 s mean, so **any narrate retry blows
+  the 30 s turn budget** — p90 was 37–47 s on the 14B runs. The 8B runs
+  ~1.5 s/turn with ~3.5 s/turn of loop overhead (laya calls, saves) outside
+  turn telemetry.
+- **`LLM_THINK=0` is belt-and-braces, not the lever.** On current Ollama
+  builds qwen3 emits no `<think>` output for these prompts either way
+  (verified with `npm run probe:think`, 2026-10-09); the flag stays as
+  insurance. Do not spend runs re-testing it.
+- **The tuned variant (`npc-qwen3-14b`) measured as a no-op** when the stock
+  model already runs at 100% GPU — `num_gpu 999` has nothing to reclaim.
+  Keep it (idempotent, harmless), but expect nothing from it.
+- **Full GPU offload still matters.** `ollama ps` must show 100% GPU. A
+  second model on the card (exp-7: `laya-serve` holding 5.8 GB) drops a 14B
+  model to ~20% GPU and triples every call. `npm run diagnose:ai` flags
+  VRAM squatters; serve laya on CPU (`LAYA_DEVICE=cpu`).
+- **Iterate on the 8B, finalize on the 14B.** Mechanics are model-independent
+  and observable at ~2–5 s/turn on `npc-stheno-8b`; the 14B only changes
+  prose quality (and breaks genre less often — 0 breaks on 8B vs 4+ on 14B
+  across runs, though the 8B leaks grid coordinates into prose instead).
+  A 20-turn 14B run costs ~10 min of GPU time; the 8B costs ~2 min.
 
 `--auto` prints per-turn timing and a running ETA. Rule of thumb: if the
 first 3 turns average >3 min on a 14B local model, stop and run
 `npm run diagnose:ai` — something is offloading to CPU.
+
+The full experiment protocol (phase gates, what "clean" means, the
+acceptance checklist) lives in [`experiments/PROTOCOL.md`](experiments/PROTOCOL.md).
+Every run gets its findings table from `npm run report:turns` — never
+hand-computed.
+
+## Why the turn loop looks like this (PLAN_V2 retrospective)
+
+Future reference — read before redesigning anything. This records what
+failed, why each v2 decision was made, and where the Laya model is and
+isn't effective, so we don't re-learn it.
+
+### What didn't work (v1)
+
+The v1 turn was a decision stack built to make an unreliable narrator
+reliable: LLM proposes several action options → Laya cascade picks one →
+renderability screen → re-screen → salvage → fallback chains. Eleven
+rounds of prompt/retry/salvage hardening (PLAN.md) could not fix the
+underlying capability mismatch: **1/12 clean turns**. The staged shakedown
+then killed the cascade itself — Stage 3's cascade-vs-LLM comparison
+returned NO DECISION with a damning footnote: the cascade converted
+**0/10 turns** (it never ran; the test measured "LLM path + Laya latency
+tax"). Per-turn economics were fatal regardless: 3–4 LLM calls plus
+retries put a turn at ~60–90 s on the 14B with a 40% fallback rate.
+
+Lesson: the stack was scar tissue. When the fix for unreliability is more
+machinery around the unreliable part, delete the machinery instead.
+
+### Why v2 is shaped the way it is
+
+The binding constraint was set first: **a turn must complete in under 30
+seconds**. At ~60 tok/s on the 14B that buys roughly two LLM calls per
+turn, total. Everything else must be cheap (local) or free
+(deterministic). The whole design falls out of that budget:
+
+- **One intent call, not propose-then-pick.** The LLM does what it's good
+  at (scene understanding, fluent intent → `{action, quote}`) and nothing
+  else. No options list, no separate pick step.
+- **Laya as parser, not decider.** The batched judge question set
+  classifies the *action sentence* into structured facts. Laya never sees
+  the scene — only the sentence in front of it — which kills the Stage-3
+  miscalibration failure *by construction*. There is no scene-level
+  classification left to get wrong.
+- **The engine owns physics.** Movement (pathfinding), speech quotes
+  (verbatim), object manipulation (affordances) — the renderer
+  architecture proved this conclusively and v2 keeps it. Model-emitted
+  coordinates are stripped and ignored.
+- **Clamp, don't correct.** Impossible intents get one deterministic pass:
+  contact beyond reach → recorded, never teleported; unreachable
+  destination → closest reachable cell or stay; distant manipulation →
+  graceful fail. Attempted-vs-executed is recorded every turn and fed to
+  the narrator, so failure is narrated honestly. No correction loops,
+  ever — re-asking the model is how v1 burned its budget.
+- **Narrate executed facts.** The prompt is the fact list of what the
+  engine actually did — not the intended action. Invention surface is
+  small, so attempt-1 acceptance is high. One retry max, then
+  accept-and-mark honest: a flawed paragraph beats a dead turn, and the
+  `(not done)` sentinel family stays dead.
+- **The director has two halves — deliberately.** Free-will NPCs drift
+  into polite small talk (every run shows it). The style guide tells the
+  narrator *how to handle* drama; the deterministic staleness trigger is
+  the load-bearing half — exp-5 taught us that prompt-only direction
+  ("do NOT repeat yourself") is politely ignored by turn 30, while
+  deterministic rules are obeyed. After K stale turns the engine injects
+  the next scenario `directorEvents` incident as a plain world fact. The
+  LLM never decides *whether* drama happens; it only narrates it well.
+  Scenario authors write the incident list; without one the director is
+  off by design (and the scene will idle — that's authoring, not a bug).
+
+### When Laya is effective — and when it isn't
+
+**Effective:**
+- Batched semantic parse of a *single action sentence* (moves? speaks?
+  addressee? destination? contact?). 20/20 completions across every
+  measured run, milliseconds on CPU. This is the one job that survived.
+- The locomotion veto as a pure physics guard: it only ever vetoes a
+  planned move it's confident about, and it fails open.
+- Anything where Laya absorbs classification-shaped work so the small
+  model doesn't have to — this is what makes the 8B viable at all.
+
+**Not effective:**
+- Scene-level decisions (which option is best, what the actor should do).
+  Stage 3 proved 0/10 conversion; eleven hardening rounds proved the
+  miscalibration can't be prompt-engineered away. Never put Laya back in
+  a decider role — the failure mode is silent (it looks like it's working
+  while adding only latency).
+- Any path where the turn *blocks* on Laya. The parser is fail-open by
+  design: Laya down → deterministic text parsers, `parser_fallback`
+  event, turn completes. `parser_fallback` rate ≈ 0 is the health metric;
+  if it's not ≈ 0 you're measuring the wrong thing.
+
+**Operational:**
+- Serve laya on CPU (`LAYA_DEVICE=cpu`), never on VRAM. Exp-7's
+  laya-serve squatted 5.8 GB and starved qwen3:14b to 18% GPU offload,
+  tripling every call. `npm run diagnose:ai` flags VRAM contention.
+- `LAYA_MODE=off` disables Laya entirely (silent deterministic parsing).
+  Useful for isolating parser vs model issues, not for real runs.
+
+### Known validator blind spots (from live runs, 2026-10-09)
+
+The prose validator polices *physical* claims — invented movement,
+invented speech, wrong-subject narration. It is blind by construction to:
+**genre/character breaks** (an assassin-noir paragraph for a QA engineer
+passed validation — 4+ cases across runs; thin-fact turns plus "narrate
+vividly" is the systematic trigger), **setting contradictions**
+(cigarette in a daylight office), **social-logic errors** (introducing
+yourself to the wrong person), **coordinate leaks** (`(16, 2)` in prose —
+systematic on the 8B, 11/24 narratives), and **invented props** (a coffee
+cup never picked up). See [`ACTION_ITEMS.md`](ACTION_ITEMS.md) for the
+planned fixes.
 
 ## Setup
 
@@ -135,22 +265,23 @@ variants share the base weights, so they cost no extra disk.
 
 ### Local-model throughput (RTX 5070 Ti / 16 GB VRAM)
 
-Exp-6 ran ~6 min/turn on `qwen3:14b` (26× slower than the 8B runs). The
-levers, in order of impact:
+The levers, in order of impact (re-measured for the v2 loop, 2026-10-09):
 
-1. **`LLM_THINK=0`** — disables chain-of-thought on thinking models
-   (Ollama honors `think: false`). Exp-6 burned a median 772 completion
-   tokens per call for ~100-token JSON payloads; reasoning is pure
-   overhead for schema-emitting calls. Biggest single win (~3–5×).
-   Active by default in `.env.example`.
-2. **Full GPU offload** — `OLLAMA_MODEL=npc-qwen3-14b` (the tuned
-   variant), or verify the stock model with `ollama ps` (PROCESSOR must
-   read `100% GPU`). Exp-6 sat at ~50% offload with llama-server at
-   ~355% CPU. Unload competing models first (`ollama stop <model>`).
-3. **Right-sized context** — engine prompts measure ~2k real tokens
+1. **Few calls, not faster calls.** The v2 turn is exactly 2 LLM calls
+   (intent + narrate) + 1 local Laya parse by design — down from 3–4 plus
+   retries in v1. At ~60 tok/s on the 14B, two calls ≈ 25 s mean, so any
+   narrate retry blows the 30 s turn budget. Attempt-1 quality is the
+   whole game.
+2. **Full GPU offload** — `ollama ps` must show 100% GPU for the active
+   model. A VRAM squatter (exp-7: `laya-serve` holding 5.8 GB) drops a 14B
+   model to ~20% GPU and triples every call. Serve laya on CPU.
+3. **`LLM_THINK=0`** — belt-and-braces: on current Ollama builds qwen3
+   emits no `<think>` for these prompts either way (verified
+   2026-10-09). Kept as insurance; not the lever it was in exp-6.
+4. **Right-sized context** — engine prompts measure ~2k real tokens
    (Ollama tokenizer), so `num_ctx 4096` (the default) is already
    correct; larger only burns VRAM on KV cache.
-4. **Model-aware timeouts** — `npm run diagnose:ai:live` times the
+5. **Model-aware timeouts** — `npm run diagnose:ai:live` times the
    configured model, records the median to
    `~/.cache/npc-simulator/llm-latency.json`, and the engine derives the
    default `LLM_TIMEOUT_MS` from it (4× median, 60 s…600 s). An explicit
