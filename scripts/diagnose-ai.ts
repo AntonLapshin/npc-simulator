@@ -267,7 +267,7 @@ async function main(): Promise<void> {
         `"${hardModel}" is a thinking model and LLM_THINK is not 0 — every call pays ` +
           `hundreds of <think> tokens against max_tokens (exp-6: a flat 1500 budget truncated JSON). ` +
           `Set LLM_THINK=0 to disable chain-of-thought (Ollama honors think:false), or raise ` +
-          `LLM_MAX_TOKENS_CONSEQUENCE / LLM_MAX_TOKENS_PROPOSAL`,
+          `LLM_MAX_TOKENS_CONSEQUENCE / LLM_MAX_TOKENS_INTENT`,
       );
     } else if (isThinkingModel(hardModel) && thinkOff) {
       pass("thinking overhead", `LLM_THINK=0 — chain-of-thought disabled for "${hardModel}"`);

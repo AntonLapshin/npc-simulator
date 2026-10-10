@@ -44,7 +44,8 @@ export LAYA_PRELOAD="${LAYA_PRELOAD:-1}"
 # the operator how to verify (nvidia-smi must NOT list the server's python
 # process when LAYA_DEVICE=cpu).
 SERVE_ARGS=()
-if "$SERVE_BIN" --help 2>/dev/null | grep -q -- "--device"; then
+# timeout guards the probe: a hanging --help must never block startup.
+if timeout 10 "$SERVE_BIN" --help 2>/dev/null | grep -q -- "--device"; then
   SERVE_ARGS+=(--device "$LAYA_DEVICE")
 else
   echo "warning: laya-serve shows no --device flag - relying on LAYA_DEVICE=$LAYA_DEVICE env var." >&2
